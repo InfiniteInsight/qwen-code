@@ -15,6 +15,7 @@ import {
 } from '../agents/agentRegistry.js';
 import type { AgentLifecycle } from '../agents/agentLifecycle.js';
 import { PromptQueue } from './promptQueue.js';
+import { DEFAULT_PROMPT_TIMEOUT_MS } from './promptTimeout.js';
 
 const AGENT_STATUSES: readonly AgentStatus[] = [
   'running',
@@ -47,19 +48,21 @@ export interface AgentRoutesDeps {
    * isolation; defaults to a module-level shared queue in production.
    */
   promptQueue?: PromptQueue;
+  /** Per-turn timeout in ms (defaults to DEFAULT_PROMPT_TIMEOUT_MS). */
+  promptTimeoutMs?: number;
 }
 
 /** Fallback queue when a route set is wired without an explicit promptQueue. */
 const defaultPromptQueue = new PromptQueue();
 
-/** ms to wait for the per-session prompt slot before giving up (generous —
+/** ms to wait for the per-session prompt slot before giving up (generous --
  * agent turns are long-lived; this only guards against a stuck prior turn). */
 const PROMPT_QUEUE_WAIT_MS = 10 * 60 * 1000;
 
 /**
  * Send a prompt through the per-session FIFO slot so concurrent spawn/steer
  * calls against the same agent session never reach daemon.prompt() at once
- * (design: "steer prompts serialized" — a rapid second message, or a steer
+ * (design: "steer prompts serialized" -- a rapid second message, or a steer
  * racing the spawn's own initial prompt, must queue behind the in-flight
  * turn rather than interleave).
  */
@@ -69,6 +72,7 @@ function sendSerializedPrompt(
   text: string,
 ): Promise<unknown> {
   const queue = deps.promptQueue ?? defaultPromptQueue;
+  const turnTimeoutMs = deps.promptTimeoutMs ?? DEFAULT_PROMPT_TIMEOUT_MS;
   return (async () => {
     const release = await queue.acquire(sessionId, PROMPT_QUEUE_WAIT_MS);
     try {
@@ -77,7 +81,7 @@ function sendSerializedPrompt(
         {
           prompt: [{ type: 'text', text }],
         },
-        AbortSignal.timeout(PROMPT_QUEUE_WAIT_MS),
+        AbortSignal.timeout(turnTimeoutMs),
       );
     } finally {
       release();
@@ -138,63 +142,74 @@ export function createSpawnAgentRoute(deps: AgentRoutesDeps): RequestHandler {
       return;
     }
 
-    // Saga leg 2: register.
-    const record = await deps.registry.register({
-      sessionId,
-      parentSessionId,
-      agentType,
-      task,
-      spawnedByTokenId: req.rcClient?.id ?? '',
-      ...(req.rcClient?.subActor !== undefined
-        ? { subActor: req.rcClient.subActor }
-        : {}),
-    });
+    try {
+      // Saga leg 2: register.
+      const record = await deps.registry.register({
+        sessionId,
+        parentSessionId,
+        agentType,
+        task,
+        spawnedByTokenId: req.rcClient?.id ?? '',
+        ...(req.rcClient?.subActor !== undefined
+          ? { subActor: req.rcClient.subActor }
+          : {}),
+      });
 
-    // Saga leg 3: send the task prompt. Race an early rejection against the
-    // accept window; survival (or early resolution) accepts the spawn.
-    const promptPromise = sendSerializedPrompt(deps, sessionId, task);
-    let acceptTimer: ReturnType<typeof setTimeout> | undefined;
-    const outcome = await Promise.race([
-      promptPromise.then(
-        () => 'settled' as const,
-        () => 'send_failed' as const,
-      ),
-      new Promise<'accepted'>((resolve) => {
-        acceptTimer = setTimeout(() => resolve('accepted'), acceptMs);
-        acceptTimer.unref?.();
-      }),
-    ]);
-    clearTimeout(acceptTimer);
+      // Saga leg 3: send the task prompt. Race an early rejection against the
+      // accept window; survival (or early resolution) accepts the spawn.
+      const promptPromise = sendSerializedPrompt(deps, sessionId, task);
+      let acceptTimer: ReturnType<typeof setTimeout> | undefined;
+      const outcome = await Promise.race([
+        promptPromise.then(
+          () => 'settled' as const,
+          () => 'send_failed' as const,
+        ),
+        new Promise<'accepted'>((resolve) => {
+          acceptTimer = setTimeout(() => resolve('accepted'), acceptMs);
+          acceptTimer.unref?.();
+        }),
+      ]);
+      clearTimeout(acceptTimer);
 
-    if (outcome === 'send_failed') {
-      // Rollback: no zombie sessions, no half-spawned agents.
-      try {
-        await deps.daemon.closeSession(sessionId);
-      } catch {
-        // Best-effort — the daemon may already have dropped the session.
+      if (outcome === 'send_failed') {
+        // Rollback: no zombie sessions, no half-spawned agents.
+        try {
+          await deps.daemon.closeSession(sessionId);
+        } catch {
+          // Best-effort - the daemon may already have dropped the session.
+        }
+        await deps.registry.setStatus(record.agentId, 'failed');
+        res
+          .status(502)
+          .json({ error: 'Prompt send failed', code: 'prompt_send_failed' });
+        return;
       }
-      await deps.registry.setStatus(record.agentId, 'failed');
-      res
-        .status(502)
-        .json({ error: 'Prompt send failed', code: 'prompt_send_failed' });
-      return;
+
+      // Spawned. The prompt's eventual settlement drives completed/failed.
+      // (If it already resolved - 'settled' - these handlers fire immediately.)
+      void deps.lifecycle.watchPrompt(record.agentId, promptPromise);
+
+      deps.lifecycle.emit('agent_spawned', deps.registry.get(record.agentId)!);
+      void deps.audit?.record({
+        action: 'agent_spawned',
+        actorTokenId: req.rcClient?.id,
+        subActor: req.rcClient?.subActor,
+        target: record.agentId,
+        // NEVER the task text - ids and metadata only.
+        detail: { sessionId, agentType, parentSessionId },
+      });
+
+      res.status(201).json({ agentId: record.agentId, sessionId });
+    } catch (err) {
+      await deps.daemon.closeSession(sessionId).catch(() => {});
+      if (!res.headersSent) {
+        res.status(502).json({
+          error: 'Agent spawn failed',
+          code: 'agent_spawn_failed',
+          detail: (err as Error).message,
+        });
+      }
     }
-
-    // Spawned. The prompt's eventual settlement drives completed/failed.
-    // (If it already resolved — 'settled' — these handlers fire immediately.)
-    void deps.lifecycle.watchPrompt(record.agentId, promptPromise);
-
-    deps.lifecycle.emit('agent_spawned', deps.registry.get(record.agentId)!);
-    void deps.audit?.record({
-      action: 'agent_spawned',
-      actorTokenId: req.rcClient?.id,
-      subActor: req.rcClient?.subActor,
-      target: record.agentId,
-      // NEVER the task text — ids and metadata only.
-      detail: { sessionId, agentType, parentSessionId },
-    });
-
-    res.status(201).json({ agentId: record.agentId, sessionId });
   };
 }
 

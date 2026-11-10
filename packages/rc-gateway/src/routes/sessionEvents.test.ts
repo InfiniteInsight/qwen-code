@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import express from 'express';
 import type { Response } from 'express';
 import type { Server } from 'node:http';
@@ -14,6 +14,7 @@ import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
 import { UnknownSessionError, type RecoveryState } from '../daemonPool.js';
 import {
   createSessionEventsRoute,
+  firstFrameOrIdle,
   gatewayCursorForDaemonCursor,
   HubWatcher,
   withGatewayResumeCursor,
@@ -2107,5 +2108,51 @@ describe('session-events watcher backpressure (#251)', () => {
     socket.release(10);
 
     expect(socket.written.length).toBe(before);
+  });
+});
+
+describe('firstFrameOrIdle timer cleanup (#487)', () => {
+  it('clears the idle setTimeout immediately when each frame resolves during catch-up', async () => {
+    const clearSpy = vi.spyOn(globalThis, 'clearTimeout');
+    try {
+      for (let i = 1; i <= 5; i++) {
+        const res = await firstFrameOrIdle(
+          Promise.resolve({ value: i, done: false }),
+          60_000,
+        );
+        expect(res).toEqual({ first: { value: i, done: false } });
+      }
+      expect(clearSpy).toHaveBeenCalledTimes(5);
+    } finally {
+      clearSpy.mockRestore();
+    }
+  });
+
+  it('clears the idle timer for every replayed catch-up frame in SessionEventsHub', async () => {
+    const CATCHUP_SID = '48700000000000000000000000000487';
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-487-wal-'));
+    stub = await startStubDaemon({
+      frames: [
+        { id: 1, type: 'session_update', data: { text: 'a' } },
+        { id: 2, type: 'session_update', data: { text: 'b' } },
+        { id: 3, type: 'session_update', data: { text: 'c' } },
+        { type: 'replay_complete', data: {} },
+      ],
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const url = await mountGateway(daemon, undefined, walDir, 5_000);
+    const clearSpy = vi.spyOn(globalThis, 'clearTimeout');
+    try {
+      const res = await fetch(`${url}/session/${CATCHUP_SID}/events`, {
+        headers: { 'Last-Event-ID': '0' },
+      });
+      expect(res.status).toBe(200);
+      const frames = await readFrames(res);
+      expect(frames.filter((f) => f.id !== undefined)).toHaveLength(3);
+      // 1 initial attach + 3 catch-up frames (through replay_complete) all clear their timers.
+      expect(clearSpy.mock.calls.length).toBeGreaterThanOrEqual(4);
+    } finally {
+      clearSpy.mockRestore();
+    }
   });
 });

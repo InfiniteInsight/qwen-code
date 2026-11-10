@@ -1130,9 +1130,11 @@ export class DefaultDaemonUnavailableError extends Error {
  * the pool is at `maxDaemons` and every entry is busy (no idle victim to
  * evict). Routes map this to a `503 workspace_pool_full`. */
 export class WorkspacePoolFullError extends Error {
+  readonly activeWorkspaces: number;
   constructor(readonly maxDaemons: number) {
     super(`Workspace daemon pool is full (max ${maxDaemons})`);
     this.name = 'WorkspacePoolFullError';
+    this.activeWorkspaces = maxDaemons;
   }
 }
 

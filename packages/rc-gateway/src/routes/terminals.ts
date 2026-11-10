@@ -5,10 +5,15 @@
  */
 
 import type { RequestHandler } from 'express';
-import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
+import {
+  UnknownSessionError,
+  WorkspacePoolFullError,
+  type SessionDaemon,
+} from '../daemonPool.js';
 import { isSessionLevelGone } from '../daemonHttpError.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { isSessionMirrored } from '../hostMirrors.js';
+import { isValidSessionId } from '../sessions/chatsPath.js';
 import {
   planTerminalCommand,
   type TerminalPlanOptions,
@@ -75,13 +80,12 @@ export function createTerminalOpenRoute(
 ): RequestHandler {
   return async (req, res) => {
     const body = (req.body ?? {}) as { sessionId?: unknown };
-    const sessionId =
-      typeof body.sessionId === 'string' && body.sessionId.length > 0
-        ? body.sessionId
-        : undefined;
-    if (!sessionId) {
+    const rawSessionId =
+      typeof body.sessionId === 'string' ? body.sessionId.trim() : '';
+    const sessionId = rawSessionId.length > 0 ? rawSessionId : undefined;
+    if (!sessionId || !isValidSessionId(sessionId)) {
       res.status(400).json({
-        error: 'sessionId is required',
+        error: !sessionId ? 'sessionId is required' : 'Invalid sessionId',
         code: 'invalid_request',
       });
       return;
@@ -105,6 +109,14 @@ export function createTerminalOpenRoute(
         await daemon.sessionStatus(sessionId);
       }
     } catch (err) {
+      if (err instanceof WorkspacePoolFullError) {
+        res.status(503).json({
+          error: err.message,
+          code: 'workspace_pool_full',
+          activeWorkspaces: err.activeWorkspaces,
+        });
+        return;
+      }
       if (err instanceof UnknownSessionError || isSessionLevelGone(err)) {
         needsResume = true;
       } else {
@@ -125,6 +137,14 @@ export function createTerminalOpenRoute(
         await daemon.resumeSession(sessionId, { workspaceCwd: knownCwd });
         endpoint = daemon.daemonEndpointForSession(sessionId);
       } catch (err) {
+        if (err instanceof WorkspacePoolFullError) {
+          res.status(503).json({
+            error: err.message,
+            code: 'workspace_pool_full',
+            activeWorkspaces: err.activeWorkspaces,
+          });
+          return;
+        }
         if (err instanceof UnknownSessionError || isSessionLevelGone(err)) {
           res.status(404).json({ error: 'Unknown session', code: 'not_found' });
           return;

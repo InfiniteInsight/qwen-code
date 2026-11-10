@@ -847,14 +847,20 @@ export class AcpHttpTransport implements DaemonTransport {
         // reason -- mirroring `ensureSessionReplyPump` -- so a caller can tell an
         // auth failure from a generic close instead of a one-size-fits-all msg.
         if (!this._disposed && !abort.signal.aborted) {
+          this._initialized = false;
+          this.initPromise = undefined;
+          this.connectionId = undefined;
           const reason =
-            streamError instanceof Error
+            streamError instanceof DaemonTransportClosedError
               ? streamError
-              : streamError !== undefined
-                ? new DaemonTransportClosedError(String(streamError))
-                : new DaemonTransportClosedError(
-                    'ACP connection SSE stream closed unexpectedly',
-                  );
+              : new DaemonTransportClosedError(
+                  streamError instanceof Error
+                    ? streamError.message
+                    : String(
+                        streamError ??
+                          'ACP connection SSE stream closed unexpectedly',
+                      ),
+                );
           for (const [id, entry] of this.pending) {
             if (entry.sessionId !== undefined) continue;
             entry.reject(reason);
@@ -1021,11 +1027,22 @@ export class AcpHttpTransport implements DaemonTransport {
     // Merge caller headers (from init.headers) with transport headers.
     const headers = mergeHeaders(transportHeaders, callerHeaders);
 
-    await this._fetch(`${this.baseUrl}/acp`, {
+    const res = await this._fetch(`${this.baseUrl}/acp`, {
       method: 'POST',
       headers,
       body: JSON.stringify(notification),
     });
+    if (!res.ok && res.status === 404) {
+      const text = await res.text().catch(() => '');
+      if (this.connectionId !== undefined || /acp-connection-id/i.test(text)) {
+        this._initialized = false;
+        this.initPromise = undefined;
+        this.connectionId = undefined;
+        throw new DaemonTransportClosedError(
+          `HTTP 404: ${text || 'ACP connection closed'}`,
+        );
+      }
+    }
   }
 
   /**
@@ -1111,6 +1128,17 @@ export class AcpHttpTransport implements DaemonTransport {
       this.pending.delete(req.id);
       // POST itself failed — return a synthetic error response.
       const text = await res.text().catch(() => '');
+      if (
+        res.status === 404 &&
+        (this.connectionId !== undefined || /acp-connection-id/i.test(text))
+      ) {
+        this._initialized = false;
+        this.initPromise = undefined;
+        this.connectionId = undefined;
+        throw new DaemonTransportClosedError(
+          `HTTP 404: ${text || 'ACP connection closed'}`,
+        );
+      }
       return {
         jsonrpc: '2.0',
         id: req.id,

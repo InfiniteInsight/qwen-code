@@ -3486,22 +3486,26 @@ export function createDaemonSessionActions({
           if (restored?.clientId) {
             persistStableClientId(restored.clientId, restored.sessionId);
           }
-          void startSessionSwitch(result.sessionId, 'load').catch(
-            (switchError: unknown) => {
-              if (restored?.clientId) {
-                void session.client
-                  .detachSession(restored.sessionId, restored.clientId)
-                  .catch(() => undefined);
-              }
-              if (isAbortError(switchError)) return;
-              dispatchActionError(
-                addNotice,
-                'Branch session failed',
-                switchError,
-                'branch_session',
-              );
-            },
-          );
+          void startSessionSwitch(
+            result.sessionId,
+            'load',
+            restored?.workspaceCwd
+              ? { workspaceCwd: restored.workspaceCwd }
+              : undefined,
+          ).catch((switchError: unknown) => {
+            if (restored?.clientId) {
+              void session.client
+                .detachSession(restored.sessionId, restored.clientId)
+                .catch(() => undefined);
+            }
+            if (isAbortError(switchError)) return;
+            dispatchActionError(
+              addNotice,
+              'Branch session failed',
+              switchError,
+              'branch_session',
+            );
+          });
         } else if (restored?.clientId) {
           void session.client
             .detachSession(restored.sessionId, restored.clientId)

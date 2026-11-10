@@ -5556,15 +5556,19 @@ export function registerSessionRoutes(
             });
             return;
           }
-          res
-            .status(200)
-            .json(
-              await runtime.bridge.cancelSessionTask(
-                rootSessionId,
-                resolved.taskId,
-                'agent',
-              ),
+          const result = await runtime.bridge.cancelSessionTask(
+            rootSessionId,
+            resolved.taskId,
+            'agent',
+          );
+          if (result.cancelled) {
+            virtualSubagentSessions.updateTargetStatus?.(
+              runtime,
+              resolved.sessionId,
+              'cancelled',
             );
+          }
+          res.status(200).json(result);
         });
       } catch (err) {
         sendBridgeError(res, err, { route, sessionId });

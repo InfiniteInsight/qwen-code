@@ -119,18 +119,26 @@ type FirstFrame<T> =
  * and REJECTS (rethrows) on a real connection error, so the caller still sends
  * a pre-header `502` when the daemon is genuinely unreachable.
  */
-function firstFrameOrIdle<T>(
+export function firstFrameOrIdle<T>(
   next: Promise<IteratorResult<T>>,
   idleMs: number,
 ): Promise<FirstFrame<T>> {
   const idle = Symbol('idle');
+  let timer: ReturnType<typeof setTimeout> | undefined;
   return Promise.race([
     next.then((first): FirstFrame<T> => ({ first })),
-    new Promise<never>((_, reject) => setTimeout(() => reject(idle), idleMs)),
-  ]).catch((e): FirstFrame<T> => {
-    if (e === idle) return { pending: next };
-    throw e;
-  });
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(idle), idleMs);
+      timer.unref?.();
+    }),
+  ])
+    .catch((e): FirstFrame<T> => {
+      if (e === idle) return { pending: next };
+      throw e;
+    })
+    .finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+    });
 }
 
 /**

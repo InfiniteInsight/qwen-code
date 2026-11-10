@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -17,6 +17,7 @@ import { AgentRegistry } from '../agents/agentRegistry.js';
 import { AgentLifecycle } from '../agents/agentLifecycle.js';
 import { OwnerEventBus, type OwnerEvent } from '../ownerEvents.js';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
+import { DEFAULT_PROMPT_TIMEOUT_MS } from './promptTimeout.js';
 import {
   createSpawnAgentRoute,
   createListAgentsRoute,
@@ -155,6 +156,45 @@ describe('POST /rc/agents (spawn saga)', () => {
       body: JSON.stringify({}),
     });
     expect(res.status).toBe(400);
+  });
+
+  it('closes session and returns 502 agent_spawn_failed when registry.register throws (#492)', async () => {
+    const { url, registry } = await setup();
+    const spy = vi
+      .spyOn(registry, 'register')
+      .mockRejectedValueOnce(new Error('disk full'));
+    try {
+      const res = await fetch(`${url}/rc/agents`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task: 'run task' }),
+      });
+      expect(res.status).toBe(502);
+      expect(await res.json()).toEqual({
+        error: 'Agent spawn failed',
+        code: 'agent_spawn_failed',
+        detail: 'disk full',
+      });
+      expect(stub!.lastEndedSessionId).toBe('stub-agent-1');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('passes promptTimeoutMs (defaulting to DEFAULT_PROMPT_TIMEOUT_MS, not 10 min) to AbortSignal.timeout (#492)', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    try {
+      const { url } = await setup({ promptDelayMs: 100 });
+      const res = await fetch(`${url}/rc/agents`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task: 'check timeout' }),
+      });
+      expect(res.status).toBe(201);
+      expect(timeoutSpy).toHaveBeenCalledWith(DEFAULT_PROMPT_TIMEOUT_MS);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
   });
 });
 

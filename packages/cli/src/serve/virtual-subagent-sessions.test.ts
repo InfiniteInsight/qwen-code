@@ -9,10 +9,13 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  AgentEventEmitter,
+  AgentEventType,
   getSubagentSessionDir,
   Storage,
   type ChatRecord,
 } from '@qwen-code/qwen-code-core';
+import { attachJsonlTranscriptWriter } from '@qwen-code/qwen-code-core/agents/agent-transcript.js';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import type { WorkspaceRuntime } from './workspace-registry.js';
 import {
@@ -861,6 +864,14 @@ describe('VirtualSubagentSessions', () => {
     expect(JSON.stringify(finalUpdate?.value)).toContain(
       'final canonical output',
     );
+    const turnComplete = await iterator.next();
+    expect(turnComplete.value).toMatchObject({
+      type: 'turn_complete',
+      data: {
+        sessionId: resolved!.sessionId,
+        stopReason: 'end_turn',
+      },
+    });
 
     await fs.appendFile(
       `${outputFile}.stream`,
@@ -1662,4 +1673,284 @@ it('flushes new canonical transcript records to active subscribers when a comple
 
   expect(JSON.stringify(userUpdate.value)).toContain('turn 2 follow-up');
   expect(JSON.stringify(assistantUpdate.value)).toContain('turn 2 fast reply');
+});
+
+it('streams live chunks on follow-up resident turns when START rotates streamRunId and truncates .stream', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-resident-stream-'));
+  tempDirs.push(dir);
+  const outputFile = path.join(dir, 'agent-resident.jsonl');
+  const emitter = new AgentEventEmitter();
+  const { cleanup } = attachJsonlTranscriptWriter(emitter, outputFile, {
+    agentId: 'agent-resident',
+    sessionId: 'parent-session',
+    cwd: '/workspace',
+    version: '1.0.0',
+    initialUserPrompt: 'turn 1 prompt',
+  });
+
+  let taskStatus: 'running' | 'completed' = 'running';
+  const runtime = {
+    workspaceId: 'workspace-resident',
+    workspaceCwd: '/workspace',
+    sessionRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+    env: { mode: 'parent-process', overlayKeys: [] },
+    bridge: {
+      getSessionTasksStatus: async () => ({
+        v: 1 as const,
+        sessionId: 'parent-session',
+        now: Date.now(),
+        tasks: [
+          {
+            kind: 'agent' as const,
+            id: 'agent-resident',
+            label: 'resident agent',
+            description: 'resident agent',
+            status: taskStatus,
+            startTime: 1_000,
+            runtimeMs: 100,
+            outputFile,
+            isBackgrounded: true,
+            toolUseId: 'call-resident',
+          },
+        ],
+      }),
+    },
+  } as unknown as WorkspaceRuntime;
+
+  try {
+    const sessions = new VirtualSubagentSessions();
+    const resolved = await sessions.resolve(
+      runtime,
+      'parent-session',
+      'call-resident',
+    );
+    const loaded = await sessions.load(runtime, resolved!.sessionId);
+    const abort = new AbortController();
+    const stream = await sessions.subscribe(runtime, resolved!.sessionId, {
+      signal: abort.signal,
+      lastEventId: loaded!.lastEventId,
+    });
+    const iterator = stream![Symbol.asyncIterator]();
+    expect((await iterator.next()).value?.type).toBe('replay_complete');
+
+    // Turn 1 starts at round 0
+    emitter.emit(AgentEventType.START, {
+      subagentId: 'agent-resident',
+      name: 'general-purpose',
+      model: 'test-model',
+      tools: ['*'],
+      timestamp: 10,
+    });
+    emitter.emit(AgentEventType.STREAM_TEXT, {
+      subagentId: 'agent-resident',
+      round: 0,
+      text: `turn 1 streaming ${'a'.repeat(64 * 1024)}`,
+      thought: false,
+      timestamp: 11,
+    });
+    await activeTarget(sessions).refreshLive();
+    const turn1Streamed = await iterator.next();
+    expect(JSON.stringify(turn1Streamed.value)).toContain('turn 1 streaming');
+
+    emitter.emit(AgentEventType.ROUND_TEXT, {
+      subagentId: 'agent-resident',
+      round: 0,
+      text: `turn 1 streaming ${'a'.repeat(64 * 1024)}`,
+      thoughtText: '',
+      timestamp: 12,
+    });
+    emitter.emit(AgentEventType.FINISH, {
+      subagentId: 'agent-resident',
+      terminateReason: 'GOAL' as never,
+      timestamp: 13,
+      rounds: 1,
+      totalDurationMs: 10,
+      totalToolCalls: 0,
+      successfulToolCalls: 0,
+      failedToolCalls: 0,
+      inputTokens: 10,
+      outputTokens: 10,
+      totalTokens: 20,
+    });
+    taskStatus = 'completed';
+    await sessions.resolve(runtime, 'parent-session', 'call-resident');
+    const turn1Complete = await iterator.next();
+    expect(turn1Complete.value).toMatchObject({ type: 'turn_complete' });
+
+    // Resident continuation (Turn 2) starts at round 0 again
+    taskStatus = 'running';
+    await sessions.resolve(runtime, 'parent-session', 'call-resident');
+    emitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
+      subagentId: 'agent-resident',
+      kind: 'message',
+      text: 'turn 2 prompt',
+      timestamp: 20,
+    });
+    emitter.emit(AgentEventType.START, {
+      subagentId: 'agent-resident',
+      name: 'general-purpose',
+      model: 'test-model',
+      tools: ['*'],
+      timestamp: 21,
+    });
+    emitter.emit(AgentEventType.STREAM_TEXT, {
+      subagentId: 'agent-resident',
+      round: 0,
+      text: `turn 2 live delta ${'b'.repeat(64 * 1024)}`,
+      thought: false,
+      timestamp: 22,
+    });
+    await activeTarget(sessions).refreshLive();
+
+    const turn2User = await iterator.next();
+    const turn2Streamed = await iterator.next();
+    expect(JSON.stringify(turn2User.value)).toContain('turn 2 prompt');
+    expect(JSON.stringify(turn2Streamed.value)).toContain('turn 2 live delta');
+
+    abort.abort();
+    await iterator.return?.();
+  } finally {
+    cleanup();
+  }
+});
+
+it('refreshes cached target status on getTarget, emits terminal events on updateTargetStatus, and stops pollTimer when .meta.json completes', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-subagent-status-'));
+  tempDirs.push(dir);
+  const outputFile = path.join(dir, 'agent-status.jsonl');
+  const metaPath = path.join(dir, 'agent-status.meta.json');
+  await fs.writeFile(
+    outputFile,
+    `${JSON.stringify(record('u1', null, 'user', 'run task'))}\n`,
+  );
+  await fs.writeFile(
+    metaPath,
+    JSON.stringify({
+      agentId: 'agent-status',
+      agentType: 'general-purpose',
+      description: 'status test',
+      parentSessionId: 'parent-session',
+      parentAgentId: null,
+      createdAt: new Date(1_000).toISOString(),
+      status: 'running',
+    }),
+  );
+
+  let liveStatus: 'running' | 'completed' | 'failed' | 'cancelled' = 'running';
+  const runtime = {
+    workspaceId: 'workspace-status-496',
+    workspaceCwd: '/workspace',
+    sessionRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+    env: { mode: 'parent-process', overlayKeys: [] },
+    bridge: {
+      getSessionTasksStatus: async () => ({
+        v: 1 as const,
+        sessionId: 'parent-session',
+        now: Date.now(),
+        tasks: [
+          {
+            kind: 'agent' as const,
+            id: 'agent-status',
+            label: 'status test',
+            description: 'status test',
+            status: liveStatus,
+            startTime: 1_000,
+            runtimeMs: 100,
+            outputFile,
+            isBackgrounded: true,
+            toolUseId: 'call-status',
+          },
+        ],
+      }),
+    },
+  } as unknown as WorkspaceRuntime;
+
+  const sessions = new VirtualSubagentSessions();
+  const sessionId = createVirtualSubagentSessionId(
+    'parent-session',
+    'agent-status',
+  );
+
+  // 1. Initial load caches target as running
+  const firstLoad = await sessions.load(runtime, sessionId);
+  expect(firstLoad?.hasActivePrompt).toBe(true);
+
+  // 2. Without calling resolve(), liveStatus transitions to completed; load() via getTarget() refreshes status
+  liveStatus = 'completed';
+  const secondLoad = await sessions.load(runtime, sessionId);
+  expect(secondLoad?.hasActivePrompt).toBe(false);
+
+  // 3. Subscribe while running and verify pollTimer transitions status automatically when .meta.json completes
+  liveStatus = 'running';
+  await sessions.resolve(runtime, 'parent-session', 'call-status');
+  const abort = new AbortController();
+  const stream = await sessions.subscribe(runtime, sessionId, {
+    signal: abort.signal,
+    lastEventId: secondLoad!.lastEventId,
+  });
+  const iterator = stream![Symbol.asyncIterator]();
+  expect((await iterator.next()).value?.type).toBe('replay_complete');
+
+  await fs.writeFile(
+    metaPath,
+    JSON.stringify({
+      agentId: 'agent-status',
+      agentType: 'general-purpose',
+      description: 'status test',
+      parentSessionId: 'parent-session',
+      parentAgentId: null,
+      createdAt: new Date(1_000).toISOString(),
+      status: 'completed',
+    }),
+  );
+  // Wait for 250ms pollTimer to detect .meta.json completion and emit turn_complete
+  const autoComplete = await iterator.next();
+  expect(autoComplete.value).toMatchObject({
+    type: 'turn_complete',
+    data: {
+      sessionId,
+      stopReason: 'end_turn',
+    },
+  });
+  expect((await sessions.load(runtime, sessionId))?.hasActivePrompt).toBe(
+    false,
+  );
+
+  // 4. Verify failed and cancelled terminal events via updateTargetStatus
+  await fs.writeFile(
+    metaPath,
+    JSON.stringify({
+      agentId: 'agent-status',
+      agentType: 'general-purpose',
+      description: 'status test',
+      parentSessionId: 'parent-session',
+      parentAgentId: null,
+      createdAt: new Date(1_000).toISOString(),
+      status: 'running',
+    }),
+  );
+  sessions.updateTargetStatus(runtime, sessionId, 'running');
+  sessions.updateTargetStatus(runtime, sessionId, 'failed');
+  const errorEvent = await iterator.next();
+  expect(errorEvent.value).toMatchObject({
+    type: 'turn_error',
+    data: {
+      sessionId,
+      message: 'Subagent failed',
+    },
+  });
+
+  sessions.updateTargetStatus(runtime, sessionId, 'running');
+  sessions.updateTargetStatus(runtime, sessionId, 'cancelled');
+  const cancelledEvent = await iterator.next();
+  expect(cancelledEvent.value).toMatchObject({
+    type: 'prompt_cancelled',
+    data: {
+      sessionId,
+      reason: 'cancelled',
+    },
+  });
+
+  abort.abort();
+  await iterator.return?.();
 });

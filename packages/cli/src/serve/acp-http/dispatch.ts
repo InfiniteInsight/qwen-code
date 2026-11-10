@@ -5970,9 +5970,28 @@ export class AcpDispatcher {
         const shaped = this.isWorkspaceTrusted()
           ? event
           : redactWorkflowsFromAvailableCommandsEvent(event);
+        const dataRecord = isObject(shaped.data) ? shaped.data : undefined;
+        const payload =
+          dataRecord &&
+          ((shaped.originatorClientId !== undefined &&
+            dataRecord['originatorClientId'] === undefined) ||
+            (shaped.promptId !== undefined &&
+              dataRecord['promptId'] === undefined))
+            ? {
+                ...dataRecord,
+                ...(shaped.originatorClientId !== undefined &&
+                dataRecord['originatorClientId'] === undefined
+                  ? { originatorClientId: shaped.originatorClientId }
+                  : {}),
+                ...(shaped.promptId !== undefined &&
+                dataRecord['promptId'] === undefined
+                  ? { promptId: shaped.promptId }
+                  : {}),
+              }
+            : shaped.data;
         conn.sendSession(
           sessionId,
-          notification('session/update', shaped.data),
+          notification('session/update', payload),
           event.id,
         );
         return;
@@ -6115,6 +6134,12 @@ export class AcpDispatcher {
           notification(`${QWEN_METHOD_NS}notify`, {
             kind: event.type,
             data: event.data,
+            ...(event.originatorClientId !== undefined
+              ? { originatorClientId: event.originatorClientId }
+              : {}),
+            ...(event.promptId !== undefined
+              ? { promptId: event.promptId }
+              : {}),
           }),
           event.id,
         );

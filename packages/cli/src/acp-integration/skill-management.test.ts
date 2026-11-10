@@ -750,14 +750,14 @@ describe('managed Skill mutations', () => {
           return {
             ok: false,
             status: 403,
-            headers: { get: () => null },
+            headers: { get: (): string | null => null },
           };
         }
         if (url === archiveUrl) {
           return {
             ok: true,
             status: 200,
-            headers: { get: () => null },
+            headers: { get: (): string | null => null },
             arrayBuffer: vi
               .fn()
               .mockResolvedValue(

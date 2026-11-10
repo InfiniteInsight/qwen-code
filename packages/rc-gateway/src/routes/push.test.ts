@@ -232,6 +232,26 @@ describe('push routes', () => {
     expect(res.status).toBe(404);
   });
 
+  it('DELETE returns 500 push_persistence_failed when store.remove rejects (#490)', async () => {
+    const url = await mount();
+    const rec = await store.add('tokA', VALID_SUB);
+    const spy = vi
+      .spyOn(store, 'remove')
+      .mockRejectedValueOnce(new Error('EACCES'));
+    try {
+      const res = await fetch(`${url}/rc/push/subscriptions/${rec.id}`, {
+        method: 'DELETE',
+      });
+      expect(res.status).toBe(500);
+      expect(await res.json()).toEqual({
+        error: 'Failed to persist push registration',
+        code: 'push_persistence_failed',
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('GET /subscriptions includes prefs for each entry (own)', async () => {
     const url = await mount();
     const rec = await store.add('tokA', VALID_SUB);

@@ -5,6 +5,8 @@
  */
 
 import { performance } from 'node:perf_hooks';
+import v8 from 'node:v8';
+import vm from 'node:vm';
 
 const GUARD_INSTALLED = Symbol.for('qwen.cli.reactDevMemoryGuardInstalled');
 
@@ -52,6 +54,15 @@ interface GuardedPerformance {
  *   global `PerformanceEntry` buffer.
  */
 export function installReactDevMemoryGuard(): void {
+  if (typeof globalThis.gc !== 'function' && !process.versions['bun']) {
+    try {
+      v8.setFlagsFromString('--expose-gc');
+      globalThis.gc ??= vm.runInNewContext('gc');
+    } catch {
+      // Ignore when V8 runtime flags are locked.
+    }
+  }
+
   const consoleWithInspectorHooks = console as {
     timeStamp?: unknown;
     createTask?: unknown;

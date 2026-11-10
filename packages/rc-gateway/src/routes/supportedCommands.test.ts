@@ -474,4 +474,72 @@ describe('POST /session/:id/supported-commands/:name', () => {
     await vi.waitFor(() => expect(stub!.cancelCount).toBe(1));
     expect(audit.entries[0]!.detail).toEqual({ name: 'diff', timedOut: true });
   });
+
+  it('records session_command_invoked after client disconnect when the turn completes or times out, and removes the close listener (#488)', async () => {
+    const audit = new FakeAudit();
+    let resClosedCount = 0;
+    stub = await startStubDaemon({
+      supportedCommands: sessionCommands,
+      promptDelayMs: 120,
+    });
+    const handler = createSessionCommandInvokeRoute(
+      new DaemonClient({ baseUrl: stub.baseUrl }),
+      audit,
+      30_000,
+    );
+    const app = express();
+    app.use(express.json());
+    app.post(
+      '/session/:id/supported-commands/:name',
+      fakeClient([WRITE]),
+      async (req, res, next) => {
+        await handler(req, res, next);
+        resClosedCount = res.listenerCount('close');
+      },
+    );
+    const url = await listen(app);
+
+    const controller = new AbortController();
+    const pending = fetch(`${url}/session/${SID}/supported-commands/diff`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(stub!.lastPromptBody).toBeDefined());
+    controller.abort();
+    await expect(pending).rejects.toThrow();
+
+    await vi.waitFor(() => expect(audit.entries).toHaveLength(1));
+    expect(audit.entries[0]!.action).toBe('session_command_invoked');
+    expect(audit.entries[0]!.detail).toEqual({
+      name: 'diff',
+      stopReason: 'end_turn',
+    });
+    expect(resClosedCount).toBe(0);
+  });
+
+  it('attributes a deadline timeout after client disconnect as timedOut: true (#488)', async () => {
+    const audit = new FakeAudit();
+    const url = await mountInvoke(
+      { supportedCommands: sessionCommands, promptDelayMs: 5_000 },
+      [WRITE],
+      audit,
+      100,
+    );
+
+    const controller = new AbortController();
+    const pending = fetch(`${url}/session/${SID}/supported-commands/diff`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(stub!.lastPromptBody).toBeDefined());
+    controller.abort();
+    await expect(pending).rejects.toThrow();
+
+    await vi.waitFor(() => expect(audit.entries).toHaveLength(1));
+    expect(audit.entries[0]!.detail).toEqual({ name: 'diff', timedOut: true });
+  });
 });

@@ -3952,7 +3952,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 hookOpts.agentId,
                 typeof bgSubagent.getCore === 'function'
                   ? bgSubagent.getCore()
-                  : { getEventEmitter: () => bgSubagent.getEventEmitter() },
+                  : { getEventEmitter: () => bgEmitter },
               )
             : () => {};
 
@@ -4794,7 +4794,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 hookOpts.agentId,
                 typeof subagent.getCore === 'function'
                   ? subagent.getCore()
-                  : { getEventEmitter: () => subagent.getEventEmitter() },
+                  : { getEventEmitter: () => runtimeEventEmitter },
               )
             : undefined;
         writeAgentMeta(fgMetaPath, {

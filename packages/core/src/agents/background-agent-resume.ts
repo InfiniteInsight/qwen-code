@@ -1483,7 +1483,7 @@ export class BackgroundAgentResumeService {
               meta.agentId,
               typeof subagent.getCore === 'function'
                 ? subagent.getCore()
-                : { getEventEmitter: () => subagent.getEventEmitter() },
+                : { getEventEmitter: () => bgEmitter },
             )
           : () => {};
 

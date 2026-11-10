@@ -19,6 +19,7 @@ import {
 import type { ReviewLifecycle } from '../reviews/reviewLifecycle.js';
 import type { ReviewPermissionBridge } from '../reviews/reviewPermissionBridge.js';
 import { PromptQueue } from './promptQueue.js';
+import { DEFAULT_PROMPT_TIMEOUT_MS } from './promptTimeout.js';
 
 const REVIEW_STATUSES: readonly ReviewStatus[] = [
   'running',
@@ -57,12 +58,14 @@ export interface ReviewRoutesDeps {
    * tests inject 25.
    */
   promptAcceptWindowMs?: number;
+  /** Per-turn timeout in ms (defaults to DEFAULT_PROMPT_TIMEOUT_MS). */
+  promptTimeoutMs?: number;
 }
 
 /** Fallback queue when a route set is wired without an explicit promptQueue. */
 const defaultPromptQueue = new PromptQueue();
 
-/** ms to wait for the per-session prompt slot before giving up (generous —
+/** ms to wait for the per-session prompt slot before giving up (generous --
  * review turns are long-lived; this only guards against a stuck prior turn). */
 const PROMPT_QUEUE_WAIT_MS = 10 * 60 * 1000;
 
@@ -77,6 +80,7 @@ function sendSerializedPrompt(
   text: string,
 ): Promise<unknown> {
   const queue = deps.promptQueue ?? defaultPromptQueue;
+  const turnTimeoutMs = deps.promptTimeoutMs ?? DEFAULT_PROMPT_TIMEOUT_MS;
   return (async () => {
     const release = await queue.acquire(sessionId, PROMPT_QUEUE_WAIT_MS);
     try {
@@ -85,7 +89,7 @@ function sendSerializedPrompt(
         {
           prompt: [{ type: 'text', text }],
         },
-        AbortSignal.timeout(PROMPT_QUEUE_WAIT_MS),
+        AbortSignal.timeout(turnTimeoutMs),
       );
     } finally {
       release();

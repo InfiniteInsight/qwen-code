@@ -13542,7 +13542,10 @@ class QwenAgent implements Agent {
         const config = session.getConfig();
         switch (taskKind) {
           case 'agent': {
-            const task = config.getBackgroundTaskRegistry().get(taskId);
+            const registry = config.getBackgroundTaskRegistry();
+            const task =
+              registry.get(taskId) ??
+              registry.getAll?.().find((t) => t.toolUseId === taskId);
             if (
               !task ||
               (task.status !== 'running' && task.status !== 'paused')
@@ -13553,13 +13556,16 @@ class QwenAgent implements Agent {
               );
               return { cancelled: false, reason, status: task?.status };
             }
+            const resolvedTaskId = task.id ?? taskId;
             if (task.status === 'paused') {
-              config.getBackgroundTaskRegistry().abandon(taskId);
+              if (!config.abandonBackgroundAgent?.(resolvedTaskId)) {
+                registry.abandon(resolvedTaskId);
+              }
             } else {
-              config.getBackgroundTaskRegistry().cancel(taskId);
+              registry.cancel(resolvedTaskId);
             }
             debugLogger.info(
-              `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=${task.status}`,
+              `sessionTaskCancel completed sessionId=${sessionId} taskId=${resolvedTaskId} taskKind=${taskKind} status=${task.status}`,
             );
             return { cancelled: true, status: task.status };
           }

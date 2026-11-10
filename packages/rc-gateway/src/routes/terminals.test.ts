@@ -9,7 +9,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTerminalOpenRoute, LAUNCHER_STALE_MS } from './terminals.js';
 import { TerminalRequestLog } from '../terminals.js';
-import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
+import {
+  UnknownSessionError,
+  WorkspacePoolFullError,
+  type SessionDaemon,
+} from '../daemonPool.js';
 
 interface Captured {
   status?: number;
@@ -258,5 +262,43 @@ describe('POST /rc/terminals', () => {
     );
     expect(out.status).toBe(202);
     expect(await log.readAll()).toHaveLength(1);
+  });
+
+  it('rejects a malformed sessionId with 400 invalid_request before any daemon call (#491)', async () => {
+    let called = false;
+    const out = await call(
+      daemonWith(() => {
+        called = true;
+        return ENDPOINT;
+      }),
+      { sessionId: '../not-a-valid-session-id' },
+    );
+    expect(out.status).toBe(400);
+    expect(out.body).toEqual({
+      error: 'Invalid sessionId',
+      code: 'invalid_request',
+    });
+    expect(called).toBe(false);
+    expect(await log.readAll()).toEqual([]);
+  });
+
+  it('maps WorkspacePoolFullError during resumeSession to 503 workspace_pool_full (#491)', async () => {
+    const daemon = {
+      daemonEndpointForSession: () => {
+        throw new UnknownSessionError(SESSION);
+      },
+      sessionWorkspaceCwd: () => '/srv/work/proj',
+      resumeSession: async () => {
+        throw new WorkspacePoolFullError(4);
+      },
+    } as unknown as SessionDaemon;
+    const out = await call(daemon, { sessionId: SESSION });
+    expect(out.status).toBe(503);
+    expect(out.body).toEqual({
+      error: 'Workspace daemon pool is full (max 4)',
+      code: 'workspace_pool_full',
+      activeWorkspaces: 4,
+    });
+    expect(await log.readAll()).toEqual([]);
   });
 });

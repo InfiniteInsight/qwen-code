@@ -173,4 +173,22 @@ describe('ApnsStore', () => {
     });
     expect(store.listForToken('a').map((r) => r.deviceToken)).toEqual(['d1']);
   });
+
+  it('caps per-token registrations to 8 by evicting the oldest device (#490)', async () => {
+    const store = await open();
+    const ids: string[] = [];
+    for (let i = 1; i <= 9; i++) {
+      clock = i * 1000;
+      const rec = await store.register({
+        tokenId: 'tkn_a',
+        deviceToken: `dt_${i}`,
+        bundleId: 'b',
+        shellVersion: '1',
+      });
+      ids.push(rec.id);
+    }
+    const mine = store.listForToken('tkn_a');
+    expect(mine).toHaveLength(8);
+    expect(mine.map((r) => r.id)).toEqual(ids.slice(1));
+  });
 });

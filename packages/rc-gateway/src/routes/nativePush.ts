@@ -56,6 +56,13 @@ export function createNativePushRouter(
   const router = Router();
 
   router.post('/register', async (req, res) => {
+    if (req.rcClient?.sessionLockId !== undefined) {
+      res.status(403).json({
+        error: 'Share tokens may not register push',
+        code: 'share_token_forbidden',
+      });
+      return;
+    }
     const body = (req.body ?? {}) as {
       deviceToken?: unknown;
       bundleId?: unknown;
@@ -75,12 +82,23 @@ export function createNativePushRouter(
       });
       return;
     }
-    const rec = await store.register({
-      tokenId: req.rcClient!.id,
-      deviceToken: body.deviceToken,
-      bundleId: body.bundleId,
-      shellVersion: body.shellVersion,
-    });
+    let rec;
+    try {
+      rec = await store.register({
+        tokenId: req.rcClient!.id,
+        deviceToken: body.deviceToken,
+        bundleId: body.bundleId,
+        shellVersion: body.shellVersion,
+      });
+    } catch {
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: 'Failed to persist push registration',
+          code: 'push_persistence_failed',
+        });
+      }
+      return;
+    }
     void audit?.record({
       action: 'apns_registered',
       actorTokenId: req.rcClient!.id,
@@ -99,7 +117,17 @@ export function createNativePushRouter(
       res.status(404).json({ error: 'Not found', code: 'not_found' });
       return;
     }
-    await store.remove(rec.id);
+    try {
+      await store.remove(rec.id);
+    } catch {
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: 'Failed to persist push registration',
+          code: 'push_persistence_failed',
+        });
+      }
+      return;
+    }
     void audit?.record({
       action: 'apns_subscription_removed',
       actorTokenId: req.rcClient!.id,

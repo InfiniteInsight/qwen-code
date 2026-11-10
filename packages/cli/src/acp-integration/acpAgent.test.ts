@@ -17575,6 +17575,79 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('calls config.abandonBackgroundAgent and resolves agent tasks by toolUseId', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const pausedTask = {
+      id: 'agent-paused-1',
+      kind: 'agent' as const,
+      status: 'paused' as 'paused' | 'cancelled',
+      toolUseId: 'call-paused-1',
+    };
+    const runningTask = {
+      id: 'agent-running-2',
+      kind: 'agent' as const,
+      status: 'running' as 'running' | 'cancelled',
+      toolUseId: 'call-running-2',
+    };
+    const cancel = vi.fn((id: string) => {
+      if (id === runningTask.id) runningTask.status = 'cancelled';
+    });
+    const abandon = vi.fn();
+    const abandonBackgroundAgent = vi.fn((id: string) => {
+      if (id === pausedTask.id) {
+        pausedTask.status = 'cancelled';
+        return true;
+      }
+      return false;
+    });
+    Object.assign(innerConfig, {
+      abandonBackgroundAgent,
+      getBackgroundTaskRegistry: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(undefined),
+        getAll: vi.fn().mockReturnValue([pausedTask, runningTask]),
+        cancel,
+        abandon,
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+        sessionId,
+        taskId: 'call-paused-1',
+        taskKind: 'agent',
+      }),
+    ).resolves.toEqual({ cancelled: true, status: 'cancelled' });
+    expect(abandonBackgroundAgent).toHaveBeenCalledWith('agent-paused-1');
+    expect(abandon).not.toHaveBeenCalled();
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+        sessionId,
+        taskId: 'call-running-2',
+        taskKind: 'agent',
+      }),
+    ).resolves.toEqual({ cancelled: true, status: 'cancelled' });
+    expect(cancel).toHaveBeenCalledWith('agent-running-2');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('rejects sessionTaskCancel with invalid params', async () => {
     const agentPromise = runAcpAgent(
       mockConfig,
@@ -21732,7 +21805,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           JSON.parse(raw);
           return worktreeValidSettings;
         } catch (err) {
-          if (opts?.preserveInvalidWorkspaceSettings) {
+          if (
+            typeof opts === 'object' &&
+            opts?.preserveInvalidWorkspaceSettings
+          ) {
             throw err;
           }
           const empty = makeCoreSettings();

@@ -19,6 +19,7 @@ import {
   readAgentMeta,
   readAgentTrace,
   readLastTranscriptRecordUuidSync,
+  readTranscriptMessagesSync,
   writeAgentMeta,
   type AgentMeta,
   type AttachJsonlOptions,
@@ -588,25 +589,93 @@ describe('agent-transcript', () => {
     });
 
     it('persists thought content and live stream chunks separately', () => {
-      const { cleanup } = start([
+      const { emitter, cleanup } = start([
         streamText('thinking now', true, 1),
         streamText('x'.repeat(64 * 1024), false, 1),
-        roundText('answer', { thoughtText: 'thinking now', timestamp: 2 }),
       ]);
+      const firstStreamLine = lines('.stream')[0];
+      roundText('answer', { thoughtText: 'thinking now', timestamp: 2 })(
+        emitter,
+      );
       expect(readJsonl()[0].message?.parts).toEqual([
         { text: 'thinking now', thought: true },
         { text: 'answer' },
       ]);
-      expect(lines('.stream')[0]).toMatchObject({
+      expect(firstStreamLine).toMatchObject({
         runId: readJsonl()[0].agentRunId,
         round: 1,
         text: 'thinking now',
         thought: true,
         timestamp: 1,
       });
+      expect(lines('.stream')).toEqual([]);
       expect(readJsonl()[0].agentRound).toBe(1);
       cleanup();
       expect(exists('.stream')).toBe(false);
+    });
+
+    it('rotates streamRunId on START and skips committed rounds in readTranscriptMessagesSync', () => {
+      const { emitter, cleanup } = start([
+        (e) =>
+          e.emit(AgentEventType.START, {
+            subagentId: 'agent-x',
+            name: 'explore',
+            model: 'test-model',
+            tools: ['*'],
+            timestamp: 1,
+          }),
+        streamText('turn 1 thought', true, 2),
+        streamText('x'.repeat(64 * 1024), false, 2),
+      ]);
+      const turn1RunId = lines('.stream')[0]?.runId;
+      expect(typeof turn1RunId).toBe('string');
+
+      roundText('turn 1 final', {
+        round: 1,
+        thoughtText: 'turn 1 thought',
+        timestamp: 3,
+      })(emitter);
+      expect(lines('.stream')).toEqual([]);
+
+      // Even if a stale stream chunk for the committed (runId, round) is on disk,
+      // readTranscriptMessagesSync must skip it while keeping uncommitted rounds.
+      fs.writeFileSync(
+        `${jsonlPath}.stream`,
+        `${JSON.stringify({
+          v: 1,
+          runId: turn1RunId,
+          round: 1,
+          text: 'stale committed text',
+          thought: false,
+          timestamp: 2,
+        })}\n${JSON.stringify({
+          v: 1,
+          runId: turn1RunId,
+          round: 2,
+          text: 'live round 2 text',
+          thought: false,
+          timestamp: 4,
+        })}\n`,
+      );
+      expect(readTranscriptMessagesSync(jsonlPath, true)).toMatchObject({
+        liveText: 'live round 2 text',
+      });
+
+      // Resident continuation emits START again at round 1; streamRunId must rotate.
+      emitter.emit(AgentEventType.START, {
+        subagentId: 'agent-x',
+        name: 'explore',
+        model: 'test-model',
+        tools: ['*'],
+        timestamp: 10,
+      });
+      streamText('turn 2 live', false, 11)(emitter);
+      streamText('y'.repeat(64 * 1024), false, 11)(emitter);
+      const turn2RunId = lines('.stream')[0]?.runId;
+      expect(typeof turn2RunId).toBe('string');
+      expect(turn2RunId).not.toBe(turn1RunId);
+
+      cleanup();
     });
 
     it('flushes live stream chunks when the pending buffer reaches 64 KiB', () => {

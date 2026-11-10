@@ -12,6 +12,7 @@ import v8 from 'v8';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { type HistoryItemWithoutId, MessageType } from '../types.js';
 import { installReactDevMemoryGuard } from '../../utils/react-dev-memory-guard.js';
+import { relaunchApp } from '../../utils/processUtils.js';
 
 installReactDevMemoryGuard();
 
@@ -26,6 +27,8 @@ export const MEMORY_WARNING_THRESHOLD = Math.min(
 );
 export const MEMORY_UI_COMPACT_THRESHOLD = () =>
   Math.floor(v8.getHeapStatistics().heap_size_limit * 0.65);
+export const MEMORY_SELF_HEAL_THRESHOLD = () =>
+  Math.floor(v8.getHeapStatistics().heap_size_limit * 0.85);
 export const MEMORY_CHECK_INTERVAL = 60 * 1000; // one minute
 export const MEMORY_DEBUG_INTERVAL = 30 * 1000; // 30 seconds for debug logging
 export const UI_COMPACT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
@@ -40,6 +43,7 @@ export const useMemoryMonitor = ({
   compactOldItems,
 }: MemoryMonitorOptions) => {
   const lastCompactRef = useRef(0);
+  const selfHealingRef = useRef(false);
 
   useEffect(() => {
     // Debug logging + UI compaction interval — runs every 30 s, never cleared.
@@ -73,11 +77,15 @@ export const useMemoryMonitor = ({
 
       // UI history compaction when heap exceeds threshold
       const now = Date.now();
-      if (
+      const selfHealThreshold = MEMORY_SELF_HEAL_THRESHOLD();
+      const exceedsSelfHeal = memUsage.heapUsed > selfHealThreshold;
+      const shouldCompact =
         compactOldItems &&
         memUsage.heapUsed > MEMORY_UI_COMPACT_THRESHOLD() &&
-        now - lastCompactRef.current > UI_COMPACT_COOLDOWN_MS
-      ) {
+        (exceedsSelfHeal ||
+          now - lastCompactRef.current > UI_COMPACT_COOLDOWN_MS);
+
+      if (shouldCompact) {
         lastCompactRef.current = now;
         if (debugLogger.isEnabled()) {
           debugLogger.debug(
@@ -92,6 +100,34 @@ export const useMemoryMonitor = ({
           debugLogger.error(
             `[UI_COMPACT] compactOldItems failed: ${err instanceof Error ? err.message : String(err)}`,
           );
+        }
+        try {
+          globalThis.gc?.();
+        } catch {
+          // Ignore GC invocation errors
+        }
+      } else if (exceedsSelfHeal) {
+        try {
+          globalThis.gc?.();
+        } catch {
+          // Ignore GC invocation errors
+        }
+      }
+
+      if (
+        exceedsSelfHeal &&
+        !selfHealingRef.current &&
+        process.argv.includes('--attach-daemon')
+      ) {
+        const postGcUsage = process.memoryUsage();
+        if (postGcUsage.heapUsed > selfHealThreshold) {
+          selfHealingRef.current = true;
+          debugLogger.warn(
+            `[MEMORY_SELF_HEAL] Attached TUI heapUsed=${(postGcUsage.heapUsed / 1024 / 1024).toFixed(1)}MB ` +
+              `exceeds ${(selfHealThreshold / 1024 / 1024).toFixed(0)}MB threshold after compaction/GC; ` +
+              `relaunching TUI client to prevent V8 heap OOM.`,
+          );
+          void relaunchApp();
         }
       }
     }, MEMORY_DEBUG_INTERVAL);

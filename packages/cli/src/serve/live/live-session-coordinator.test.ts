@@ -1081,7 +1081,7 @@ describe('LiveSessionCoordinator', () => {
     harness.callbacks.onResponseCreated?.({
       callEpoch: 1,
       responseId: 'response-ack',
-      authority: 'server',
+      authority: 'backend_speech',
     });
     harness.host.setCallState.mockClear();
     harness.callbacks.onResponseDone?.({

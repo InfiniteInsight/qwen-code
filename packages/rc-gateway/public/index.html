@@ -13901,7 +13901,7 @@
           let joined = false;
           // Drawn before the arm below, because the model closes the turn it
           // opens and the arm is what re-opens it.
-          if (!claimSelfEcho(text)) {
+          if (insideReplay || !claimSelfEcho(text)) {
             markPrevTurnEnd();
             const added = transcriptModel.addUserChunk(
               text,
@@ -21740,6 +21740,7 @@
               .json()
               .catch(() => null);
             if (failBody409 && failBody409.code === 'session_not_loaded') {
+              unmarkSelfSend(prompt);
               const targetSessionId = watchedSessionId;
               const resumedOk = await resumeConversation(
                 targetSessionId,
@@ -21780,6 +21781,10 @@
             } else if (res.status === 401 || res.status === 403) {
               setStatus('not authorized');
               refused = 'not authorized';
+            } else if (res.status === 409) {
+              const failBody = await res.json().catch(() => null);
+              setStatus(describeFailure(res, failBody, 'sending the prompt'));
+              refused = (failBody && failBody.code) || 'session not loaded';
             } else if (res.status === 502) {
               // #211: the daemon's answer rides the 502 body (the gateway adds
               // it for a write token), so the line says what it said.

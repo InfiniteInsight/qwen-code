@@ -670,1060 +670,1110 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // `liveTls` SNICallback serves the current cert and swaps on renewal (onChange).
   let acmeManager: AcmeManager | undefined;
   let acmeTls: LiveTlsContext | undefined;
-  if (bind.mode === 'acme') {
-    if (!opts.acmeEmail) {
-      throw new BindSecurityError(
-        '--acme-domain requires --acme-email <email>',
-      );
-    }
-    if (!opts.acmeDnsProvider) {
-      throw new BindSecurityError(
-        '--acme-domain requires --acme-dns-provider <route53|cloudflare>',
-      );
-    }
-    acmeManager = await buildAcmeManager(
-      {
-        domains: opts.acmeDomains!,
-        email: opts.acmeEmail,
-        dnsProvider: opts.acmeDnsProvider,
-        staging: opts.acmeStaging,
-        directoryUrl: opts.acmeDirectoryUrl,
-      },
-      {
-        baseDir: join(homedir(), '.qwen', 'rc', 'acme'),
-        // eslint-disable-next-line no-console
-        log: (m) => console.log(`acme: ${m}`),
-        onChange: (b) => acmeTls?.update(b),
-      },
-    );
-    const initial = await acmeManager.start();
-    acmeTls = createLiveTlsContext(initial);
-    tlsCertPem = initial.cert;
-    // eslint-disable-next-line no-console
-    console.log(
-      `acme: certificate ready for ${opts.acmeDomains!.join(', ')} ` +
-        `(${opts.acmeStaging ? 'LE staging' : 'LE production'}, ` +
-        `notAfter=${initial.meta.notAfter})`,
-    );
-  }
-  // Validate any mDNS name overrides NOW (before side effects) so a path-traversal
-  // value refuses to start cleanly (add-mdns-discovery: "rejected at startup").
-  if (opts.mdnsWorkspaceName !== undefined) {
-    validateMdnsLabel(opts.mdnsWorkspaceName, 'workspace-name');
-  }
-  if (opts.mdnsInstanceName !== undefined) {
-    validateMdnsLabel(opts.mdnsInstanceName, 'instance-name');
-  }
-  // The session WAL directory (#174), settled before anything is spawned so an
-  // unusable one fails the boot cleanly instead of the first watcher's append.
-  const sessionWalDir = resolveSessionWalDir(opts, homedir());
-  if (sessionWalDir !== undefined) prepareSessionWalDir(sessionWalDir);
-  // eslint-disable-next-line no-console
-  console.log(formatSessionWalLine(sessionWalDir));
-  // The per-turn ceiling in force and where it came from (#237). Worth a boot
-  // line because the symptom it explains is a turn that died mid-work with a
-  // 504, and the first thing anyone reaches for is whether the gateway, not the
-  // model, was the one that stopped it. The audit row the firing writes carries
-  // the same number; this says what the setting was at boot.
-  // eslint-disable-next-line no-console
-  console.log(
-    `qwen-rc serve: per-turn ceiling ${
-      opts.promptTimeoutSec ?? DEFAULT_PROMPT_TIMEOUT_SEC
-    }s (${opts.promptTimeoutSecFrom ?? 'default'})`,
-  );
-  // Which `qwen` every daemon runs, settled and logged before anything is
-  // spawned. The terminals run the fork's build through QWEN_RC_TERMINAL_QWEN
-  // and the daemons used to run whatever `qwen` PATH held, so say which one
-  // this is, and warn when the two are different files.
-  const daemonBin = resolveDaemonBin(opts.qwenBin, process.env.PATH);
-  if (!daemonBin.found && daemonBin.explicit) {
-    throw new DaemonBinError(
-      `--qwen-bin / QWEN_RC_QWEN_BIN: "${daemonBin.path}" is not an executable file on PATH`,
-    );
-  }
-  if (!daemonBin.found) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      'qwen-rc serve: no `qwen` on PATH and no --qwen-bin; the daemon spawn will fail',
-    );
-  }
-  const daemonProbe = await probeDaemonBin(daemonBin.path);
-  // eslint-disable-next-line no-console
-  console.log(formatDaemonBinLine(daemonBin.path, daemonProbe.version));
-  // A bundle that cannot load (a rebuilt `core` under a stale `cli`, #191)
-  // would otherwise be found by a terminal tab on the user's screen.
-  const brokenBuild = formatBrokenBuildWarning(daemonBin.path, daemonProbe);
-  if (brokenBuild) {
-    // eslint-disable-next-line no-console
-    console.warn(brokenBuild);
-  }
-  const terminalArgv = terminalQwenArgv(process.env.QWEN_RC_TERMINAL_QWEN);
-  const buildDrift = daemonBin.found
-    ? detectBuildDrift(daemonBin.path, terminalArgv, process.env.PATH)
-    : undefined;
-  if (buildDrift) {
-    // eslint-disable-next-line no-console
-    console.warn(formatDriftWarning(buildDrift));
-  }
-  // Attach to an existing daemon (handoff Phase 1) when a URL is given, else spawn
-  // our own. Attach requires the daemon's token so the gateway can authenticate
-  // against its `--require-auth` surface.
-  if (opts.attachDaemonUrl && !opts.attachDaemonToken) {
-    throw new Error(
-      'attach-daemon requires the daemon token (--daemon-token / QWEN_RC_DAEMON_TOKEN)',
-    );
-  }
-  const handle = opts.attachDaemonUrl
-    ? await startDaemon({
-        attach: {
-          url: opts.attachDaemonUrl,
-          token: opts.attachDaemonToken!,
-        },
-      })
-    : await startDaemon({
-        qwenBin: daemonBin.path,
-        port: opts.daemonPort ?? 4180,
-        // #196: the gateway's own limit becomes the daemon's per-attachment
-        // cap, so one flag controls the whole upload path.
-        ...(opts.maxAttachmentBytes !== undefined
-          ? { maxAttachmentBytes: opts.maxAttachmentBytes }
-          : {}),
-      });
-  if (handle.attached) {
-    // eslint-disable-next-line no-console
-    console.log(
-      `qwen-rc: attached to existing daemon at ${opts.attachDaemonUrl} (will not stop it on exit)`,
-    );
-  }
-  // Owned from here, whatever the rest of the boot does. Harmless in attach mode,
-  // where stop() is documented as a no-op on a daemon this process did not start.
-  claimBootDaemon(handle);
-  const store = await TokenStore.open(
-    join(homedir(), '.qwen', 'rc', 'tokens.json'),
-  );
-  // Owner-bootstrap pairing code TTL. This PairingService mints ONLY the
-  // single owner bootstrap code (below); no guest/device codes flow through
-  // it. The generic 5-min default is far too short for a human first-run
-  // (scan QR → install PWA → type a case-sensitive code on a phone), and
-  // bootstrap.ts already documents an intended distinct bootstrap TTL that was
-  // never wired. Give it a bounded 30-minute window; the code remains
-  // single-use (redeem consumes it) and stays in the 0600 file.
-  const pairing = new PairingService(Date.now, OWNER_BOOTSTRAP_TTL_MS);
-  const vapid = await VapidStore.open(
-    join(homedir(), '.qwen', 'rc', 'vapid.json'),
-  );
-  const pushStore = await PushStore.open(
-    join(homedir(), '.qwen', 'rc', 'push-subscriptions.json'),
-  );
-  // Per-token display preferences (#80). Its own file rather than a field on
-  // the token record: the token store is auth material, and a display zone is
-  // not. Keyed per token because the zone describes the device reading.
-  const uiPrefs = await UiPrefsStore.open(
-    join(homedir(), '.qwen', 'rc', 'ui-prefs.json'),
-  );
-  // Host actions (#192): programs on this host the page can probe and start,
-  // the Windows tray launcher first among them. Opened only when the file is
-  // there, so a host that never wrote one gets no routes and no row.
-  const hostActions = await HostActions.load(
-    opts.hostActionsPath ?? join(homedir(), '.qwen', 'rc', 'host-actions.json'),
-    // eslint-disable-next-line no-console
-    (line) => console.log(line),
-  );
-  // #196: say so once when the configured limit is held down to what the
-  // daemon accepts per file, with the real reason, so an operator who raised
-  // it is not left guessing. The read is best effort: a daemon that cannot be
-  // asked yet is simply not reported on.
-  try {
-    const daemonCaps = await handle.daemon.capabilities();
-    const wanted = opts.maxAttachmentBytes ?? DEFAULT_MAX_ATTACHMENT_BYTES;
-    const daemonCap = advertisedAttachmentCap(daemonCaps);
-    const enforced = effectiveAttachmentLimit(
-      opts.maxAttachmentBytes,
-      daemonCap,
-    );
-    if (enforced < wanted) {
-      // eslint-disable-next-line no-console
-      console.log(
-        daemonCap === undefined
-          ? `qwen-rc serve: attachment limit ${wanted} bytes is held to ${enforced}: the daemon advertises no per-file cap, so it is treated as an older daemon that accepts ${DAEMON_ATTACHMENT_ITEM_BYTES} bytes`
-          : `qwen-rc serve: attachment limit ${wanted} bytes is held to ${enforced}: the daemon's per-file cap is ${daemonCap} bytes` +
-              (handle.attached
-                ? ' (attached daemon; raise QWEN_SESSION_ATTACHMENT_MAX_ITEM_BYTES there)'
-                : ''),
-      );
-    }
-  } catch {
-    // The daemon is not answering yet; requests will read the cap themselves.
-  }
-  // Host-terminal requests (issue #49): the gateway is the only writer; the
-  // Windows-side launcher app reads it and keeps its own cursor. Requests carry
-  // the daemon token, so the file is 0600 like the other credential stores.
-  const terminalRequests = TerminalRequestLog.open(
-    defaultTerminalLogPath(homedir()),
-  );
-  // APNs device-token subscriptions for the iOS native shell
-  // (add-native-mobile-shells). Always opened so the register/delete endpoints
-  // and the token-revoke cascade are live; the APNs SENDER + capability gating
-  // are wired separately (a registration is harmless storage until then).
-  const apnsStore = await ApnsStore.open(
-    join(homedir(), '.qwen', 'rc', 'apns-subscriptions.json'),
-  );
-  // Native-shell config (add-native-mobile-shells): APNs identifiers + Android
-  // TWA asset-link material. Read once at boot; the P-8 key's presence is
-  // re-checked live per /rc/capabilities request so apnsEnabled tracks the key
-  // file appearing/disappearing without a restart.
-  const nativePushConfig = parseNativePushConfig(
-    await readFile(
-      join(homedir(), '.qwen', 'rc', 'native-push.yaml'),
-      'utf8',
-    ).catch(() => null),
-  );
-  const expandTilde = (p: string): string =>
-    p.startsWith('~/') ? join(homedir(), p.slice(2)) : p;
-  // APNs delivery materials (add-native-mobile-shells): built once at boot when
-  // the config is complete AND the P-8 key parses. Absent → the notifier skips
-  // APNs (a registration is harmless storage). NOTE: the SENDER is built from the
-  // key read here, so toggling delivery requires a restart — whereas the
-  // capability's `apnsEnabled` is re-checked live per request.
-  let apnsDelivery:
-    | { signer: { token(): string }; bundleId: string; host: string }
-    | undefined;
-  {
-    const a = nativePushConfig.apns;
-    // Same predicate as resolveApnsEnabled (the capability flag) minus the live
-    // key re-check — so `enabled: false` turns delivery OFF, not just the
-    // capability. (Key loadability is validated by signer.token() below.)
-    if (a?.enabled && a.keyPath && a.keyId && a.teamId && a.bundleId) {
-      try {
-        const keyPem = readFileSync(expandTilde(a.keyPath), 'utf8');
-        const signer = new ApnsJwtSigner({
-          keyPem,
-          keyId: a.keyId,
-          teamId: a.teamId,
-          now: () => Date.now(),
-        });
-        signer.token(); // parse-validate the key now; throws on malformed → off
-        apnsDelivery = {
-          signer,
-          bundleId: a.bundleId,
-          host: apnsHost(a.environment ?? 'production'),
-        };
-      } catch {
-        // Unreadable/malformed P-8 key → APNs delivery stays off (plain push only).
-        apnsDelivery = undefined;
-      }
-    }
-  }
-  const snooze = await SnoozeStore.open(
-    join(homedir(), '.qwen', 'rc', 'snooze.state'),
-  );
-  // Load routing rules FAIL-OPEN across two layers: the user-level
-  // ~/.qwen/rc/routing.yaml and the workspace override
-  // <workspaceCwd>/.qwen/routing.yaml (workspace rules prepended — cycle 36).
-  // A missing/malformed file at either layer is logged + ignored (routing only
-  // suppresses, so the safe default on misconfig is more notifications, never
-  // fewer). 1-daemon-1-workspace ⇒ resolve the cwd once at boot; a capabilities
-  // failure simply skips the workspace layer. Hot-reload is deferred.
-  let workspaceCwd: string | undefined;
-  try {
-    workspaceCwd = (await handle.daemon.capabilities()).workspaceCwd;
-  } catch {
-    // Daemon not reporting capabilities → no workspace override layer. This
-    // also leaves `workspaceCwd` undefined for the policy enforcer below, so
-    // any `pathGlob` anchoring falls back to the GATEWAY PROCESS's own cwd
-    // (not the daemon's workspace) — every path-based policy rule may be
-    // silently inert until the daemon reports capabilities successfully.
-    // eslint-disable-next-line no-console
-    console.warn(
-      'qwen-rc: daemon capabilities() failed; policy pathGlob anchoring ' +
-        "falls back to the gateway's own process cwd, not the daemon's " +
-        'workspace — path-based policy rules may not match as expected',
-    );
-  }
-  // Multi-workspace daemon pool (add-multi-workspace-daemon-pool): the boot
-  // daemon above stays the DEFAULT daemon (an empty/omitted `cwd` on
-  // POST /session routes there, unchanged), while `POST /session { cwd }`
-  // naming a DIFFERENT workspace spawns (or reuses) its own `qwen serve` on a
-  // fresh loopback port. `defaultWorkspaceCwd` falls back to the gateway
-  // process's own cwd when the boot daemon's capabilities() failed above —
-  // the same degraded fallback already used for policy/routing pathGlob
-  // anchoring (mirrors lines 614/783 below). NOTE: if capabilities() merely
-  // failed transiently (the boot daemon IS healthy, just didn't answer in
-  // time) and a later POST /session names that same true boot workspace, the
-  // pool won't recognise it as the default and will spawn a REDUNDANT second
-  // daemon for it — a known residual of resolving this fallback once at boot.
-  const defaultWorkspaceCwd = workspaceCwd ?? process.cwd();
-  const daemonPool = new DaemonPool({
-    defaultDaemon: handle.daemon,
-    defaultWorkspaceCwd,
-    // #203: attach mode never replaces the terminal's daemon with one of the
-    // gateway's own; see bootDaemonPoolOptions.
-    ...bootDaemonPoolOptions(handle),
-    // Host-terminal material (issue #49): the boot daemon's own endpoint, so a
-    // conversation on the default workspace can be opened in a host terminal.
-    defaultEndpoint: {
-      url: handle.url,
-      token: handle.token,
-      workspaceCwd: defaultWorkspaceCwd,
-    },
-    // Reuses the exact boot path above (startDaemon → defaultSpawner →
-    // `qwen serve`), parameterized with the requested workspace on a freshly
-    // allocated loopback port instead of the fixed boot port.
-    spawn: async (cwd) => {
-      const port = await getFreePort();
-      const spawned = await startDaemon({
-        qwenBin: daemonBin.path,
-        port,
-        workspaceCwd: cwd,
-        ...(opts.maxAttachmentBytes !== undefined
-          ? { maxAttachmentBytes: opts.maxAttachmentBytes }
-          : {}),
-      });
-      const out: PooledDaemonSpawn = {
-        client: spawned.daemon,
-        stop: spawned.stop,
-        workspaceCwd: cwd,
-        endpoint: {
-          url: spawned.url,
-          token: spawned.token,
-          workspaceCwd: cwd,
-        },
-      };
-      // add-mid-turn-recovery: wire the child's exit into the pool's death
-      // detection. `whenExited` settles (never rejects), so a daemon dying
-      // long after spawn cannot leak an unhandled rejection.
-      spawned.whenExited?.then((exit) =>
-        out.onExit?.({ code: exit.code ?? null, signal: exit.signal ?? null }),
-      );
-      return out;
-    },
-    maxDaemons: opts.maxDaemons,
-    idleReapMs: 15 * 60_000,
-  });
-  // add-mid-turn-recovery: the boot daemon's death flows through the SAME
-  // markDead path as pooled daemons. cli.ts owns this child (the pool's
-  // spawner never saw it), so its exit is wired directly against the pool.
-  // Attach mode: `whenExited` is undefined — the gateway doesn't own a
-  // daemon it merely attached to, so there is no exit to observe.
-  handle.whenExited?.then((exit) =>
-    daemonPool.handleDaemonExit(defaultWorkspaceCwd, {
-      code: exit.code ?? null,
-      signal: exit.signal ?? null,
-    }),
-  );
-  const { matcher: routing, ruleCount: routingRuleCount } =
-    await loadLayeredRoutingMatcher(
-      join(homedir(), '.qwen', 'rc', 'routing.yaml'),
-      workspaceCwd,
-      // eslint-disable-next-line no-console
-      (msg) => console.warn(msg),
-    );
-  // Idle suggestions pre-wiring (built before createGatewayApp so the toggle
-  // store + status resolver can be injected): the per-session override store, the
-  // rolling-hour limiter, and the live idle.yaml config. `suggestCfg` (resolved
-  // model creds) decides whether idle is wired at all — when absent, the status
-  // route reports `available:false`. The idleStatus closure reads idleConfig +
-  // idleLimiter LIVE so a hot-reload / consumed budget is reflected immediately.
-  const idleToggles = new IdleSessionToggles();
-  const idleLimiter = new PushRateLimiter();
-  const idleConfig = await loadIdleConfig(
-    join(homedir(), '.qwen', 'rc', 'idle.yaml'),
-    // eslint-disable-next-line no-console
-    (msg) => console.warn(`idle: ${msg}`),
-  );
-  if (resolveIdleEnabled()) idleConfig.enabled = true;
-  // The env chain first, since it is the operator's explicit override for THIS
-  // process; then the user's own settings.json. Env alone leaves the feature
-  // inert on a workstation whose gateway runs as a systemd unit exporting none
-  // of the provider keys — the keys are in settings.json's `env` map, which is
-  // where qwen itself reads them. Building a handler is NOT egress: `enabled` in
-  // idle.yaml stays the sole egress guard and is OFF by default.
-  const suggestCfg =
-    resolveSuggestConfig() ?? (await resolveSettingsSuggestConfig());
-  const idleStatus: IdleStatusResolver = (sessionId) => {
-    if (!suggestCfg) return undefined; // idle not wired → available:false
-    return {
-      globalEnabled: idleConfig.enabled,
-      maxSuggestionsPerHour: idleConfig.maxSuggestionsPerHour,
-      remainingThisHour: idleLimiter.remaining(
-        sessionId,
-        idleConfig.maxSuggestionsPerHour,
-        Date.now(),
-      ),
-    };
-  };
-  // Cost tracking (add-cost-tracking): open the usage store (native sqlite,
-  // dynamically loaded so a missing build disables tracking, not the gateway) and
-  // the rate table (built-in defaults, overlaid by the operator file if it parses).
-  // The ingester is created after the app (it needs `audit`); attribution +
-  // broadcaster exist now so they can be passed into the app deps.
-  const usageStore = await openUsageStore();
-  // Agent observability (add-agent-observability): persisted registry of
-  // spawned-agent records, booted before createGatewayApp so agent routes
-  // mount from the very first request.
-  const agentRegistry = await AgentRegistry.open(
-    join(homedir(), '.qwen', 'rc', 'agents.json'),
-  );
-  // Remote review control plane (add-remote-review): persisted registry of
-  // triggered-review records, booted before createGatewayApp so review routes
-  // mount from the very first request (mirrors agentRegistry above).
-  const reviewRegistry = await ReviewRegistry.open(
-    join(homedir(), '.qwen', 'rc', 'reviews.json'),
-  );
-  // Hook event mirror (add-agent-observability): mint-or-load the dedicated
-  // loopback ingest token once and persist it 0600 alongside the bootstrap
-  // code file. Regenerating per start would invalidate the hook config that
-  // interpolates it, so the value is stable across restarts.
-  const hookIngestToken = await loadOrCreateHookIngestToken(
-    join(homedir(), '.qwen', 'rc', 'hook-ingest-token'),
-  );
-  // Host attach (#194 slice D): the credential `qwen-rc attach` presents on
-  // loopback. Minted once and kept across restarts like the ingest token, so
-  // a terminal never holds a token a restart has invalidated.
-  const hostAttachToken = await loadOrCreateLocalToken(
-    hostAttachTokenPath(join(homedir(), '.qwen', 'rc')),
-  );
-  // #212: one record per `qwen-rc attach` tab, so a tab that ends without
-  // /quit shows on the phone as crashed. An open record whose wrapper is gone
-  // stays a ghost for one launcher stale window (the time a closing tab's end
-  // report takes to land), then counts as crashed.
-  const hostTabs = await HostTabRegistry.open(defaultHostTabsPath(homedir()), {
-    ghostGraceMs: LAUNCHER_STALE_MS,
-    endsDir: hostTabEndsDir(join(homedir(), '.qwen', 'rc')),
-  });
-  // Shared read-time cost rollup (UsageStore.sessionTotals) — the SAME
-  // function is handed to both `agents.costFor` and `review.costFor` so the
-  // two control planes never disagree on a session's cost.
-  const costFor = usageStore
-    ? (sid: string) => usageStore.sessionTotals(sid).costMicrocentsSesTotal
-    : undefined;
-  /**
-   * Resolve the saved review report + (for a PR target) its cached findings
-   * summary. Best-effort throughout: any fs/daemon failure collapses to
-   * `{reportPath: null, summary: null}` rather than breaking review
-   * completion. Mirrors the bundled `review` skill's Step 10 persistence:
-   *   - report dir: `<workspaceCwd>/.qwen/reviews/`
-   *   - filename:   `<date>-<time>-<suffix>.md`, suffix = `pr-<n>` | `local` |
-   *     `<basename-of-path>`; filenames sort lexically newest-last.
-   *   - PR summary: `<workspaceCwd>/.qwen/review-cache/pr-<n>.json`
-   *     (`{findingsCount, verdict}`).
-   * Fetches `capabilities()` fresh (rather than reusing the boot-time
-   * `workspaceCwd`) so a daemon that was unreachable at boot still resolves
-   * once it comes back.
-   */
-  async function resolveReviewReport(
-    rec: ReviewRecord,
-  ): Promise<{ reportPath: string | null; summary: ReviewRecord['summary'] }> {
-    try {
-      const caps = await daemonPool.capabilities();
-      const cwd = caps.workspaceCwd;
-      if (!cwd) return { reportPath: null, summary: null };
-
-      const suffix =
-        rec.target.kind === 'pr'
-          ? `pr-${rec.target.number}`
-          : rec.target.kind === 'path'
-            ? basename(rec.target.path)
-            : 'local';
-
-      let reportPath: string | null = null;
-      try {
-        const reviewsDir = join(cwd, '.qwen', 'reviews');
-        const entries = await readdir(reviewsDir);
-        const matches = entries.filter((f) => f.endsWith(`-${suffix}.md`));
-        // Filenames sort lexically by <date>-<time>-<suffix> — the max string
-        // is the newest report.
-        matches.sort();
-        const newest = matches.at(-1);
-        reportPath = newest ? join(reviewsDir, newest) : null;
-      } catch {
-        reportPath = null;
-      }
-
-      let summary: ReviewRecord['summary'] = null;
-      if (rec.target.kind === 'pr') {
-        try {
-          const cachePath = join(
-            cwd,
-            '.qwen',
-            'review-cache',
-            `pr-${rec.target.number}.json`,
-          );
-          const parsed = JSON.parse(await readFile(cachePath, 'utf8')) as {
-            findingsCount?: number;
-            verdict?: string;
-          };
-          summary = {
-            findingsCount: parsed.findingsCount,
-            verdict: parsed.verdict,
-          };
-        } catch {
-          summary = null;
-        }
-      }
-      return { reportPath, summary };
-    } catch {
-      return { reportPath: null, summary: null };
-    }
-  }
-  const rates = new RateTableHolder(DEFAULT_RATE_TABLE);
-  if (usageStore) {
-    try {
-      rates.set(await loadRateTableFile(rateTablePath()));
-    } catch {
-      // No file / malformed at boot → keep the built-in defaults.
-    }
-  }
-  const sessionAttribution = new SessionAttributionMap();
-  const usageBroadcaster = new UsageTickBroadcaster();
-  let usageIngester: UsageIngester | undefined;
-  let usageFeeder: UsageFeeder | undefined;
-  let rateReloader: { stop(): void; trigger(): void } | undefined;
-  // mDNS advertiser is created after listen() (it needs the bound port); the
-  // capability route reads its live state through this closure.
-  let mdnsAdvertiser: MdnsAdvertiser | undefined;
-  // Live policy for POST /policy/explain, read through a closure so the route
-  // always sees the hot-reloaded ruleset (set at load + in the reloader apply).
-  let currentPolicy: Policy | undefined;
-  // Session-scoped permission overlays (issue #33): TTL-bound, in-memory
-  // dashboard-set overrides that preempt the file policy for one session (or
-  // all sessions). One instance is shared by the /rc/permission-overlays
-  // routes and the PolicyEnforcer below; ephemeral by design (a gateway
-  // restart drops all overlays — the file policy stays the only durable
-  // source of truth). Created here, pre-app, because the gateway deps need
-  // it at createGatewayApp time while the enforcer is built later.
-  const permissionOverlays = new PermissionOverlayStore();
-
-  const {
-    app,
-    notifier,
-    audit,
-    ownerEvents,
-    bridgeRegistry,
-    promptQueue,
-    agentLifecycle,
-    reviewLifecycle,
-    hostTabSweep,
-  } = createGatewayApp({
-    daemon: daemonPool,
-    store,
-    pairing,
-    terminalRequests,
-    terminalQwenArgv: terminalArgv,
-    // A phone-opened tab runs this very entry point's `attach`, so it
-    // re-attaches after a restart. Absent a script path (an embedded run), the
-    // plan falls back to `qwen-rc` on PATH.
-    ...(process.argv[1]
-      ? { terminalRcArgv: [process.execPath, process.argv[1]] }
-      : {}),
-    vapid,
-    pushStore,
-    uiPrefs,
-    hostActions,
-    ...(opts.maxAttachmentBytes !== undefined
-      ? { maxAttachmentBytes: opts.maxAttachmentBytes }
-      : {}),
-    daemonQwenBin: daemonBin.path,
-    daemonQwenBinHealthy: daemonProbe.healthy,
-    // #237: the CLI speaks seconds, the routes speak ms, and unset means "use
-    // the shared ceiling in routes/promptTimeout.ts", NOT a smaller default,
-    // which is what three independent 600_000 literals used to mean.
-    ...(opts.promptTimeoutSec !== undefined
-      ? { promptTimeoutMs: promptTimeoutMsFromSec(opts.promptTimeoutSec) }
-      : {}),
-    ...(sessionWalDir !== undefined ? { walDir: sessionWalDir } : {}),
-    apnsStore,
-    ...(apnsDelivery ? { apns: apnsDelivery } : {}),
-    nativeShellsCapability: () => {
-      const keyPath = nativePushConfig.apns?.keyPath;
-      // apnsEnabled reflects a LOADABLE P-8 key, not mere file presence: parse
-      // it as an EC private key so a present-but-malformed key reads false
-      // (mirrors bind-security's createSecureContext check). Re-checked live.
-      let keyLoadable = false;
-      if (keyPath) {
-        try {
-          createPrivateKey(readFileSync(expandTilde(keyPath)));
-          keyLoadable = true;
-        } catch {
-          keyLoadable = false;
-        }
-      }
-      return buildNativeShellsCapability(
-        resolveApnsEnabled(nativePushConfig, keyLoadable),
-      );
-    },
-    assetLinks: () => buildAssetLinks(nativePushConfig),
-    snooze,
-    routing,
-    idleToggles,
-    idleStatus,
-    usageReader: usageStore,
-    usageBroadcaster: usageStore ? usageBroadcaster : undefined,
-    costCurrencyLabel: () => rates.current().currencyLabel,
-    mdnsStatus: () =>
-      mdnsAdvertiser?.advertising
-        ? { advertising: true, instanceName: mdnsAdvertiser.instanceName }
-        : { advertising: false },
-    // GET /rc/peers: browse the LAN via the OPTIONAL bonjour-service factory
-    // (same pair behind `qwen-rc daemons discover`). null → dependency absent.
-    browsePeers: async (timeoutMs: number) => {
-      const factory = await loadBonjourFactory();
-      if (!factory) return null;
-      return browseDaemons({
-        factory: factory as unknown as BrowserFactory,
-        timeoutMs,
-      });
-    },
-    // GET /rc/gpu: probe nvidia-smi (optional CLI dep) for live GPU status.
-    // No pidResolver override — workspace resolution via `/proc/<pid>/cwd`
-    // happens automatically inside probeGpuStatus.
-    gpuProbe: () => probeGpuStatus(),
-    // GET /rc/llama-swap: probe the optional llama-swap base URL
-    // (--llama-swap-url / QWEN_RC_LLAMA_SWAP_URL) for live model status.
-    // Trailing slash stripped so `${baseUrl}/v1/models` never doubles up.
-    llamaSwapProbe: opts.llamaSwapUrl
-      ? () => probeLlamaSwapStatus(opts.llamaSwapUrl!.replace(/\/+$/, ''))
-      : undefined,
-    policyExplain: {
-      policy: () => currentPolicy,
-      projectRoot: () => workspaceCwd ?? process.cwd(),
-      // Local alias so the truthiness narrowing survives into the nested
-      // arrow at tsc time (a bare `quota.state` inside the inner closure does
-      // not stay narrowed — this is why enforcer.ts:106 uses `this.quota!`).
-      quotaOracle: () => {
-        const q = quota;
-        return q ? { state: (id, ms) => q.state(id, ms) } : undefined;
-      },
-    },
-    // /rc/permission-overlays (issue #33): TTL-bound session-scoped overrides.
-    // The SAME store instance the PolicyEnforcer below evaluates against.
-    permissionOverlays,
-    clientsManifestReadToml: () =>
-      readFile(join(homedir(), '.qwen', 'rc', 'clients.toml'), 'utf8').then(
-        (text) => text,
-        (err: NodeJS.ErrnoException) => {
-          if (err.code === 'ENOENT') return null; // not configured → warning
-          throw err; // unexpected → route degrades to warning, never 5xx
-        },
-      ),
-    onPromptAccepted: usageStore
-      ? (sid, attr) => {
-          sessionAttribution.set(sid, attr);
-          usageIngester?.notePromptBoundary(sid);
-        }
-      : undefined,
-    agents: {
-      registry: agentRegistry,
-      costFor,
-    },
-    review: {
-      registry: reviewRegistry,
-      costFor,
-      resolveReport: resolveReviewReport,
-    },
-    workflows: {
-      runsDir: join(homedir(), '.qwen', 'workflows', 'runs'),
-      // Gateway { name } resolution reuses the CLI tool's EXACT guarded
-      // resolver (core resolveNamedWorkflow): project `.qwen/workflows` then
-      // user `~/.qwen/workflows`, with the same traversal guard. The gateway
-      // is deliberately NOT given an unguarded name resolver.
-      resolveNamed: (name: string) =>
-        resolveNamedWorkflow(name, {
-          workingDir: process.cwd(),
-          homeDir: homedir(),
-        }),
-    },
-    hookIngest: { ingestToken: hookIngestToken },
-    hostAttach: { token: hostAttachToken },
-    // #194 slice D: the folders `qwen-rc attach` used, beside the request log,
-    // so the phone's list includes conversations started from a terminal.
-    hostAttachedWorkspaces: HostAttachedWorkspaces.open(
-      defaultHostAttachedWorkspacesPath(homedir()),
-    ),
-    hostTabs: {
-      registry: hostTabs,
-      autoReopen: opts.reopenCrashedTabs === true,
-    },
-  });
-  // add-mid-turn-recovery: the pool writes `daemon_died` rows through the
-  // app's audit recorder (constructed inside createGatewayApp, so the pool
-  // learns about it only now).
-  daemonPool.setAudit(audit);
-
-  // add-mid-turn-recovery: wire the recovery orchestrator as the pool's
-  // onDaemonDeath hook. The orchestrator depends on the pool (getOrSpawn /
-  // resumeSession) AND the app's promptQueue (hadInFlightTurn), so it can
-  // only be built here, after both exist. reportOutcome appends the durable
-  // marker frames, publishes them on the owner stream, writes the audit rows,
-  // and fans out the push kinds. The markers go to the same WAL directory the
-  // events route relays into, so their ids interleave with the relayed ones;
-  // under --no-wal there is none, and reportOutcome only audits and pushes.
-  const recoveryOrchestrator = new RecoveryOrchestrator({
-    pool: daemonPool,
-    promptQueue,
-    reportOutcome: createReportOutcome({
-      ...(sessionWalDir !== undefined ? { walDir: sessionWalDir } : {}),
-      ownerEvents,
-      audit,
-      notifier,
-    }),
-  });
-  daemonPool.setRecoveryProvider(recoveryOrchestrator);
-  daemonPool.setOnDaemonDeath((key, sessions, exit) => {
-    void recoveryOrchestrator.recover(key, sessions, exit);
-  });
-
-  // Startup reconciliation (design: "Reconciliation"): running/blocked agent
-  // records whose daemon session is gone become `orphaned` — surfaced in
-  // GET /rc/agents, never silently dropped. Best-effort: an unreachable
-  // daemon at boot leaves records untouched for the next start.
-  try {
-    const caps = await handle.daemon.capabilities();
-    // Skip reconciliation if workspaceCwd is absent: undefined capability means
-    // "unknown", not "no sessions". Must not false-orphan running agents.
-    if (caps.workspaceCwd) {
-      const live = await handle.daemon.listWorkspaceSessions(caps.workspaceCwd);
-      const orphaned = await agentRegistry.reconcile(
-        live.map((s) => s.sessionId),
-      );
-      if (orphaned.length > 0) {
-        // eslint-disable-next-line no-console
-        console.warn(`agents: marked ${orphaned.length} record(s) orphaned`);
-      }
-      // Same reconciliation for triggered reviews (add-remote-review): a
-      // running/blocked review whose session is gone becomes `orphaned` —
-      // surfaced in GET /rc/reviews, never silently dropped.
-      const orphanedReviews = await reviewRegistry.reconcile(
-        live.map((s) => s.sessionId),
-      );
-      if (orphanedReviews.length > 0) {
-        // eslint-disable-next-line no-console
-        console.warn(`reviews: marked ${orphanedReviews.length} orphaned`);
-      }
-    }
-  } catch {
-    // Daemon unreachable at boot → reconcile on the next start.
-  }
-
-  // Now that `audit` exists, build the ingester. usage_tick emissions fan through
-  // the broadcaster (relay registration lands in the next slice; until then they
-  // fan to nobody, harmlessly). Rows are still written + queryable via /rc/usage.
-  if (usageStore) {
-    const coalescer = new UsageTickCoalescer({
-      emit: (tick) => usageBroadcaster.emit(tick),
-    });
-    usageIngester = new UsageIngester({
-      rates,
-      store: usageStore,
-      coalescer,
-      now: () => Date.now(),
-      // The ingester collapses these to one per (session, modelId) per hour.
-      onRateMiss: (modelServiceId, modelId, sessionId) =>
-        void audit.record({
-          action: 'rate_table_miss',
-          detail: { modelServiceId, modelId, sessionId },
-        }),
-    });
-    // The usage frame carries no model id (#181): the feeder resolves it per
-    // session (daemon /context, then the transcript; kept current by
-    // model_switched) and hands it to the ingester as plain data.
-    usageFeeder = new UsageFeeder({
-      cache: new SessionModelCache({
-        fromContext: async (sid) =>
-          modelIdFromContext(await daemonPool.sessionContext(sid)),
-        fromTranscript: createTranscriptModelResolver(),
-        now: () => Date.now(),
-      }),
-      ingester: usageIngester,
-      attributionFor: (sid) => sessionAttribution.get(sid),
-      now: () => Date.now(),
-      onUnresolved: (sessionId, frames) =>
-        void audit.record({
-          action: 'usage_model_unresolved',
-          detail: { sessionId, frames },
-        }),
-    });
-  }
-
-  // Bridge staleness reaper: every heartbeat interval, drop bridges that missed
-  // ~3 heartbeats and audit each (bridge_stale_deregistered). Unref'd so it never
-  // keeps the process alive; cleared in shutdown so it doesn't leak.
-  const bridgeReaper = setInterval(
-    () => pruneStaleBridges(bridgeRegistry, Date.now(), audit),
-    HEARTBEAT_INTERVAL_SEC * 1000,
-  );
-  bridgeReaper.unref();
-
-  // #212: the automatic reopen of crashed host tabs, when it is on. A pass at
-  // boot catches the tabs a reboot or a gateway outage took; unref'd, like
-  // the reaper above.
-  // eslint-disable-next-line no-console
-  console.log(formatHostTabsLine(opts.reopenCrashedTabs === true));
-  if (opts.reopenCrashedTabs && hostTabSweep) {
-    void hostTabSweep();
-    setInterval(() => void hostTabSweep(), HOST_TAB_SWEEP_MS).unref();
-  }
-
-  // Session WAL retention (#174): a session's own log is bounded only when it
-  // is appended to, so the directory is swept at boot and hourly. A session
-  // being relayed right now is never removed.
-  const stopWalRetention =
-    sessionWalDir !== undefined
-      ? startWalRetention({
-          dir: sessionWalDir,
-          retention: resolveWalRetention(opts),
-          audit,
-          keep: (sessionId) => isSessionRelayLive(sessionWalDir, sessionId),
-          // eslint-disable-next-line no-console
-          log: (line) => console.log(line),
-        })
-      : () => {};
-
-  // #217: the gateway can wedge with the process alive and the unit green, so
-  // `Restart=on-failure` never sees a failure. Watch the loop's own delay and
-  // end the process when it is sustained, which is the only thing systemd can
-  // act on. `QWEN_RC_LOOP_GUARD_MS=0` turns it off.
-  const loopGuardMs =
-    process.env.QWEN_RC_LOOP_GUARD_MS === undefined
-      ? DEFAULT_LOOP_LAG_MS
-      : Number(process.env.QWEN_RC_LOOP_GUARD_MS);
-  const stopLoopGuard = startLoopGuard({
-    thresholdMs: loopGuardMs,
-    audit,
-    // eslint-disable-next-line no-console
-    log: (line) => console.log(line),
-  });
-
-  // Load the policy fail-closed, layered over the same workspace cwd resolved
-  // for routing above (cycle 38): user ~/.qwen/rc/policy.yaml + workspace
-  // <cwd>/.qwen/policy.yaml (the workspace layer can only narrow: its allow
-  // rules and defaults are logged and dropped, and its deny/prompt decision
-  // wins only when stricter; issue #156). Absent user file → default-prompt;
-  // a MALFORMED user file still
-  // throws (cycle-14 boot-fail, unchanged — do NOT wrap in a swallowing catch); a
-  // malformed workspace file is logged + ignored (fail-closed: keep user policy).
-  const userPolicyPath = join(homedir(), '.qwen', 'rc', 'policy.yaml');
-  // eslint-disable-next-line no-console
-  const warn = (msg: string) => console.warn(msg);
-  const policy = await loadLayeredPolicy(userPolicyPath, workspaceCwd, warn);
-  currentPolicy = policy;
-  // Advisory-only lint warnings: alias-widened `allow` rules and the
-  // newly-live-allow-rules note from policyAdvisories. Emitted ONCE at boot on
-  // the merged policy — never on hot-reload (cycle 45's reloader), which fires
-  // on every file change and would spam the same notes repeatedly. Reuses the
-  // same warn sink as loadLayeredPolicy rather than a new logging mechanism.
-  for (const w of policyAdvisories(policy)) warn(w);
-  // Boot hygiene (cycle 48): warn if either policy file is group/world-writable
-  // (design threat model — a non-owner could rewrite the tool-permission policy).
-  // Advisory only: the policy still loads. The check never throws (best-effort).
-  for (const insecure of await checkPolicyFilePermissions([
-    userPolicyPath,
-    ...(workspaceCwd ? [join(workspaceCwd, '.qwen', 'policy.yaml')] : []),
-  ])) {
-    // eslint-disable-next-line no-console
-    console.warn(formatInsecurePolicyWarning(insecure));
-  }
-  // Per-rule quota store (cycle 43): limits keyed by rule id from the active
-  // policy; persisted to ~/.qwen/rc/quotas.wal (survives restart). Only built
-  // when the enforcer runs. The QuotaStore's limitsFor closure reads THIS map by
-  // reference, so hot-reload (cycle 45) rebuilds limits by mutating it in place
-  // (applyQuotaLimits) — no store reconstruction needed.
-  const quotaLimits = new Map<string, { count: number; windowSec: number }>();
-  const applyQuotaLimits = (p: Policy): void => {
-    quotaLimits.clear();
-    for (const [id, lim] of quotaLimitsFromPolicy(p)) quotaLimits.set(id, lim);
-  };
-  applyQuotaLimits(policy);
-  const quota = notifier
-    ? await QuotaStore.create(
-        new FileQuotaWal(
-          join(homedir(), '.qwen', 'rc', 'quotas.wal'),
-          // eslint-disable-next-line no-console
-          (msg) => console.warn(msg),
-        ),
-        (id) => quotaLimits.get(id),
-      )
-    : undefined;
-  // projectRoot for pathGlob anchoring MUST be the daemon's own workspaceCwd
-  // (resolved above for routing/policy layering), never a frame-supplied
-  // value — see enforcer.ts's constructor doc. Read lazily via a closure
-  // (rather than capturing `workspaceCwd` by value here) so a future boot
-  // reordering that resolves it after the enforcer is constructed still
-  // sees the final value.
-  const enforcer = notifier
-    ? new PolicyEnforcer(
-        daemonPool,
-        policy,
-        audit,
-        quota,
-        Date.now,
-        () => workspaceCwd ?? process.cwd(),
-        // Session-scoped overlays (issue #33) preempt the file policy; the
-        // store is shared with the /rc/permission-overlays routes above.
-        permissionOverlays,
-      )
-    : undefined;
-
-  // Policy hot-reload (cycle 45, Phase 3.1): watch both policy files; on a
-  // debounced (250 ms) change, reload the LAYERED policy and, on success, swap
-  // it into the enforcer AND rebuild the quota limits IN PLACE. A malformed
-  // reload RETAINS the previous ruleset and audits policy_reload_failed (file
-  // and reason), a running gateway must not crash/widen on a half-typed save
-  // (spec "Parse error preserves previous ruleset"). The workspace file is
-  // model-writable (issue #156): the reload runs the same loader as boot, so it
-  // can only narrow, and createPolicyHotReload bounds how often it can run.
-  // NOTE: a rule id reused across a reload inherits its prior consumption
-  // counts (fail-safe: more prompting, not a loosening). The policy_load_error
-  // SSE frame is deferred: no gateway-level owner-broadcast surface exists yet
-  // (Phase 4).
+  let bootDaemonPool: DaemonPool | undefined;
+  let bridgeReaper: ReturnType<typeof setInterval> | undefined;
+  let hostTabSweepTimer: ReturnType<typeof setInterval> | undefined;
+  let stopWalRetention: (() => void) | undefined;
+  let stopLoopGuard: (() => void) | undefined;
   const watchers: FSWatcher[] = [];
   let reloader: HotReload | undefined;
-  // Routing hot-reload (notification-routing spec: "hot-reloaded on change with a
-  // 250 ms debounce; on parse failure retain the previously-compiled ruleset and
-  // emit routing_reload_failed"). Symmetric to the policy reloader above and
-  // shares its dir watchers. The STRICT loader throws on a malformed layer so a
-  // half-typed save RETAINS the prior rules (a silent fail-open would instead
-  // WIDEN the fan-out). The swap is a sync notifier.setRouting; per-event
-  // atomicity is handled by notify() capturing the matcher once. The workspace
-  // routing.yaml is held to the same bounds as the policy one (issue #156): it
-  // adds rules, it cannot remove or take over a user rule, and the reload is
-  // bounded and audited (routing_reloaded / routing_reload_failed with file).
   let routingReloader: HotReload | undefined;
-  if (enforcer) {
-    const activeEnforcer = enforcer;
-    reloader = createPolicyHotReload({
-      userPath: join(homedir(), '.qwen', 'rc', 'policy.yaml'),
-      workspaceCwd,
-      // apply MUST stay synchronous (atomic vs handlePermission's await-vote).
-      apply: (p) => {
-        activeEnforcer.setPolicy(p);
-        applyQuotaLimits(p);
-        currentPolicy = p;
+  let rateReloader: { stop(): void; trigger(): void } | undefined;
+  let closeGatewayListener: () => Promise<void> = async () => {};
+  let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+  let mdnsAdvertiser: MdnsAdvertiser | undefined;
+  let idleReloadTimer: ReturnType<typeof setTimeout> | undefined;
+  let pump: SessionEventPump | undefined;
+  let quietDigestTimer: NodeJS.Timeout | undefined;
+  const startedBridges: StartedBridge[] = [];
+  let bootAborted = false;
+
+  const cleanupServeResources = async (): Promise<void> => {
+    bootAborted = true;
+    for (const w of watchers) w.close();
+    reloader?.stop();
+    routingReloader?.stop();
+    rateReloader?.stop();
+    if (idleReloadTimer) clearTimeout(idleReloadTimer);
+    if (expiryTimer) clearTimeout(expiryTimer);
+    if (quietDigestTimer) clearInterval(quietDigestTimer);
+    if (hostTabSweepTimer) clearInterval(hostTabSweepTimer);
+    if (bridgeReaper) clearInterval(bridgeReaper);
+    stopWalRetention?.();
+    stopLoopGuard?.();
+    for (const b of startedBridges) b.stop();
+    if (mdnsAdvertiser) await mdnsAdvertiser.stop(500);
+    if (pump) await pump.stop();
+    acmeManager?.stop();
+    await closeGatewayListener();
+    if (bootDaemonPool) await bootDaemonPool.stopAll();
+  };
+
+  try {
+    if (bind.mode === 'acme') {
+      if (!opts.acmeEmail) {
+        throw new BindSecurityError(
+          '--acme-domain requires --acme-email <email>',
+        );
+      }
+      if (!opts.acmeDnsProvider) {
+        throw new BindSecurityError(
+          '--acme-domain requires --acme-dns-provider <route53|cloudflare>',
+        );
+      }
+      acmeManager = await buildAcmeManager(
+        {
+          domains: opts.acmeDomains!,
+          email: opts.acmeEmail,
+          dnsProvider: opts.acmeDnsProvider,
+          staging: opts.acmeStaging,
+          directoryUrl: opts.acmeDirectoryUrl,
+        },
+        {
+          baseDir: join(homedir(), '.qwen', 'rc', 'acme'),
+          // eslint-disable-next-line no-console
+          log: (m) => console.log(`acme: ${m}`),
+          onChange: (b) => acmeTls?.update(b),
+        },
+      );
+      const initial = await acmeManager.start();
+      acmeTls = createLiveTlsContext(initial);
+      tlsCertPem = initial.cert;
+      // eslint-disable-next-line no-console
+      console.log(
+        `acme: certificate ready for ${opts.acmeDomains!.join(', ')} ` +
+          `(${opts.acmeStaging ? 'LE staging' : 'LE production'}, ` +
+          `notAfter=${initial.meta.notAfter})`,
+      );
+    }
+    // Validate any mDNS name overrides NOW (before side effects) so a path-traversal
+    // value refuses to start cleanly (add-mdns-discovery: "rejected at startup").
+    if (opts.mdnsWorkspaceName !== undefined) {
+      validateMdnsLabel(opts.mdnsWorkspaceName, 'workspace-name');
+    }
+    if (opts.mdnsInstanceName !== undefined) {
+      validateMdnsLabel(opts.mdnsInstanceName, 'instance-name');
+    }
+    // The session WAL directory (#174), settled before anything is spawned so an
+    // unusable one fails the boot cleanly instead of the first watcher's append.
+    const sessionWalDir = resolveSessionWalDir(opts, homedir());
+    if (sessionWalDir !== undefined) prepareSessionWalDir(sessionWalDir);
+    // eslint-disable-next-line no-console
+    console.log(formatSessionWalLine(sessionWalDir));
+    // The per-turn ceiling in force and where it came from (#237). Worth a boot
+    // line because the symptom it explains is a turn that died mid-work with a
+    // 504, and the first thing anyone reaches for is whether the gateway, not the
+    // model, was the one that stopped it. The audit row the firing writes carries
+    // the same number; this says what the setting was at boot.
+    // eslint-disable-next-line no-console
+    console.log(
+      `qwen-rc serve: per-turn ceiling ${
+        opts.promptTimeoutSec ?? DEFAULT_PROMPT_TIMEOUT_SEC
+      }s (${opts.promptTimeoutSecFrom ?? 'default'})`,
+    );
+    // Which `qwen` every daemon runs, settled and logged before anything is
+    // spawned. The terminals run the fork's build through QWEN_RC_TERMINAL_QWEN
+    // and the daemons used to run whatever `qwen` PATH held, so say which one
+    // this is, and warn when the two are different files.
+    const daemonBin = resolveDaemonBin(opts.qwenBin, process.env.PATH);
+    if (!daemonBin.found && daemonBin.explicit) {
+      throw new DaemonBinError(
+        `--qwen-bin / QWEN_RC_QWEN_BIN: "${daemonBin.path}" is not an executable file on PATH`,
+      );
+    }
+    if (!daemonBin.found) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        'qwen-rc serve: no `qwen` on PATH and no --qwen-bin; the daemon spawn will fail',
+      );
+    }
+    const daemonProbe = await probeDaemonBin(daemonBin.path);
+    // eslint-disable-next-line no-console
+    console.log(formatDaemonBinLine(daemonBin.path, daemonProbe.version));
+    // A bundle that cannot load (a rebuilt `core` under a stale `cli`, #191)
+    // would otherwise be found by a terminal tab on the user's screen.
+    const brokenBuild = formatBrokenBuildWarning(daemonBin.path, daemonProbe);
+    if (brokenBuild) {
+      // eslint-disable-next-line no-console
+      console.warn(brokenBuild);
+    }
+    const terminalArgv = terminalQwenArgv(process.env.QWEN_RC_TERMINAL_QWEN);
+    const buildDrift = daemonBin.found
+      ? detectBuildDrift(daemonBin.path, terminalArgv, process.env.PATH)
+      : undefined;
+    if (buildDrift) {
+      // eslint-disable-next-line no-console
+      console.warn(formatDriftWarning(buildDrift));
+    }
+    // Attach to an existing daemon (handoff Phase 1) when a URL is given, else spawn
+    // our own. Attach requires the daemon's token so the gateway can authenticate
+    // against its `--require-auth` surface.
+    if (opts.attachDaemonUrl && !opts.attachDaemonToken) {
+      throw new Error(
+        'attach-daemon requires the daemon token (--daemon-token / QWEN_RC_DAEMON_TOKEN)',
+      );
+    }
+    const handle = opts.attachDaemonUrl
+      ? await startDaemon({
+          attach: {
+            url: opts.attachDaemonUrl,
+            token: opts.attachDaemonToken!,
+          },
+        })
+      : await startDaemon({
+          qwenBin: daemonBin.path,
+          port: opts.daemonPort ?? 4180,
+          // #196: the gateway's own limit becomes the daemon's per-attachment
+          // cap, so one flag controls the whole upload path.
+          ...(opts.maxAttachmentBytes !== undefined
+            ? { maxAttachmentBytes: opts.maxAttachmentBytes }
+            : {}),
+        });
+    if (handle.attached) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `qwen-rc: attached to existing daemon at ${opts.attachDaemonUrl} (will not stop it on exit)`,
+      );
+    }
+    // Owned from here, whatever the rest of the boot does. Harmless in attach mode,
+    // where stop() is documented as a no-op on a daemon this process did not start.
+    claimBootDaemon(handle);
+    const store = await TokenStore.open(
+      join(homedir(), '.qwen', 'rc', 'tokens.json'),
+    );
+    // Owner-bootstrap pairing code TTL. This PairingService mints ONLY the
+    // single owner bootstrap code (below); no guest/device codes flow through
+    // it. The generic 5-min default is far too short for a human first-run
+    // (scan QR → install PWA → type a case-sensitive code on a phone), and
+    // bootstrap.ts already documents an intended distinct bootstrap TTL that was
+    // never wired. Give it a bounded 30-minute window; the code remains
+    // single-use (redeem consumes it) and stays in the 0600 file.
+    const pairing = new PairingService(Date.now, OWNER_BOOTSTRAP_TTL_MS);
+    const vapid = await VapidStore.open(
+      join(homedir(), '.qwen', 'rc', 'vapid.json'),
+    );
+    const pushStore = await PushStore.open(
+      join(homedir(), '.qwen', 'rc', 'push-subscriptions.json'),
+    );
+    // Per-token display preferences (#80). Its own file rather than a field on
+    // the token record: the token store is auth material, and a display zone is
+    // not. Keyed per token because the zone describes the device reading.
+    const uiPrefs = await UiPrefsStore.open(
+      join(homedir(), '.qwen', 'rc', 'ui-prefs.json'),
+    );
+    // Host actions (#192): programs on this host the page can probe and start,
+    // the Windows tray launcher first among them. Opened only when the file is
+    // there, so a host that never wrote one gets no routes and no row.
+    const hostActions = await HostActions.load(
+      opts.hostActionsPath ??
+        join(homedir(), '.qwen', 'rc', 'host-actions.json'),
+      // eslint-disable-next-line no-console
+      (line) => console.log(line),
+    );
+    // #196: say so once when the configured limit is held down to what the
+    // daemon accepts per file, with the real reason, so an operator who raised
+    // it is not left guessing. The read is best effort: a daemon that cannot be
+    // asked yet is simply not reported on.
+    try {
+      const daemonCaps = await handle.daemon.capabilities();
+      const wanted = opts.maxAttachmentBytes ?? DEFAULT_MAX_ATTACHMENT_BYTES;
+      const daemonCap = advertisedAttachmentCap(daemonCaps);
+      const enforced = effectiveAttachmentLimit(
+        opts.maxAttachmentBytes,
+        daemonCap,
+      );
+      if (enforced < wanted) {
+        // eslint-disable-next-line no-console
+        console.log(
+          daemonCap === undefined
+            ? `qwen-rc serve: attachment limit ${wanted} bytes is held to ${enforced}: the daemon advertises no per-file cap, so it is treated as an older daemon that accepts ${DAEMON_ATTACHMENT_ITEM_BYTES} bytes`
+            : `qwen-rc serve: attachment limit ${wanted} bytes is held to ${enforced}: the daemon's per-file cap is ${daemonCap} bytes` +
+                (handle.attached
+                  ? ' (attached daemon; raise QWEN_SESSION_ATTACHMENT_MAX_ITEM_BYTES there)'
+                  : ''),
+        );
+      }
+    } catch {
+      // The daemon is not answering yet; requests will read the cap themselves.
+    }
+    // Host-terminal requests (issue #49): the gateway is the only writer; the
+    // Windows-side launcher app reads it and keeps its own cursor. Requests carry
+    // the daemon token, so the file is 0600 like the other credential stores.
+    const terminalRequests = TerminalRequestLog.open(
+      defaultTerminalLogPath(homedir()),
+    );
+    // APNs device-token subscriptions for the iOS native shell
+    // (add-native-mobile-shells). Always opened so the register/delete endpoints
+    // and the token-revoke cascade are live; the APNs SENDER + capability gating
+    // are wired separately (a registration is harmless storage until then).
+    const apnsStore = await ApnsStore.open(
+      join(homedir(), '.qwen', 'rc', 'apns-subscriptions.json'),
+    );
+    // Native-shell config (add-native-mobile-shells): APNs identifiers + Android
+    // TWA asset-link material. Read once at boot; the P-8 key's presence is
+    // re-checked live per /rc/capabilities request so apnsEnabled tracks the key
+    // file appearing/disappearing without a restart.
+    const nativePushConfig = parseNativePushConfig(
+      await readFile(
+        join(homedir(), '.qwen', 'rc', 'native-push.yaml'),
+        'utf8',
+      ).catch(() => null),
+    );
+    const expandTilde = (p: string): string =>
+      p.startsWith('~/') ? join(homedir(), p.slice(2)) : p;
+    // APNs delivery materials (add-native-mobile-shells): built once at boot when
+    // the config is complete AND the P-8 key parses. Absent → the notifier skips
+    // APNs (a registration is harmless storage). NOTE: the SENDER is built from the
+    // key read here, so toggling delivery requires a restart — whereas the
+    // capability's `apnsEnabled` is re-checked live per request.
+    let apnsDelivery:
+      | { signer: { token(): string }; bundleId: string; host: string }
+      | undefined;
+    {
+      const a = nativePushConfig.apns;
+      // Same predicate as resolveApnsEnabled (the capability flag) minus the live
+      // key re-check — so `enabled: false` turns delivery OFF, not just the
+      // capability. (Key loadability is validated by signer.token() below.)
+      if (a?.enabled && a.keyPath && a.keyId && a.teamId && a.bundleId) {
+        try {
+          const keyPem = readFileSync(expandTilde(a.keyPath), 'utf8');
+          const signer = new ApnsJwtSigner({
+            keyPem,
+            keyId: a.keyId,
+            teamId: a.teamId,
+            now: () => Date.now(),
+          });
+          signer.token(); // parse-validate the key now; throws on malformed → off
+          apnsDelivery = {
+            signer,
+            bundleId: a.bundleId,
+            host: apnsHost(a.environment ?? 'production'),
+          };
+        } catch {
+          // Unreadable/malformed P-8 key → APNs delivery stays off (plain push only).
+          apnsDelivery = undefined;
+        }
+      }
+    }
+    const snooze = await SnoozeStore.open(
+      join(homedir(), '.qwen', 'rc', 'snooze.state'),
+    );
+    // Load routing rules FAIL-OPEN across two layers: the user-level
+    // ~/.qwen/rc/routing.yaml and the workspace override
+    // <workspaceCwd>/.qwen/routing.yaml (workspace rules prepended — cycle 36).
+    // A missing/malformed file at either layer is logged + ignored (routing only
+    // suppresses, so the safe default on misconfig is more notifications, never
+    // fewer). 1-daemon-1-workspace ⇒ resolve the cwd once at boot; a capabilities
+    // failure simply skips the workspace layer. Hot-reload is deferred.
+    let workspaceCwd: string | undefined;
+    try {
+      workspaceCwd = (await handle.daemon.capabilities()).workspaceCwd;
+    } catch {
+      // Daemon not reporting capabilities → no workspace override layer. This
+      // also leaves `workspaceCwd` undefined for the policy enforcer below, so
+      // any `pathGlob` anchoring falls back to the GATEWAY PROCESS's own cwd
+      // (not the daemon's workspace) — every path-based policy rule may be
+      // silently inert until the daemon reports capabilities successfully.
+      // eslint-disable-next-line no-console
+      console.warn(
+        'qwen-rc: daemon capabilities() failed; policy pathGlob anchoring ' +
+          "falls back to the gateway's own process cwd, not the daemon's " +
+          'workspace — path-based policy rules may not match as expected',
+      );
+    }
+    // Multi-workspace daemon pool (add-multi-workspace-daemon-pool): the boot
+    // daemon above stays the DEFAULT daemon (an empty/omitted `cwd` on
+    // POST /session routes there, unchanged), while `POST /session { cwd }`
+    // naming a DIFFERENT workspace spawns (or reuses) its own `qwen serve` on a
+    // fresh loopback port. `defaultWorkspaceCwd` falls back to the gateway
+    // process's own cwd when the boot daemon's capabilities() failed above —
+    // the same degraded fallback already used for policy/routing pathGlob
+    // anchoring (mirrors lines 614/783 below). NOTE: if capabilities() merely
+    // failed transiently (the boot daemon IS healthy, just didn't answer in
+    // time) and a later POST /session names that same true boot workspace, the
+    // pool won't recognise it as the default and will spawn a REDUNDANT second
+    // daemon for it — a known residual of resolving this fallback once at boot.
+    const defaultWorkspaceCwd = workspaceCwd ?? process.cwd();
+    const daemonPool = new DaemonPool({
+      defaultDaemon: handle.daemon,
+      defaultWorkspaceCwd,
+      // #203: attach mode never replaces the terminal's daemon with one of the
+      // gateway's own; see bootDaemonPoolOptions.
+      ...bootDaemonPoolOptions(handle),
+      // Host-terminal material (issue #49): the boot daemon's own endpoint, so a
+      // conversation on the default workspace can be opened in a host terminal.
+      defaultEndpoint: {
+        url: handle.url,
+        token: handle.token,
+        workspaceCwd: defaultWorkspaceCwd,
       },
-      audit,
+      // Reuses the exact boot path above (startDaemon → defaultSpawner →
+      // `qwen serve`), parameterized with the requested workspace on a freshly
+      // allocated loopback port instead of the fixed boot port.
+      spawn: async (cwd) => {
+        const port = await getFreePort();
+        const spawned = await startDaemon({
+          qwenBin: daemonBin.path,
+          port,
+          workspaceCwd: cwd,
+          ...(opts.maxAttachmentBytes !== undefined
+            ? { maxAttachmentBytes: opts.maxAttachmentBytes }
+            : {}),
+        });
+        const out: PooledDaemonSpawn = {
+          client: spawned.daemon,
+          stop: spawned.stop,
+          workspaceCwd: cwd,
+          endpoint: {
+            url: spawned.url,
+            token: spawned.token,
+            workspaceCwd: cwd,
+          },
+        };
+        // add-mid-turn-recovery: wire the child's exit into the pool's death
+        // detection. `whenExited` settles (never rejects), so a daemon dying
+        // long after spawn cannot leak an unhandled rejection.
+        spawned.whenExited?.then((exit) =>
+          out.onExit?.({
+            code: exit.code ?? null,
+            signal: exit.signal ?? null,
+          }),
+        );
+        return out;
+      },
+      maxDaemons: opts.maxDaemons,
+      idleReapMs: 15 * 60_000,
     });
-    const activeReloader = reloader;
-    // Routing shares the same workspace cwd + parent dirs as policy, so build its
-    // reloader here and dispatch from the one dir watcher below. enforcer is only
-    // ever set when notifier exists, but narrow explicitly for the type-checker.
-    if (notifier) {
-      const activeNotifier = notifier;
-      const routingPath = join(homedir(), '.qwen', 'rc', 'routing.yaml');
-      routingReloader = createRoutingHotReload({
-        userPath: routingPath,
+    bootDaemonPool = daemonPool;
+    // add-mid-turn-recovery: the boot daemon's death flows through the SAME
+    // markDead path as pooled daemons. cli.ts owns this child (the pool's
+    // spawner never saw it), so its exit is wired directly against the pool.
+    // Attach mode: `whenExited` is undefined — the gateway doesn't own a
+    // daemon it merely attached to, so there is no exit to observe.
+    handle.whenExited?.then((exit) =>
+      daemonPool.handleDaemonExit(defaultWorkspaceCwd, {
+        code: exit.code ?? null,
+        signal: exit.signal ?? null,
+      }),
+    );
+    const { matcher: routing, ruleCount: routingRuleCount } =
+      await loadLayeredRoutingMatcher(
+        join(homedir(), '.qwen', 'rc', 'routing.yaml'),
         workspaceCwd,
-        // Sync field swap; notify() captures the matcher once per event.
-        apply: (matcher) => activeNotifier.setRouting(matcher),
+        // eslint-disable-next-line no-console
+        (msg) => console.warn(msg),
+      );
+    // Idle suggestions pre-wiring (built before createGatewayApp so the toggle
+    // store + status resolver can be injected): the per-session override store, the
+    // rolling-hour limiter, and the live idle.yaml config. `suggestCfg` (resolved
+    // model creds) decides whether idle is wired at all — when absent, the status
+    // route reports `available:false`. The idleStatus closure reads idleConfig +
+    // idleLimiter LIVE so a hot-reload / consumed budget is reflected immediately.
+    const idleToggles = new IdleSessionToggles();
+    const idleLimiter = new PushRateLimiter();
+    const idleConfig = await loadIdleConfig(
+      join(homedir(), '.qwen', 'rc', 'idle.yaml'),
+      // eslint-disable-next-line no-console
+      (msg) => console.warn(`idle: ${msg}`),
+    );
+    if (resolveIdleEnabled()) idleConfig.enabled = true;
+    // The env chain first, since it is the operator's explicit override for THIS
+    // process; then the user's own settings.json. Env alone leaves the feature
+    // inert on a workstation whose gateway runs as a systemd unit exporting none
+    // of the provider keys — the keys are in settings.json's `env` map, which is
+    // where qwen itself reads them. Building a handler is NOT egress: `enabled` in
+    // idle.yaml stays the sole egress guard and is OFF by default.
+    const suggestCfg =
+      resolveSuggestConfig() ?? (await resolveSettingsSuggestConfig());
+    const idleStatus: IdleStatusResolver = (sessionId) => {
+      if (!suggestCfg) return undefined; // idle not wired → available:false
+      return {
+        globalEnabled: idleConfig.enabled,
+        maxSuggestionsPerHour: idleConfig.maxSuggestionsPerHour,
+        remainingThisHour: idleLimiter.remaining(
+          sessionId,
+          idleConfig.maxSuggestionsPerHour,
+          Date.now(),
+        ),
+      };
+    };
+    // Cost tracking (add-cost-tracking): open the usage store (native sqlite,
+    // dynamically loaded so a missing build disables tracking, not the gateway) and
+    // the rate table (built-in defaults, overlaid by the operator file if it parses).
+    // The ingester is created after the app (it needs `audit`); attribution +
+    // broadcaster exist now so they can be passed into the app deps.
+    const usageStore = await openUsageStore();
+    // Agent observability (add-agent-observability): persisted registry of
+    // spawned-agent records, booted before createGatewayApp so agent routes
+    // mount from the very first request.
+    const agentRegistry = await AgentRegistry.open(
+      join(homedir(), '.qwen', 'rc', 'agents.json'),
+    );
+    // Remote review control plane (add-remote-review): persisted registry of
+    // triggered-review records, booted before createGatewayApp so review routes
+    // mount from the very first request (mirrors agentRegistry above).
+    const reviewRegistry = await ReviewRegistry.open(
+      join(homedir(), '.qwen', 'rc', 'reviews.json'),
+    );
+    // Hook event mirror (add-agent-observability): mint-or-load the dedicated
+    // loopback ingest token once and persist it 0600 alongside the bootstrap
+    // code file. Regenerating per start would invalidate the hook config that
+    // interpolates it, so the value is stable across restarts.
+    const hookIngestToken = await loadOrCreateHookIngestToken(
+      join(homedir(), '.qwen', 'rc', 'hook-ingest-token'),
+    );
+    // Host attach (#194 slice D): the credential `qwen-rc attach` presents on
+    // loopback. Minted once and kept across restarts like the ingest token, so
+    // a terminal never holds a token a restart has invalidated.
+    const hostAttachToken = await loadOrCreateLocalToken(
+      hostAttachTokenPath(join(homedir(), '.qwen', 'rc')),
+    );
+    // #212: one record per `qwen-rc attach` tab, so a tab that ends without
+    // /quit shows on the phone as crashed. An open record whose wrapper is gone
+    // stays a ghost for one launcher stale window (the time a closing tab's end
+    // report takes to land), then counts as crashed.
+    const hostTabs = await HostTabRegistry.open(
+      defaultHostTabsPath(homedir()),
+      {
+        ghostGraceMs: LAUNCHER_STALE_MS,
+        endsDir: hostTabEndsDir(join(homedir(), '.qwen', 'rc')),
+      },
+    );
+    // Shared read-time cost rollup (UsageStore.sessionTotals) — the SAME
+    // function is handed to both `agents.costFor` and `review.costFor` so the
+    // two control planes never disagree on a session's cost.
+    const costFor = usageStore
+      ? (sid: string) => usageStore.sessionTotals(sid).costMicrocentsSesTotal
+      : undefined;
+    /**
+     * Resolve the saved review report + (for a PR target) its cached findings
+     * summary. Best-effort throughout: any fs/daemon failure collapses to
+     * `{reportPath: null, summary: null}` rather than breaking review
+     * completion. Mirrors the bundled `review` skill's Step 10 persistence:
+     *   - report dir: `<workspaceCwd>/.qwen/reviews/`
+     *   - filename:   `<date>-<time>-<suffix>.md`, suffix = `pr-<n>` | `local` |
+     *     `<basename-of-path>`; filenames sort lexically newest-last.
+     *   - PR summary: `<workspaceCwd>/.qwen/review-cache/pr-<n>.json`
+     *     (`{findingsCount, verdict}`).
+     * Fetches `capabilities()` fresh (rather than reusing the boot-time
+     * `workspaceCwd`) so a daemon that was unreachable at boot still resolves
+     * once it comes back.
+     */
+    async function resolveReviewReport(
+      rec: ReviewRecord,
+    ): Promise<{
+      reportPath: string | null;
+      summary: ReviewRecord['summary'];
+    }> {
+      try {
+        const caps = await daemonPool.capabilities();
+        const cwd = caps.workspaceCwd;
+        if (!cwd) return { reportPath: null, summary: null };
+
+        const suffix =
+          rec.target.kind === 'pr'
+            ? `pr-${rec.target.number}`
+            : rec.target.kind === 'path'
+              ? basename(rec.target.path)
+              : 'local';
+
+        let reportPath: string | null = null;
+        try {
+          const reviewsDir = join(cwd, '.qwen', 'reviews');
+          const entries = await readdir(reviewsDir);
+          const matches = entries.filter((f) => f.endsWith(`-${suffix}.md`));
+          // Filenames sort lexically by <date>-<time>-<suffix> — the max string
+          // is the newest report.
+          matches.sort();
+          const newest = matches.at(-1);
+          reportPath = newest ? join(reviewsDir, newest) : null;
+        } catch {
+          reportPath = null;
+        }
+
+        let summary: ReviewRecord['summary'] = null;
+        if (rec.target.kind === 'pr') {
+          try {
+            const cachePath = join(
+              cwd,
+              '.qwen',
+              'review-cache',
+              `pr-${rec.target.number}.json`,
+            );
+            const parsed = JSON.parse(await readFile(cachePath, 'utf8')) as {
+              findingsCount?: number;
+              verdict?: string;
+            };
+            summary = {
+              findingsCount: parsed.findingsCount,
+              verdict: parsed.verdict,
+            };
+          } catch {
+            summary = null;
+          }
+        }
+        return { reportPath, summary };
+      } catch {
+        return { reportPath: null, summary: null };
+      }
+    }
+    const rates = new RateTableHolder(DEFAULT_RATE_TABLE);
+    if (usageStore) {
+      try {
+        rates.set(await loadRateTableFile(rateTablePath()));
+      } catch {
+        // No file / malformed at boot → keep the built-in defaults.
+      }
+    }
+    const sessionAttribution = new SessionAttributionMap();
+    const usageBroadcaster = new UsageTickBroadcaster();
+    let usageIngester: UsageIngester | undefined;
+    let usageFeeder: UsageFeeder | undefined;
+    // Live policy for POST /policy/explain, read through a closure so the route
+    // always sees the hot-reloaded ruleset (set at load + in the reloader apply).
+    let currentPolicy: Policy | undefined;
+    // Session-scoped permission overlays (issue #33): TTL-bound, in-memory
+    // dashboard-set overrides that preempt the file policy for one session (or
+    // all sessions). One instance is shared by the /rc/permission-overlays
+    // routes and the PolicyEnforcer below; ephemeral by design (a gateway
+    // restart drops all overlays — the file policy stays the only durable
+    // source of truth). Created here, pre-app, because the gateway deps need
+    // it at createGatewayApp time while the enforcer is built later.
+    const permissionOverlays = new PermissionOverlayStore();
+
+    const {
+      app,
+      notifier,
+      audit,
+      ownerEvents,
+      bridgeRegistry,
+      promptQueue,
+      agentLifecycle,
+      reviewLifecycle,
+      hostTabSweep,
+    } = createGatewayApp({
+      daemon: daemonPool,
+      store,
+      pairing,
+      terminalRequests,
+      terminalQwenArgv: terminalArgv,
+      // A phone-opened tab runs this very entry point's `attach`, so it
+      // re-attaches after a restart. Absent a script path (an embedded run), the
+      // plan falls back to `qwen-rc` on PATH.
+      ...(process.argv[1]
+        ? { terminalRcArgv: [process.execPath, process.argv[1]] }
+        : {}),
+      vapid,
+      pushStore,
+      uiPrefs,
+      hostActions,
+      ...(opts.maxAttachmentBytes !== undefined
+        ? { maxAttachmentBytes: opts.maxAttachmentBytes }
+        : {}),
+      daemonQwenBin: daemonBin.path,
+      daemonQwenBinHealthy: daemonProbe.healthy,
+      // #237: the CLI speaks seconds, the routes speak ms, and unset means "use
+      // the shared ceiling in routes/promptTimeout.ts", NOT a smaller default,
+      // which is what three independent 600_000 literals used to mean.
+      ...(opts.promptTimeoutSec !== undefined
+        ? { promptTimeoutMs: promptTimeoutMsFromSec(opts.promptTimeoutSec) }
+        : {}),
+      ...(sessionWalDir !== undefined ? { walDir: sessionWalDir } : {}),
+      apnsStore,
+      ...(apnsDelivery ? { apns: apnsDelivery } : {}),
+      nativeShellsCapability: () => {
+        const keyPath = nativePushConfig.apns?.keyPath;
+        // apnsEnabled reflects a LOADABLE P-8 key, not mere file presence: parse
+        // it as an EC private key so a present-but-malformed key reads false
+        // (mirrors bind-security's createSecureContext check). Re-checked live.
+        let keyLoadable = false;
+        if (keyPath) {
+          try {
+            createPrivateKey(readFileSync(expandTilde(keyPath)));
+            keyLoadable = true;
+          } catch {
+            keyLoadable = false;
+          }
+        }
+        return buildNativeShellsCapability(
+          resolveApnsEnabled(nativePushConfig, keyLoadable),
+        );
+      },
+      assetLinks: () => buildAssetLinks(nativePushConfig),
+      snooze,
+      routing,
+      idleToggles,
+      idleStatus,
+      usageReader: usageStore,
+      usageBroadcaster: usageStore ? usageBroadcaster : undefined,
+      costCurrencyLabel: () => rates.current().currencyLabel,
+      mdnsStatus: () =>
+        mdnsAdvertiser?.advertising
+          ? { advertising: true, instanceName: mdnsAdvertiser.instanceName }
+          : { advertising: false },
+      // GET /rc/peers: browse the LAN via the OPTIONAL bonjour-service factory
+      // (same pair behind `qwen-rc daemons discover`). null → dependency absent.
+      browsePeers: async (timeoutMs: number) => {
+        const factory = await loadBonjourFactory();
+        if (!factory) return null;
+        return browseDaemons({
+          factory: factory as unknown as BrowserFactory,
+          timeoutMs,
+        });
+      },
+      // GET /rc/gpu: probe nvidia-smi (optional CLI dep) for live GPU status.
+      // No pidResolver override — workspace resolution via `/proc/<pid>/cwd`
+      // happens automatically inside probeGpuStatus.
+      gpuProbe: () => probeGpuStatus(),
+      // GET /rc/llama-swap: probe the optional llama-swap base URL
+      // (--llama-swap-url / QWEN_RC_LLAMA_SWAP_URL) for live model status.
+      // Trailing slash stripped so `${baseUrl}/v1/models` never doubles up.
+      llamaSwapProbe: opts.llamaSwapUrl
+        ? () => probeLlamaSwapStatus(opts.llamaSwapUrl!.replace(/\/+$/, ''))
+        : undefined,
+      policyExplain: {
+        policy: () => currentPolicy,
+        projectRoot: () => workspaceCwd ?? process.cwd(),
+        // Local alias so the truthiness narrowing survives into the nested
+        // arrow at tsc time (a bare `quota.state` inside the inner closure does
+        // not stay narrowed — this is why enforcer.ts:106 uses `this.quota!`).
+        quotaOracle: () => {
+          const q = quota;
+          return q ? { state: (id, ms) => q.state(id, ms) } : undefined;
+        },
+      },
+      // /rc/permission-overlays (issue #33): TTL-bound session-scoped overrides.
+      // The SAME store instance the PolicyEnforcer below evaluates against.
+      permissionOverlays,
+      clientsManifestReadToml: () =>
+        readFile(join(homedir(), '.qwen', 'rc', 'clients.toml'), 'utf8').then(
+          (text) => text,
+          (err: NodeJS.ErrnoException) => {
+            if (err.code === 'ENOENT') return null; // not configured → warning
+            throw err; // unexpected → route degrades to warning, never 5xx
+          },
+        ),
+      onPromptAccepted: usageStore
+        ? (sid, attr) => {
+            sessionAttribution.set(sid, attr);
+            usageIngester?.notePromptBoundary(sid);
+          }
+        : undefined,
+      agents: {
+        registry: agentRegistry,
+        costFor,
+      },
+      review: {
+        registry: reviewRegistry,
+        costFor,
+        resolveReport: resolveReviewReport,
+      },
+      workflows: {
+        runsDir: join(homedir(), '.qwen', 'workflows', 'runs'),
+        // Gateway { name } resolution reuses the CLI tool's EXACT guarded
+        // resolver (core resolveNamedWorkflow): project `.qwen/workflows` then
+        // user `~/.qwen/workflows`, with the same traversal guard. The gateway
+        // is deliberately NOT given an unguarded name resolver.
+        resolveNamed: (name: string) =>
+          resolveNamedWorkflow(name, {
+            workingDir: process.cwd(),
+            homeDir: homedir(),
+          }),
+      },
+      hookIngest: { ingestToken: hookIngestToken },
+      hostAttach: { token: hostAttachToken },
+      // #194 slice D: the folders `qwen-rc attach` used, beside the request log,
+      // so the phone's list includes conversations started from a terminal.
+      hostAttachedWorkspaces: HostAttachedWorkspaces.open(
+        defaultHostAttachedWorkspacesPath(homedir()),
+      ),
+      hostTabs: {
+        registry: hostTabs,
+        autoReopen: opts.reopenCrashedTabs === true,
+      },
+    });
+    // add-mid-turn-recovery: the pool writes `daemon_died` rows through the
+    // app's audit recorder (constructed inside createGatewayApp, so the pool
+    // learns about it only now).
+    daemonPool.setAudit(audit);
+
+    // add-mid-turn-recovery: wire the recovery orchestrator as the pool's
+    // onDaemonDeath hook. The orchestrator depends on the pool (getOrSpawn /
+    // resumeSession) AND the app's promptQueue (hadInFlightTurn), so it can
+    // only be built here, after both exist. reportOutcome appends the durable
+    // marker frames, publishes them on the owner stream, writes the audit rows,
+    // and fans out the push kinds. The markers go to the same WAL directory the
+    // events route relays into, so their ids interleave with the relayed ones;
+    // under --no-wal there is none, and reportOutcome only audits and pushes.
+    const recoveryOrchestrator = new RecoveryOrchestrator({
+      pool: daemonPool,
+      promptQueue,
+      reportOutcome: createReportOutcome({
+        ...(sessionWalDir !== undefined ? { walDir: sessionWalDir } : {}),
+        ownerEvents,
         audit,
+        notifier,
+      }),
+    });
+    daemonPool.setRecoveryProvider(recoveryOrchestrator);
+    daemonPool.setOnDaemonDeath((key, sessions, exit) => {
+      void recoveryOrchestrator.recover(key, sessions, exit);
+    });
+
+    // Startup reconciliation (design: "Reconciliation"): running/blocked agent
+    // records whose daemon session is gone become `orphaned` — surfaced in
+    // GET /rc/agents, never silently dropped. Best-effort: an unreachable
+    // daemon at boot leaves records untouched for the next start.
+    try {
+      const caps = await handle.daemon.capabilities();
+      // Skip reconciliation if workspaceCwd is absent: undefined capability means
+      // "unknown", not "no sessions". Must not false-orphan running agents.
+      if (caps.workspaceCwd) {
+        const live = await handle.daemon.listWorkspaceSessions(
+          caps.workspaceCwd,
+        );
+        const orphaned = await agentRegistry.reconcile(
+          live.map((s) => s.sessionId),
+        );
+        if (orphaned.length > 0) {
+          // eslint-disable-next-line no-console
+          console.warn(`agents: marked ${orphaned.length} record(s) orphaned`);
+        }
+        // Same reconciliation for triggered reviews (add-remote-review): a
+        // running/blocked review whose session is gone becomes `orphaned` —
+        // surfaced in GET /rc/reviews, never silently dropped.
+        const orphanedReviews = await reviewRegistry.reconcile(
+          live.map((s) => s.sessionId),
+        );
+        if (orphanedReviews.length > 0) {
+          // eslint-disable-next-line no-console
+          console.warn(`reviews: marked ${orphanedReviews.length} orphaned`);
+        }
+      }
+    } catch {
+      // Daemon unreachable at boot → reconcile on the next start.
+    }
+
+    // Now that `audit` exists, build the ingester. usage_tick emissions fan through
+    // the broadcaster (relay registration lands in the next slice; until then they
+    // fan to nobody, harmlessly). Rows are still written + queryable via /rc/usage.
+    if (usageStore) {
+      const coalescer = new UsageTickCoalescer({
+        emit: (tick) => usageBroadcaster.emit(tick),
+      });
+      usageIngester = new UsageIngester({
+        rates,
+        store: usageStore,
+        coalescer,
+        now: () => Date.now(),
+        // The ingester collapses these to one per (session, modelId) per hour.
+        onRateMiss: (modelServiceId, modelId, sessionId) =>
+          void audit.record({
+            action: 'rate_table_miss',
+            detail: { modelServiceId, modelId, sessionId },
+          }),
+      });
+      // The usage frame carries no model id (#181): the feeder resolves it per
+      // session (daemon /context, then the transcript; kept current by
+      // model_switched) and hands it to the ingester as plain data.
+      usageFeeder = new UsageFeeder({
+        cache: new SessionModelCache({
+          fromContext: async (sid) =>
+            modelIdFromContext(await daemonPool.sessionContext(sid)),
+          fromTranscript: createTranscriptModelResolver(),
+          now: () => Date.now(),
+        }),
+        ingester: usageIngester,
+        attributionFor: (sid) => sessionAttribution.get(sid),
+        now: () => Date.now(),
+        onUnresolved: (sessionId, frames) =>
+          void audit.record({
+            action: 'usage_model_unresolved',
+            detail: { sessionId, frames },
+          }),
       });
     }
-    const activeRoutingReloader = routingReloader;
-    // Watch the PARENT DIR of each config file (survives an editor's atomic
-    // rename-replace, unlike a file watch), dispatching by basename to the
-    // policy and routing reloaders. fs.watch THROWS SYNCHRONOUSLY on a missing
-    // dir → guard the CALL; a missing/unwatchable dir simply won't hot-reload.
-    const dirs = [join(homedir(), '.qwen', 'rc')];
-    if (workspaceCwd) dirs.push(join(workspaceCwd, '.qwen'));
-    for (const dir of dirs) {
+
+    // Bridge staleness reaper: every heartbeat interval, drop bridges that missed
+    // ~3 heartbeats and audit each (bridge_stale_deregistered). Unref'd so it never
+    // keeps the process alive; cleared in shutdown so it doesn't leak.
+    bridgeReaper = setInterval(
+      () => pruneStaleBridges(bridgeRegistry, Date.now(), audit),
+      HEARTBEAT_INTERVAL_SEC * 1000,
+    );
+    bridgeReaper.unref();
+
+    // #212: the automatic reopen of crashed host tabs, when it is on. A pass at
+    // boot catches the tabs a reboot or a gateway outage took; unref'd, like
+    // the reaper above.
+    // eslint-disable-next-line no-console
+    console.log(formatHostTabsLine(opts.reopenCrashedTabs === true));
+    if (opts.reopenCrashedTabs && hostTabSweep) {
+      void hostTabSweep();
+      hostTabSweepTimer = setInterval(
+        () => void hostTabSweep(),
+        HOST_TAB_SWEEP_MS,
+      );
+      hostTabSweepTimer.unref();
+    }
+
+    // Session WAL retention (#174): a session's own log is bounded only when it
+    // is appended to, so the directory is swept at boot and hourly. A session
+    // being relayed right now is never removed.
+    stopWalRetention =
+      sessionWalDir !== undefined
+        ? startWalRetention({
+            dir: sessionWalDir,
+            retention: resolveWalRetention(opts),
+            audit,
+            keep: (sessionId) => isSessionRelayLive(sessionWalDir, sessionId),
+            // eslint-disable-next-line no-console
+            log: (line) => console.log(line),
+          })
+        : () => {};
+
+    // #217: the gateway can wedge with the process alive and the unit green, so
+    // `Restart=on-failure` never sees a failure. Watch the loop's own delay and
+    // end the process when it is sustained, which is the only thing systemd can
+    // act on. `QWEN_RC_LOOP_GUARD_MS=0` turns it off.
+    const loopGuardMs =
+      process.env.QWEN_RC_LOOP_GUARD_MS === undefined
+        ? DEFAULT_LOOP_LAG_MS
+        : Number(process.env.QWEN_RC_LOOP_GUARD_MS);
+    stopLoopGuard = startLoopGuard({
+      thresholdMs: loopGuardMs,
+      audit,
+      // eslint-disable-next-line no-console
+      log: (line) => console.log(line),
+    });
+
+    // Load the policy fail-closed, layered over the same workspace cwd resolved
+    // for routing above (cycle 38): user ~/.qwen/rc/policy.yaml + workspace
+    // <cwd>/.qwen/policy.yaml (the workspace layer can only narrow: its allow
+    // rules and defaults are logged and dropped, and its deny/prompt decision
+    // wins only when stricter; issue #156). Absent user file → default-prompt;
+    // a MALFORMED user file still
+    // throws (cycle-14 boot-fail, unchanged — do NOT wrap in a swallowing catch); a
+    // malformed workspace file is logged + ignored (fail-closed: keep user policy).
+    const userPolicyPath = join(homedir(), '.qwen', 'rc', 'policy.yaml');
+    // eslint-disable-next-line no-console
+    const warn = (msg: string) => console.warn(msg);
+    const policy = await loadLayeredPolicy(userPolicyPath, workspaceCwd, warn);
+    currentPolicy = policy;
+    // Advisory-only lint warnings: alias-widened `allow` rules and the
+    // newly-live-allow-rules note from policyAdvisories. Emitted ONCE at boot on
+    // the merged policy — never on hot-reload (cycle 45's reloader), which fires
+    // on every file change and would spam the same notes repeatedly. Reuses the
+    // same warn sink as loadLayeredPolicy rather than a new logging mechanism.
+    for (const w of policyAdvisories(policy)) warn(w);
+    // Boot hygiene (cycle 48): warn if either policy file is group/world-writable
+    // (design threat model — a non-owner could rewrite the tool-permission policy).
+    // Advisory only: the policy still loads. The check never throws (best-effort).
+    for (const insecure of await checkPolicyFilePermissions([
+      userPolicyPath,
+      ...(workspaceCwd ? [join(workspaceCwd, '.qwen', 'policy.yaml')] : []),
+    ])) {
+      // eslint-disable-next-line no-console
+      console.warn(formatInsecurePolicyWarning(insecure));
+    }
+    // Per-rule quota store (cycle 43): limits keyed by rule id from the active
+    // policy; persisted to ~/.qwen/rc/quotas.wal (survives restart). Only built
+    // when the enforcer runs. The QuotaStore's limitsFor closure reads THIS map by
+    // reference, so hot-reload (cycle 45) rebuilds limits by mutating it in place
+    // (applyQuotaLimits) — no store reconstruction needed.
+    const quotaLimits = new Map<string, { count: number; windowSec: number }>();
+    const applyQuotaLimits = (p: Policy): void => {
+      quotaLimits.clear();
+      for (const [id, lim] of quotaLimitsFromPolicy(p))
+        quotaLimits.set(id, lim);
+    };
+    applyQuotaLimits(policy);
+    const quota = notifier
+      ? await QuotaStore.create(
+          new FileQuotaWal(
+            join(homedir(), '.qwen', 'rc', 'quotas.wal'),
+            // eslint-disable-next-line no-console
+            (msg) => console.warn(msg),
+          ),
+          (id) => quotaLimits.get(id),
+        )
+      : undefined;
+    // projectRoot for pathGlob anchoring MUST be the daemon's own workspaceCwd
+    // (resolved above for routing/policy layering), never a frame-supplied
+    // value — see enforcer.ts's constructor doc. Read lazily via a closure
+    // (rather than capturing `workspaceCwd` by value here) so a future boot
+    // reordering that resolves it after the enforcer is constructed still
+    // sees the final value.
+    const enforcer = notifier
+      ? new PolicyEnforcer(
+          daemonPool,
+          policy,
+          audit,
+          quota,
+          Date.now,
+          () => workspaceCwd ?? process.cwd(),
+          // Session-scoped overlays (issue #33) preempt the file policy; the
+          // store is shared with the /rc/permission-overlays routes above.
+          permissionOverlays,
+        )
+      : undefined;
+
+    // Policy hot-reload (cycle 45, Phase 3.1): watch both policy files; on a
+    // debounced (250 ms) change, reload the LAYERED policy and, on success, swap
+    // it into the enforcer AND rebuild the quota limits IN PLACE. A malformed
+    // reload RETAINS the previous ruleset and audits policy_reload_failed (file
+    // and reason), a running gateway must not crash/widen on a half-typed save
+    // (spec "Parse error preserves previous ruleset"). The workspace file is
+    // model-writable (issue #156): the reload runs the same loader as boot, so it
+    // can only narrow, and createPolicyHotReload bounds how often it can run.
+    // NOTE: a rule id reused across a reload inherits its prior consumption
+    // counts (fail-safe: more prompting, not a loosening). The policy_load_error
+    // SSE frame is deferred: no gateway-level owner-broadcast surface exists yet
+    // (Phase 4).
+    // Routing hot-reload (notification-routing spec: "hot-reloaded on change with a
+    // 250 ms debounce; on parse failure retain the previously-compiled ruleset and
+    // emit routing_reload_failed"). Symmetric to the policy reloader above and
+    // shares its dir watchers. The STRICT loader throws on a malformed layer so a
+    // half-typed save RETAINS the prior rules (a silent fail-open would instead
+    // WIDEN the fan-out). The swap is a sync notifier.setRouting; per-event
+    // atomicity is handled by notify() capturing the matcher once. The workspace
+    // routing.yaml is held to the same bounds as the policy one (issue #156): it
+    // adds rules, it cannot remove or take over a user rule, and the reload is
+    // bounded and audited (routing_reloaded / routing_reload_failed with file).
+    if (enforcer) {
+      const activeEnforcer = enforcer;
+      reloader = createPolicyHotReload({
+        userPath: join(homedir(), '.qwen', 'rc', 'policy.yaml'),
+        workspaceCwd,
+        // apply MUST stay synchronous (atomic vs handlePermission's await-vote).
+        apply: (p) => {
+          activeEnforcer.setPolicy(p);
+          applyQuotaLimits(p);
+          currentPolicy = p;
+        },
+        audit,
+      });
+      const activeReloader = reloader;
+      // Routing shares the same workspace cwd + parent dirs as policy, so build its
+      // reloader here and dispatch from the one dir watcher below. enforcer is only
+      // ever set when notifier exists, but narrow explicitly for the type-checker.
+      if (notifier) {
+        const activeNotifier = notifier;
+        const routingPath = join(homedir(), '.qwen', 'rc', 'routing.yaml');
+        routingReloader = createRoutingHotReload({
+          userPath: routingPath,
+          workspaceCwd,
+          // Sync field swap; notify() captures the matcher once per event.
+          apply: (matcher) => activeNotifier.setRouting(matcher),
+          audit,
+        });
+      }
+      const activeRoutingReloader = routingReloader;
+      // Watch the PARENT DIR of each config file (survives an editor's atomic
+      // rename-replace, unlike a file watch), dispatching by basename to the
+      // policy and routing reloaders. fs.watch THROWS SYNCHRONOUSLY on a missing
+      // dir → guard the CALL; a missing/unwatchable dir simply won't hot-reload.
+      const dirs = [join(homedir(), '.qwen', 'rc')];
+      if (workspaceCwd) dirs.push(join(workspaceCwd, '.qwen'));
+      for (const dir of dirs) {
+        try {
+          watchers.push(
+            watch(dir, (_event, filename) => {
+              // filename can be null on some platforms/events → trigger anyway
+              // (the watched dirs are tiny; debounce collapses spurious wakes).
+              if (filename === null || filename === 'policy.yaml') {
+                activeReloader.trigger(
+                  filename === null ? undefined : join(dir, filename),
+                );
+              }
+              if (filename === null || filename === 'routing.yaml') {
+                activeRoutingReloader?.trigger(
+                  filename === null ? undefined : join(dir, filename),
+                );
+              }
+            }),
+          );
+        } catch {
+          // Missing/unwatchable dir → no hot-reload for that layer.
+        }
+      }
+    }
+
+    // Rate-table hot-reload (add-cost-tracking): watch ~/.qwen/rc for
+    // model-rates.yaml; a valid edit swaps the live table within the 250ms debounce,
+    // a malformed edit retains the previous table and audits rate_table_parse_failed.
+    if (usageStore) {
+      rateReloader = createRateTableReloader(rateTablePath(), rates, {
+        onParseFailed: (message) =>
+          void audit.record({
+            action: 'rate_table_parse_failed',
+            detail: { message },
+          }),
+      });
       try {
         watchers.push(
-          watch(dir, (_event, filename) => {
-            // filename can be null on some platforms/events → trigger anyway
-            // (the watched dirs are tiny; debounce collapses spurious wakes).
-            if (filename === null || filename === 'policy.yaml') {
-              activeReloader.trigger(
-                filename === null ? undefined : join(dir, filename),
-              );
-            }
-            if (filename === null || filename === 'routing.yaml') {
-              activeRoutingReloader?.trigger(
-                filename === null ? undefined : join(dir, filename),
-              );
+          watch(join(homedir(), '.qwen', 'rc'), (_event, filename) => {
+            if (filename === null || filename === 'model-rates.yaml') {
+              rateReloader!.trigger();
             }
           }),
         );
       } catch {
-        // Missing/unwatchable dir → no hot-reload for that layer.
+        // Missing/unwatchable dir → rate table simply won't hot-reload.
       }
     }
-  }
 
-  // Rate-table hot-reload (add-cost-tracking): watch ~/.qwen/rc for
-  // model-rates.yaml; a valid edit swaps the live table within the 250ms debounce,
-  // a malformed edit retains the previous table and audits rate_table_parse_failed.
-  if (usageStore) {
-    rateReloader = createRateTableReloader(rateTablePath(), rates, {
-      onParseFailed: (message) =>
-        void audit.record({
-          action: 'rate_table_parse_failed',
-          detail: { message },
-        }),
+    const port = opts.gatewayPort ?? 4170;
+    // http vs native-TLS https per the bind decision. The cert/key were already
+    // read+validated above (before startDaemon) so a bad path fails fast without
+    // orphaning the daemon; here we just hand the buffers to the https server.
+    //
+    // A TLS bind fronts the same express app with HTTP/2. A browser caps HTTP/1.1
+    // at six connections per origin and each viewer tab holds two long-lived ones
+    // (the /rc/events stream plus the whole-turn prompt POST), so three tabs park
+    // every further request with no error and no output. HTTP/2 multiplexes the
+    // streams onto one connection. The app itself is still served over loopback
+    // HTTP/1.1, so routes keep a real req.socket. Cleartext binds cannot speak
+    // HTTP/2, which needs TLS, so they keep the plain app.
+    // QWEN_RC_NO_HTTP2=1 restores the previous https server without a rebuild.
+    const http2Disabled = process.env.QWEN_RC_NO_HTTP2 === '1';
+    // A cleartext bind has no front to share, and the loopback socket is a front
+    // feature, so it is dropped here rather than reaching the plain app path.
+    const loopbackHost =
+      opts.loopbackBindHost && !isLoopbackHost(bind.host)
+        ? opts.loopbackBindHost
+        : undefined;
+    const isHttp2Front = Boolean((acmeTls || tlsMaterial) && !http2Disabled);
+    const listener =
+      acmeTls && !http2Disabled
+        ? createHttp2Front(
+            app,
+            { sniCallback: acmeTls.sniCallback },
+            {
+              loopbackBindHost: loopbackHost,
+            },
+          )
+        : tlsMaterial && !http2Disabled
+          ? createHttp2Front(app, tlsMaterial, {
+              loopbackBindHost: loopbackHost,
+            })
+          : acmeTls
+            ? createHttpsServer({ SNICallback: acmeTls.sniCallback }, app)
+            : tlsMaterial
+              ? createHttpsServer(tlsMaterial, app)
+              : app;
+    const scheme =
+      bind.mode === 'tls' || bind.mode === 'acme' ? 'https' : 'http';
+    // mDNS advertise/suppress decision (add-mdns-discovery). Only a native-TLS
+    // bind advertises; loopback and insecure-proxy are suppressed (the latter
+    // because the upstream proxy, not this cleartext bind, is the right mDNS
+    // source). The synchronous decision drives the banner; the actual publish is
+    // async (it dynamically loads the optional bonjour-service library).
+    const mdns = mdnsDecision({
+      bindMode: bind.mode,
+      noMdnsFlag: opts.noMdns,
+      envDisabled: process.env.QWEN_RC_NO_MDNS === '1',
     });
-    try {
-      watchers.push(
-        watch(join(homedir(), '.qwen', 'rc'), (_event, filename) => {
-          if (filename === null || filename === 'model-rates.yaml') {
-            rateReloader!.trigger();
-          }
-        }),
-      );
-    } catch {
-      // Missing/unwatchable dir → rate table simply won't hot-reload.
-    }
-  }
-
-  const port = opts.gatewayPort ?? 4170;
-  // http vs native-TLS https per the bind decision. The cert/key were already
-  // read+validated above (before startDaemon) so a bad path fails fast without
-  // orphaning the daemon; here we just hand the buffers to the https server.
-  //
-  // A TLS bind fronts the same express app with HTTP/2. A browser caps HTTP/1.1
-  // at six connections per origin and each viewer tab holds two long-lived ones
-  // (the /rc/events stream plus the whole-turn prompt POST), so three tabs park
-  // every further request with no error and no output. HTTP/2 multiplexes the
-  // streams onto one connection. The app itself is still served over loopback
-  // HTTP/1.1, so routes keep a real req.socket. Cleartext binds cannot speak
-  // HTTP/2, which needs TLS, so they keep the plain app.
-  // QWEN_RC_NO_HTTP2=1 restores the previous https server without a rebuild.
-  const http2Disabled = process.env.QWEN_RC_NO_HTTP2 === '1';
-  // A cleartext bind has no front to share, and the loopback socket is a front
-  // feature, so it is dropped here rather than reaching the plain app path.
-  const loopbackHost =
-    opts.loopbackBindHost && !isLoopbackHost(bind.host)
-      ? opts.loopbackBindHost
-      : undefined;
-  const isHttp2Front = Boolean((acmeTls || tlsMaterial) && !http2Disabled);
-  const listener =
-    acmeTls && !http2Disabled
-      ? createHttp2Front(
-          app,
-          { sniCallback: acmeTls.sniCallback },
-          {
-            loopbackBindHost: loopbackHost,
-          },
-        )
-      : tlsMaterial && !http2Disabled
-        ? createHttp2Front(app, tlsMaterial, {
-            loopbackBindHost: loopbackHost,
-          })
-        : acmeTls
-          ? createHttpsServer({ SNICallback: acmeTls.sniCallback }, app)
-          : tlsMaterial
-            ? createHttpsServer(tlsMaterial, app)
-            : app;
-  const scheme = bind.mode === 'tls' || bind.mode === 'acme' ? 'https' : 'http';
-  // mDNS advertise/suppress decision (add-mdns-discovery). Only a native-TLS
-  // bind advertises; loopback and insecure-proxy are suppressed (the latter
-  // because the upstream proxy, not this cleartext bind, is the right mDNS
-  // source). The synchronous decision drives the banner; the actual publish is
-  // async (it dynamically loads the optional bonjour-service library).
-  const mdns = mdnsDecision({
-    bindMode: bind.mode,
-    noMdnsFlag: opts.noMdns,
-    envDisabled: process.env.QWEN_RC_NO_MDNS === '1',
-  });
-  let closeGatewayListener: () => Promise<void> = async () => {};
-  try {
     await new Promise<void>((resolve, reject) => {
       if (isHttp2Front) {
         const frontListener = listener as FrontListener;
@@ -1761,411 +1811,386 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       };
       srv.once('error', onError);
     });
-  } catch (err) {
-    for (const w of watchers) w.close();
-    reloader?.stop();
-    routingReloader?.stop();
-    rateReloader?.stop();
-    clearInterval(bridgeReaper);
-    stopWalRetention();
-    stopLoopGuard();
-    acmeManager?.stop();
-    await daemonPool.stopAll();
-    throw err;
-  }
-  {
-    const { code, expiresAt } = pairing.mint([
-      OWNER,
-      SESSION_READ,
-      APPROVE,
-      WRITE,
-    ]);
-    // Write the bootstrap code to the secrets dir (0700) as a 0600 file; print
-    // only the path to stdout - never the code (pairing-auth spec invariant).
-    const rcDir = join(homedir(), '.qwen', 'rc');
-    const { path: bootstrapPath } = writeBootstrapCode(rcDir, code);
-    // The file mirrors a single-use, time-bounded code: drop it the moment the
-    // code is redeemed or lapses, so a later `qwen-rc up` never prints a dead
-    // one. (Content-matched, so it never removes a newer boot's file.)
-    pairing.onConsumed = (consumed) => {
-      if (consumed === code) removeBootstrapCode(rcDir, code);
-    };
-    const expiryTimer = setTimeout(
-      () => removeBootstrapCode(rcDir, code),
-      Math.max(0, expiresAt - Date.now()),
-    );
-    expiryTimer.unref();
-    const banner = [
-      `qwen-rc gateway listening on ${scheme}://${bind.host}:${port}`,
-      `web viewer: ${scheme}://${bind.host}:${port}/ui/`,
-    ];
-    if (loopbackHost) {
-      banner.push(
-        `loopback front: ${scheme}://${loopbackHost}:${port}/ui/ ` +
-          '(this host only)',
+    {
+      const { code, expiresAt } = pairing.mint([
+        OWNER,
+        SESSION_READ,
+        APPROVE,
+        WRITE,
+      ]);
+      // Write the bootstrap code to the secrets dir (0700) as a 0600 file; print
+      // only the path to stdout - never the code (pairing-auth spec invariant).
+      const rcDir = join(homedir(), '.qwen', 'rc');
+      const { path: bootstrapPath } = writeBootstrapCode(rcDir, code);
+      // The file mirrors a single-use, time-bounded code: drop it the moment the
+      // code is redeemed or lapses, so a later `qwen-rc up` never prints a dead
+      // one. (Content-matched, so it never removes a newer boot's file.)
+      pairing.onConsumed = (consumed) => {
+        if (consumed === code) removeBootstrapCode(rcDir, code);
+      };
+      expiryTimer = setTimeout(
+        () => removeBootstrapCode(rcDir, code),
+        Math.max(0, expiresAt - Date.now()),
       );
-    } else if (opts.loopbackBindHost) {
-      banner.push(
-        `loopback front: not bound (--loopback-bind ${opts.loopbackBindHost} ` +
-          'needs a non-loopback --host and the HTTP/2 front)',
-      );
-    }
-    if (bind.mode === 'insecure-proxy') {
-      banner.push(
-        '⚠ bound non-loopback as PLAIN HTTP (--insecure-behind-proxy): a ' +
-          'TLS-terminating reverse proxy MUST front this gateway, or bearer ' +
-          'tokens transit in cleartext.',
-      );
-    } else if (bind.mode === 'tls') {
-      banner.push('TLS: native termination enabled');
-    } else if (bind.mode === 'acme') {
-      banner.push(
-        `TLS: auto Let's Encrypt (${opts.acmeStaging ? 'staging' : 'production'}), auto-renewing`,
-      );
-    }
-    // TLS fingerprint: SHA-256 of the DER-encoded leaf cert, formatted as
-    // uppercase hex pairs separated by spaces (e.g. "A1B2 C3D4 …"). Included
-    // in the pairing banner so the owner can pin the cert out-of-band.
-    if (tlsCertPem) {
-      const fingerprint = tlsCertFingerprint(tlsCertPem);
-      if (fingerprint) {
-        banner.push(`TLS fingerprint (SHA-256): ${fingerprint}`);
+      expiryTimer.unref();
+      const banner = [
+        `qwen-rc gateway listening on ${scheme}://${bind.host}:${port}`,
+        `web viewer: ${scheme}://${bind.host}:${port}/ui/`,
+      ];
+      if (loopbackHost) {
+        banner.push(
+          `loopback front: ${scheme}://${loopbackHost}:${port}/ui/ ` +
+            '(this host only)',
+        );
+      } else if (opts.loopbackBindHost) {
+        banner.push(
+          `loopback front: not bound (--loopback-bind ${opts.loopbackBindHost} ` +
+            'needs a non-loopback --host and the HTTP/2 front)',
+        );
       }
-    }
-    banner.push(
-      `webpush: enabled (key ${vapid.getApplicationServerKey().slice(0, 8)}…)`,
-      `policy: ${policy.rules.length === 0 ? 'default-prompt' : `${policy.rules.length} rule(s)`}`,
-      `routing: ${routingRuleCount === 0 ? 'none' : `${routingRuleCount} rule(s)`}`,
-      displayHint(bootstrapPath),
-      `  (expires ${new Date(expiresAt).toISOString()}, grants [${OWNER}, ${SESSION_READ}, ${APPROVE}, ${WRITE}])`,
-      `redeem: POST /rc/pair/redeem { "code": "<see ${bootstrapPath}>", "label": "<name>" }`,
-    );
-    banner.push(`mDNS: ${mdnsBannerLine(mdns.reason)}`);
-    // eslint-disable-next-line no-console
-    console.log(banner.join('\n'));
-    if (mdns.advertise) {
-      // Publish asynchronously: derive names (workspace basename or override),
-      // build the strict TXT record, load the optional library, and register.
-      // A missing library or publish failure disables advertising, never the
-      // gateway. mdnsAdvertiser is set so /rc/capabilities + shutdown see it.
-      const workspace = deriveWorkspaceName(
-        workspaceCwd ?? process.cwd(),
-        opts.mdnsWorkspaceName,
+      if (bind.mode === 'insecure-proxy') {
+        banner.push(
+          '⚠ bound non-loopback as PLAIN HTTP (--insecure-behind-proxy): a ' +
+            'TLS-terminating reverse proxy MUST front this gateway, or bearer ' +
+            'tokens transit in cleartext.',
+        );
+      } else if (bind.mode === 'tls') {
+        banner.push('TLS: native termination enabled');
+      } else if (bind.mode === 'acme') {
+        banner.push(
+          `TLS: auto Let's Encrypt (${opts.acmeStaging ? 'staging' : 'production'}), auto-renewing`,
+        );
+      }
+      // TLS fingerprint: SHA-256 of the DER-encoded leaf cert, formatted as
+      // uppercase hex pairs separated by spaces (e.g. "A1B2 C3D4 …"). Included
+      // in the pairing banner so the owner can pin the cert out-of-band.
+      if (tlsCertPem) {
+        const fingerprint = tlsCertFingerprint(tlsCertPem);
+        if (fingerprint) {
+          banner.push(`TLS fingerprint (SHA-256): ${fingerprint}`);
+        }
+      }
+      banner.push(
+        `webpush: enabled (key ${vapid.getApplicationServerKey().slice(0, 8)}…)`,
+        `policy: ${policy.rules.length === 0 ? 'default-prompt' : `${policy.rules.length} rule(s)`}`,
+        `routing: ${routingRuleCount === 0 ? 'none' : `${routingRuleCount} rule(s)`}`,
+        displayHint(bootstrapPath),
+        `  (expires ${new Date(expiresAt).toISOString()}, grants [${OWNER}, ${SESSION_READ}, ${APPROVE}, ${WRITE}])`,
+        `redeem: POST /rc/pair/redeem { "code": "<see ${bootstrapPath}>", "label": "<name>" }`,
       );
-      const instanceName = deriveInstanceName(
-        hostname(),
-        workspace,
-        opts.mdnsInstanceName,
-      );
-      const txt = buildTxtRecord({
-        name: instanceName,
-        workspace,
-        tlsRequired: bind.tlsRequired,
-      });
-      void loadBonjourFactory()
-        .then((factory) => {
-          if (!factory) {
-            // eslint-disable-next-line no-console
-            console.warn(
-              `${MDNS_UNAVAILABLE_KEYWORD}: optional bonjour-service dependency not installed`,
-            );
-            return;
-          }
-          const adv = new MdnsAdvertiser({ instanceName, port, txt, factory });
-          adv.start();
-          mdnsAdvertiser = adv;
-          // eslint-disable-next-line no-console
-          console.log(
-            `mDNS: advertising "${instanceName}" on ${bind.host}:${port} ` +
-              `(workspace=${workspace}, tlsRequired=${txt.tlsRequired}; use --no-mdns to disable)`,
-          );
-        })
-        .catch((err) => {
-          // eslint-disable-next-line no-console
-          console.warn(
-            `mDNS: advertising failed: ${(err as Error).message ?? err}`,
-          );
+      banner.push(`mDNS: ${mdnsBannerLine(mdns.reason)}`);
+      // eslint-disable-next-line no-console
+      console.log(banner.join('\n'));
+      if (mdns.advertise) {
+        // Publish asynchronously: derive names (workspace basename or override),
+        // build the strict TXT record, load the optional library, and register.
+        // A missing library or publish failure disables advertising, never the
+        // gateway. mdnsAdvertiser is set so /rc/capabilities + shutdown see it.
+        const workspace = deriveWorkspaceName(
+          workspaceCwd ?? process.cwd(),
+          opts.mdnsWorkspaceName,
+        );
+        const instanceName = deriveInstanceName(
+          hostname(),
+          workspace,
+          opts.mdnsInstanceName,
+        );
+        const txt = buildTxtRecord({
+          name: instanceName,
+          workspace,
+          tlsRequired: bind.tlsRequired,
         });
-    }
-  }
-
-  // Idle suggestions (proposal `add-idle-suggestions`): build the gateway-own
-  // handler that fires on a session's active-prompt true→false edge WHENEVER a
-  // coherent model endpoint resolves — but the `enabled` flag (read live at fire
-  // time from idle.yaml) is the SOLE egress guard, OFF by default, so a
-  // workstation that merely has model creds in its env never ships transcript
-  // content to a model without the operator opting in. No coherent (key,host) →
-  // no handler (a model call is impossible anyway). The handler never touches the
-  // daemon session (option B) and degrades to silence on any failure. The config,
-  // limiter, and toggle store were created above (so /suggest status can read
-  // them); here we wire the handler that consumes them.
-  let onSessionIdle:
-    | ((sessionId: string, workspaceCwd: string) => void)
-    | undefined;
-  // The rising edge (a new prompt started) cancels a suggestion round still
-  // running for the previous idle edge, so it cannot publish stale chips (#169).
-  let onSessionActive: ((sessionId: string) => void) | undefined;
-  if (suggestCfg) {
-    const idleHandle = createIdleSuggestionHandler({
-      chat: createChatTransport(suggestCfg),
-      // Per-session model: ask the model the watched conversation actually runs
-      // (read off its own transcript) instead of one fixed endpoint. Stays OFF
-      // when the operator pinned the destination with the dedicated
-      // QWEN_RC_SUGGEST_* pair: naming both a key and a host is an explicit
-      // instruction about where transcript content goes, which selection must
-      // not override. A model settings cannot map falls back to the transport
-      // above, so selection never turns egress on or off by itself.
-      getChat: isSuggestEndpointPinned()
-        ? undefined
-        : createSuggestChatSelector(suggestCfg),
-      bus: ownerEvents,
-      audit,
-      getConfig: () => idleConfig,
-      limiter: idleLimiter,
-      // Per-session `/suggest off` override (narrows only — never widens past the
-      // global egress gate above).
-      getSessionEnabled: (id) => idleToggles.get(id),
-    });
-    onSessionIdle = idleHandle.onSessionIdle;
-    onSessionActive = idleHandle.cancelForSession;
-    // eslint-disable-next-line no-console
-    console.log(
-      idleConfig.enabled
-        ? `idle suggestions: enabled (model ${suggestCfg.model}, ` +
-            `${idleConfig.maxSuggestionsPerHour}/hr)`
-        : 'idle suggestions: available but disabled ' +
-            '(set `enabled: true` in ~/.qwen/rc/idle.yaml)',
-    );
-
-    // Hot-reload idle.yaml (debounced 250 ms): on a successful reparse, mutate
-    // the shared `idleConfig` ref IN PLACE (the handler reads it live, so the new
-    // enabled/maxSuggestions* apply on the next idle edge with no rebuild). A
-    // parse error RETAINS the previous good config and audits
-    // idle_config_parse_failed (never crashes/widens on a half-typed save —
-    // mirrors the policy reloader). A deleted file reverts to shipped defaults.
-    // The env force (QWEN_RC_IDLE_SUGGESTIONS) is re-applied each reload so a file
-    // edit can't silently disable an env-enabled feature.
-    const idlePath = join(homedir(), '.qwen', 'rc', 'idle.yaml');
-    const forceIdleEnabled = resolveIdleEnabled();
-    let idleReloadTimer: ReturnType<typeof setTimeout> | undefined;
-    const reloadIdle = (): void => {
-      if (idleReloadTimer) clearTimeout(idleReloadTimer);
-      idleReloadTimer = setTimeout(() => {
-        void (async () => {
-          let text: string;
-          try {
-            text = await readFile(idlePath, 'utf8');
-          } catch {
-            // Deleted/unreadable → revert to shipped defaults (+ env force).
-            Object.assign(idleConfig, DEFAULT_IDLE_CONFIG);
-            if (forceIdleEnabled) idleConfig.enabled = true;
-            return;
-          }
-          try {
-            Object.assign(
-              idleConfig,
-              applyIdleReload(text, { forceEnabled: forceIdleEnabled }),
-            );
+        void loadBonjourFactory()
+          .then((factory) => {
+            if (bootAborted) return;
+            if (!factory) {
+              // eslint-disable-next-line no-console
+              console.warn(
+                `${MDNS_UNAVAILABLE_KEYWORD}: optional bonjour-service dependency not installed`,
+              );
+              return;
+            }
+            const adv = new MdnsAdvertiser({
+              instanceName,
+              port,
+              txt,
+              factory,
+            });
+            adv.start();
+            mdnsAdvertiser = adv;
             // eslint-disable-next-line no-console
             console.log(
-              `idle: reloaded (enabled=${idleConfig.enabled}, ` +
-                `${idleConfig.maxSuggestionsPerHour}/hr)`,
+              `mDNS: advertising "${instanceName}" on ${bind.host}:${port} ` +
+                `(workspace=${workspace}, tlsRequired=${txt.tlsRequired}; use --no-mdns to disable)`,
             );
-          } catch (err) {
-            void audit.record({
-              action: 'idle_config_parse_failed',
-              detail: { reason: (err as Error)?.name ?? 'error' },
-            });
-            // eslint-disable-next-line no-console
-            console.warn('idle: reload failed, keeping previous config');
-          }
-        })();
-      }, 250);
-      if (
-        typeof idleReloadTimer === 'object' &&
-        idleReloadTimer &&
-        'unref' in idleReloadTimer
-      ) {
-        (idleReloadTimer as { unref: () => void }).unref();
-      }
-    };
-    try {
-      watchers.push(
-        watch(join(homedir(), '.qwen', 'rc'), (_event, filename) => {
-          if (filename === null || filename === 'idle.yaml') reloadIdle();
-        }),
-      );
-    } catch {
-      // Missing/unwatchable dir → no idle hot-reload (boot value stands).
-    }
-  }
-
-  // Hold the gateway's own daemon subscriptions so push fires with no browser
-  // open. Best-effort: start() always resolves, even if the daemon is unhappy.
-  // The session-event pump runs when EITHER push is configured OR cost tracking
-  // is on (cost ingestion must see every session_update, independent of push).
-  let pump: SessionEventPump | undefined;
-  if (notifier || usageIngester || agentLifecycle || reviewLifecycle) {
-    pump = new SessionEventPump(daemonPool, notifier, {
-      sessionName: (s) => s.displayName,
-      enforcer, // already notifier-gated (undefined when push off) → no auto-vote change
-      // Idle suggestions previously rode on the push pump (they only ran when a
-      // notifier was present). Keep that coupling: a cost-only pump (push off) must
-      // NOT newly activate idle suggestions — enabling cost tracking must not change
-      // idle behavior. So gate the idle hook on `notifier`, not just `onSessionIdle`.
-      ...(onSessionIdle && notifier ? { onSessionIdle } : {}),
-      ...(onSessionActive && notifier ? { onSessionActive } : {}),
-      onEvent: (sid: string, ev: { type: string; data: unknown }) => {
-        usageFeeder?.onEvent(sid, ev);
-        // Fire-and-forget: lifecycle transitions must never block or
-        // break the pump's subscribe loop.
-        agentLifecycle
-          ?.handleSessionEvent(sid, {
-            type: ev.type,
-            data: ev.data,
           })
-          .catch(() => {});
-        // Review lifecycle (add-remote-review): a mid-review daemon
-        // session_died drives the review to `failed` and emits
-        // review_failed — the wire-protocol registry promise. Same
-        // fire-and-forget contract as agents above.
-        void reviewLifecycle
-          ?.handleSessionEvent(sid, { type: ev.type, data: ev.data })
-          .catch(() => {});
-        // Approval-mode forward (add-remote-approval-mode): the daemon's own
-        // approval_mode_changed event is the single source of truth for the
-        // owner-stream frame — the route (routes/approvalMode.ts) deliberately
-        // does not publish/notify itself, so this is the ONLY owner-bus
-        // broadcast per change. The forward publishes to `ownerEvents` ONLY;
-        // it does NOT also call notifier.notify — the push for this event is
-        // already delivered by this same pump's own universal notify path
-        // just above (`await this.notifier?.notify(...)` in
-        // SessionEventPump.runLoop, pump.ts), identical to how every other
-        // event type reaches push. Calling notify again here previously
-        // double-pushed (verified bug, fixed by removing the forward's
-        // notifier param). Bounded by the pump running at all
-        // (notifier || usageIngester || agentLifecycle || reviewLifecycle),
-        // per the design's documented "pump must be subscribed" residual.
-        if (ev.type === 'approval_mode_changed') {
-          forwardApprovalModeChange(sid, ev.data, ownerEvents);
-        }
-      },
-    });
-    await pump.start();
-    const consumers: string[] = [];
-    if (notifier) consumers.push('push');
-    if (usageIngester) consumers.push('cost tracking');
-    if (agentLifecycle) consumers.push('agents');
-    if (reviewLifecycle) consumers.push('reviews');
-    // eslint-disable-next-line no-console
-    console.log(`session pump: started (${consumers.join(', ')})`);
-  }
-
-  // End-of-quiet-window digest flush (webpush D4, cycle 75): poll on an unref'd
-  // interval so a "while you were away" digest fires the moment each
-  // subscription leaves its quiet window. flushQuietDigests is sync and never
-  // throws (best-effort send); the only behaviour it can add is an extra digest
-  // push, never a suppressed prompt. Re-reads the live subscription list each
-  // tick, so PATCH-quietHours / unsubscribe need no per-sub timer plumbing.
-  let quietDigestTimer: NodeJS.Timeout | undefined;
-  if (notifier) {
-    const intervalMs = Number(process.env.QWEN_RC_QUIET_DIGEST_MS) || 60000;
-    quietDigestTimer = setInterval(
-      () => notifier.flushQuietDigests(),
-      intervalMs,
-    );
-    quietDigestTimer.unref();
-  }
-
-  // In-process bridges (add-{telegram,discord,matrix}-bridge), opt-in. The HYBRID:
-  // each runs in THIS process but talks the gateway ONLY over the loopback contract
-  // with an OPERATOR-MINTED bridge token (QWEN_BRIDGE_TOKEN) — never an auto-minted
-  // internal token — so it stays extractable to a sidecar by changing only config.
-  // Construction is shared with the standalone sidecar via startBridge; the pure
-  // resolver decides which bridges are configured (and threads MATRIX_ENABLE_E2EE
-  // into the in-process Matrix bridge too). Transport is loopback; deeplinks use
-  // QWEN_DAEMON_URL when set (a phone can't reach loopback).
-  const startedBridges: StartedBridge[] = [];
-  {
-    const { plans, warnings } = resolveInProcessBridges(process.env, {
-      port,
-      homeDir: homedir(),
-    });
-    for (const w of warnings) {
-      // eslint-disable-next-line no-console
-      console.warn(w);
-    }
-    for (const plan of plans) {
-      // Matrix fail-fast (in-process analog: log + don't start, never kill the
-      // gateway): the configured MXID must match the access token's identity.
-      // Bounded by a 5s timeout; on timeout or a network error `userId` is
-      // undefined → fail-open (the bridge starts) rather than wedging boot.
-      if (plan.cfg.kind === 'matrix') {
-        let whoamiUserId: string | undefined;
-        try {
-          const mxRest = new MatrixRestApi({
-            homeserverUrl: plan.cfg.homeserverUrl,
-            accessToken: plan.cfg.accessToken,
+          .catch((err) => {
+            // eslint-disable-next-line no-console
+            console.warn(
+              `mDNS: advertising failed: ${(err as Error).message ?? err}`,
+            );
           });
-          whoamiUserId = (await mxRest.whoami(AbortSignal.timeout(5000)))
-            .userId;
-        } catch {
-          // Unreachable/slow homeserver → fail-open (do not block the gateway).
-        }
-        const mismatch = checkMxid(whoamiUserId, plan.cfg.userId);
-        if (mismatch) {
-          // eslint-disable-next-line no-console
-          console.warn(`matrix bridge: ${mismatch}. Bridge NOT started.`);
-          continue;
-        }
       }
-      startedBridges.push(
-        await startBridge(plan.cfg, {
-          token: plan.token,
-          deeplinkUrl: plan.deeplinkUrl,
-          ...(plan.healthzPort != null
-            ? { healthzPort: plan.healthzPort }
-            : {}),
-          // eslint-disable-next-line no-console
-          log: (m) => console.log(m),
-        }),
-      );
+    }
+
+    // Idle suggestions (proposal `add-idle-suggestions`): build the gateway-own
+    // handler that fires on a session's active-prompt true→false edge WHENEVER a
+    // coherent model endpoint resolves — but the `enabled` flag (read live at fire
+    // time from idle.yaml) is the SOLE egress guard, OFF by default, so a
+    // workstation that merely has model creds in its env never ships transcript
+    // content to a model without the operator opting in. No coherent (key,host) →
+    // no handler (a model call is impossible anyway). The handler never touches the
+    // daemon session (option B) and degrades to silence on any failure. The config,
+    // limiter, and toggle store were created above (so /suggest status can read
+    // them); here we wire the handler that consumes them.
+    let onSessionIdle:
+      | ((sessionId: string, workspaceCwd: string) => void)
+      | undefined;
+    // The rising edge (a new prompt started) cancels a suggestion round still
+    // running for the previous idle edge, so it cannot publish stale chips (#169).
+    let onSessionActive: ((sessionId: string) => void) | undefined;
+    if (suggestCfg) {
+      const idleHandle = createIdleSuggestionHandler({
+        chat: createChatTransport(suggestCfg),
+        // Per-session model: ask the model the watched conversation actually runs
+        // (read off its own transcript) instead of one fixed endpoint. Stays OFF
+        // when the operator pinned the destination with the dedicated
+        // QWEN_RC_SUGGEST_* pair: naming both a key and a host is an explicit
+        // instruction about where transcript content goes, which selection must
+        // not override. A model settings cannot map falls back to the transport
+        // above, so selection never turns egress on or off by itself.
+        getChat: isSuggestEndpointPinned()
+          ? undefined
+          : createSuggestChatSelector(suggestCfg),
+        bus: ownerEvents,
+        audit,
+        getConfig: () => idleConfig,
+        limiter: idleLimiter,
+        // Per-session `/suggest off` override (narrows only — never widens past the
+        // global egress gate above).
+        getSessionEnabled: (id) => idleToggles.get(id),
+      });
+      onSessionIdle = idleHandle.onSessionIdle;
+      onSessionActive = idleHandle.cancelForSession;
       // eslint-disable-next-line no-console
       console.log(
-        `${plan.cfg.kind} bridge: started (in-process, loopback contract)`,
+        idleConfig.enabled
+          ? `idle suggestions: enabled (model ${suggestCfg.model}, ` +
+              `${idleConfig.maxSuggestionsPerHour}/hr)`
+          : 'idle suggestions: available but disabled ' +
+              '(set `enabled: true` in ~/.qwen/rc/idle.yaml)',
       );
-    }
-  }
 
-  const shutdown = async () => {
-    for (const w of watchers) w.close();
-    reloader?.stop();
-    routingReloader?.stop();
-    rateReloader?.stop();
-    if (quietDigestTimer) clearInterval(quietDigestTimer);
-    clearInterval(bridgeReaper);
-    stopWalRetention();
-    stopLoopGuard();
-    for (const b of startedBridges) b.stop();
-    // mDNS Goodbye (design D4): withdraw the advertisement so a stale record does
-    // not haunt the LAN for the 75-min TTL; bounded to 500 ms.
-    if (mdnsAdvertiser) await mdnsAdvertiser.stop(500);
-    if (pump) await pump.stop();
-    acmeManager?.stop();
-    await closeGatewayListener();
-    // Stop every workspace daemon the pool spawned (add-multi-workspace
-    // -daemon-pool) alongside the boot daemon below — otherwise a POST
-    // /session { cwd } that spawned a pooled `qwen serve` leaves it running
-    // as an orphan after the gateway exits.
-    await daemonPool.stopAll();
-    await handle.stop();
-    process.exit(0);
-  };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
-  // The handlers own teardown from this line on. The entrypoint claim above only
-  // covers a throw that happens before it.
-  releaseBootDaemon();
+      // Hot-reload idle.yaml (debounced 250 ms): on a successful reparse, mutate
+      // the shared `idleConfig` ref IN PLACE (the handler reads it live, so the new
+      // enabled/maxSuggestions* apply on the next idle edge with no rebuild). A
+      // parse error RETAINS the previous good config and audits
+      // idle_config_parse_failed (never crashes/widens on a half-typed save —
+      // mirrors the policy reloader). A deleted file reverts to shipped defaults.
+      // The env force (QWEN_RC_IDLE_SUGGESTIONS) is re-applied each reload so a file
+      // edit can't silently disable an env-enabled feature.
+      const idlePath = join(homedir(), '.qwen', 'rc', 'idle.yaml');
+      const forceIdleEnabled = resolveIdleEnabled();
+      const reloadIdle = (): void => {
+        if (idleReloadTimer) clearTimeout(idleReloadTimer);
+        idleReloadTimer = setTimeout(() => {
+          void (async () => {
+            let text: string;
+            try {
+              text = await readFile(idlePath, 'utf8');
+            } catch {
+              // Deleted/unreadable → revert to shipped defaults (+ env force).
+              Object.assign(idleConfig, DEFAULT_IDLE_CONFIG);
+              if (forceIdleEnabled) idleConfig.enabled = true;
+              return;
+            }
+            try {
+              Object.assign(
+                idleConfig,
+                applyIdleReload(text, { forceEnabled: forceIdleEnabled }),
+              );
+              // eslint-disable-next-line no-console
+              console.log(
+                `idle: reloaded (enabled=${idleConfig.enabled}, ` +
+                  `${idleConfig.maxSuggestionsPerHour}/hr)`,
+              );
+            } catch (err) {
+              void audit.record({
+                action: 'idle_config_parse_failed',
+                detail: { reason: (err as Error)?.name ?? 'error' },
+              });
+              // eslint-disable-next-line no-console
+              console.warn('idle: reload failed, keeping previous config');
+            }
+          })();
+        }, 250);
+        if (
+          typeof idleReloadTimer === 'object' &&
+          idleReloadTimer &&
+          'unref' in idleReloadTimer
+        ) {
+          (idleReloadTimer as { unref: () => void }).unref();
+        }
+      };
+      try {
+        watchers.push(
+          watch(join(homedir(), '.qwen', 'rc'), (_event, filename) => {
+            if (filename === null || filename === 'idle.yaml') reloadIdle();
+          }),
+        );
+      } catch {
+        // Missing/unwatchable dir → no idle hot-reload (boot value stands).
+      }
+    }
+
+    // Hold the gateway's own daemon subscriptions so push fires with no browser
+    // open. Best-effort: start() always resolves, even if the daemon is unhappy.
+    // The session-event pump runs when EITHER push is configured OR cost tracking
+    // is on (cost ingestion must see every session_update, independent of push).
+    if (notifier || usageIngester || agentLifecycle || reviewLifecycle) {
+      pump = new SessionEventPump(daemonPool, notifier, {
+        sessionName: (s) => s.displayName,
+        enforcer, // already notifier-gated (undefined when push off) → no auto-vote change
+        // Idle suggestions previously rode on the push pump (they only ran when a
+        // notifier was present). Keep that coupling: a cost-only pump (push off) must
+        // NOT newly activate idle suggestions — enabling cost tracking must not change
+        // idle behavior. So gate the idle hook on `notifier`, not just `onSessionIdle`.
+        ...(onSessionIdle && notifier ? { onSessionIdle } : {}),
+        ...(onSessionActive && notifier ? { onSessionActive } : {}),
+        onEvent: (sid: string, ev: { type: string; data: unknown }) => {
+          usageFeeder?.onEvent(sid, ev);
+          // Fire-and-forget: lifecycle transitions must never block or
+          // break the pump's subscribe loop.
+          agentLifecycle
+            ?.handleSessionEvent(sid, {
+              type: ev.type,
+              data: ev.data,
+            })
+            .catch(() => {});
+          // Review lifecycle (add-remote-review): a mid-review daemon
+          // session_died drives the review to `failed` and emits
+          // review_failed — the wire-protocol registry promise. Same
+          // fire-and-forget contract as agents above.
+          void reviewLifecycle
+            ?.handleSessionEvent(sid, { type: ev.type, data: ev.data })
+            .catch(() => {});
+          // Approval-mode forward (add-remote-approval-mode): the daemon's own
+          // approval_mode_changed event is the single source of truth for the
+          // owner-stream frame — the route (routes/approvalMode.ts) deliberately
+          // does not publish/notify itself, so this is the ONLY owner-bus
+          // broadcast per change. The forward publishes to `ownerEvents` ONLY;
+          // it does NOT also call notifier.notify — the push for this event is
+          // already delivered by this same pump's own universal notify path
+          // just above (`await this.notifier?.notify(...)` in
+          // SessionEventPump.runLoop, pump.ts), identical to how every other
+          // event type reaches push. Calling notify again here previously
+          // double-pushed (verified bug, fixed by removing the forward's
+          // notifier param). Bounded by the pump running at all
+          // (notifier || usageIngester || agentLifecycle || reviewLifecycle),
+          // per the design's documented "pump must be subscribed" residual.
+          if (ev.type === 'approval_mode_changed') {
+            forwardApprovalModeChange(sid, ev.data, ownerEvents);
+          }
+        },
+      });
+      await pump.start();
+      const consumers: string[] = [];
+      if (notifier) consumers.push('push');
+      if (usageIngester) consumers.push('cost tracking');
+      if (agentLifecycle) consumers.push('agents');
+      if (reviewLifecycle) consumers.push('reviews');
+      // eslint-disable-next-line no-console
+      console.log(`session pump: started (${consumers.join(', ')})`);
+    }
+
+    // End-of-quiet-window digest flush (webpush D4, cycle 75): poll on an unref'd
+    // interval so a "while you were away" digest fires the moment each
+    // subscription leaves its quiet window. flushQuietDigests is sync and never
+    // throws (best-effort send); the only behaviour it can add is an extra digest
+    // push, never a suppressed prompt. Re-reads the live subscription list each
+    // tick, so PATCH-quietHours / unsubscribe need no per-sub timer plumbing.
+    if (notifier) {
+      const intervalMs = Number(process.env.QWEN_RC_QUIET_DIGEST_MS) || 60000;
+      quietDigestTimer = setInterval(
+        () => notifier.flushQuietDigests(),
+        intervalMs,
+      );
+      quietDigestTimer.unref();
+    }
+
+    // In-process bridges (add-{telegram,discord,matrix}-bridge), opt-in. The HYBRID:
+    // each runs in THIS process but talks the gateway ONLY over the loopback contract
+    // with an OPERATOR-MINTED bridge token (QWEN_BRIDGE_TOKEN) — never an auto-minted
+    // internal token — so it stays extractable to a sidecar by changing only config.
+    // Construction is shared with the standalone sidecar via startBridge; the pure
+    // resolver decides which bridges are configured (and threads MATRIX_ENABLE_E2EE
+    // into the in-process Matrix bridge too). Transport is loopback; deeplinks use
+    // QWEN_DAEMON_URL when set (a phone can't reach loopback).
+    {
+      const { plans, warnings } = resolveInProcessBridges(process.env, {
+        port,
+        homeDir: homedir(),
+      });
+      for (const w of warnings) {
+        // eslint-disable-next-line no-console
+        console.warn(w);
+      }
+      for (const plan of plans) {
+        // Matrix fail-fast (in-process analog: log + don't start, never kill the
+        // gateway): the configured MXID must match the access token's identity.
+        // Bounded by a 5s timeout; on timeout or a network error `userId` is
+        // undefined → fail-open (the bridge starts) rather than wedging boot.
+        if (plan.cfg.kind === 'matrix') {
+          let whoamiUserId: string | undefined;
+          try {
+            const mxRest = new MatrixRestApi({
+              homeserverUrl: plan.cfg.homeserverUrl,
+              accessToken: plan.cfg.accessToken,
+            });
+            whoamiUserId = (await mxRest.whoami(AbortSignal.timeout(5000)))
+              .userId;
+          } catch {
+            // Unreachable/slow homeserver → fail-open (do not block the gateway).
+          }
+          const mismatch = checkMxid(whoamiUserId, plan.cfg.userId);
+          if (mismatch) {
+            // eslint-disable-next-line no-console
+            console.warn(`matrix bridge: ${mismatch}. Bridge NOT started.`);
+            continue;
+          }
+        }
+        startedBridges.push(
+          await startBridge(plan.cfg, {
+            token: plan.token,
+            deeplinkUrl: plan.deeplinkUrl,
+            ...(plan.healthzPort != null
+              ? { healthzPort: plan.healthzPort }
+              : {}),
+            // eslint-disable-next-line no-console
+            log: (m) => console.log(m),
+          }),
+        );
+        // eslint-disable-next-line no-console
+        console.log(
+          `${plan.cfg.kind} bridge: started (in-process, loopback contract)`,
+        );
+      }
+    }
+
+    const shutdown = async () => {
+      await cleanupServeResources();
+      await handle.stop();
+      process.exit(0);
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+    // The handlers own teardown from this line on. The entrypoint claim above only
+    // covers a throw that happens before it.
+    releaseBootDaemon();
+  } catch (err) {
+    await cleanupServeResources();
+    throw err;
+  }
 }
 
 /** Read all of stdin as UTF-8 (used by `routing test` when no positional). */

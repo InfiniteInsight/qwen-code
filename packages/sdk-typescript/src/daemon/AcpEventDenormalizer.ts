@@ -92,21 +92,35 @@ export function denormalizeAcpNotification(
     }
 
     // _meta may live inside the update object or at params level.
-    const meta = rawUpdate
-      ? isRecord(rawUpdate['_meta'])
+    const updateMeta =
+      rawUpdate && isRecord(rawUpdate['_meta'])
         ? rawUpdate['_meta']
-        : isRecord(params['_meta'])
-          ? params['_meta']
-          : undefined
-      : isRecord(params['_meta'])
-        ? params['_meta']
         : undefined;
+    const paramsMeta = isRecord(params['_meta']) ? params['_meta'] : undefined;
+    const meta = rawUpdate ? (updateMeta ?? paramsMeta) : paramsMeta;
+    const promptId =
+      typeof params['promptId'] === 'string' && params['promptId'].length > 0
+        ? params['promptId']
+        : rawUpdate &&
+            typeof rawUpdate['promptId'] === 'string' &&
+            rawUpdate['promptId'].length > 0
+          ? rawUpdate['promptId']
+          : updateMeta &&
+              typeof updateMeta['promptId'] === 'string' &&
+              updateMeta['promptId'].length > 0
+            ? updateMeta['promptId']
+            : paramsMeta &&
+                typeof paramsMeta['promptId'] === 'string' &&
+                paramsMeta['promptId'].length > 0
+              ? paramsMeta['promptId']
+              : undefined;
 
     return {
       id: nextSyntheticId++,
       v: 1,
       type,
       data,
+      ...(promptId ? { promptId } : {}),
       _meta: meta,
       originatorClientId:
         typeof params['originatorClientId'] === 'string'
@@ -131,11 +145,21 @@ export function denormalizeAcpNotification(
         ? params['type']
         : params['kind'];
     if (typeof type !== 'string' || type.length === 0) return undefined;
+    const dataObj = isRecord(params['data']) ? params['data'] : undefined;
+    const promptId =
+      typeof params['promptId'] === 'string' && params['promptId'].length > 0
+        ? params['promptId']
+        : dataObj &&
+            typeof dataObj['promptId'] === 'string' &&
+            dataObj['promptId'].length > 0
+          ? dataObj['promptId']
+          : undefined;
     return {
       id: nextSyntheticId++,
       v: 1,
       type,
       data: params['data'] ?? params,
+      ...(promptId ? { promptId } : {}),
       _meta: isRecord(params['_meta']) ? params['_meta'] : undefined,
       originatorClientId:
         typeof params['originatorClientId'] === 'string'

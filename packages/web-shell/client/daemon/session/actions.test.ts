@@ -1839,6 +1839,46 @@ describe('createDaemonSessionActions', () => {
     );
   });
 
+  it('forwards the worktree workspaceCwd when switching to a branched session (#500)', async () => {
+    const source = createMockSession('session-a', 'client-a');
+    source.client.branchSession.mockResolvedValueOnce({
+      sessionId: 'session-wt',
+      displayName: 'Worktree branch',
+      clientId: 'client-wt',
+      workspaceCwd: '/work/worktrees/wt-1',
+    });
+    const setRestoreSessionContext = vi.fn();
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      session: source,
+      setRestoreSessionContext,
+    });
+
+    await expect(
+      actions.branchSession({
+        atRecordId: 'checkpoint-1',
+        worktree: { slug: 'wt-1' },
+      }),
+    ).resolves.toEqual({
+      sessionId: 'session-wt',
+      displayName: 'Worktree branch',
+      switchStarted: true,
+    });
+
+    expect(pendingSessionLoadRef.current?.sessionContext).toEqual({
+      kind: 'workspace',
+      cwd: '/work/worktrees/wt-1',
+    });
+    expect(setRestoreSessionContext).toHaveBeenCalledWith({
+      kind: 'workspace',
+      cwd: '/work/worktrees/wt-1',
+    });
+    if (pendingSessionLoadRef.current) {
+      clearTimeout(pendingSessionLoadRef.current.timeout);
+      pendingSessionLoadRef.current.resolve();
+      pendingSessionLoadRef.current = undefined;
+    }
+  });
+
   it('creates from the active session client when the connection matches', async () => {
     const existingSession = createMockSession('session-a');
     const nextSession = createMockSession('session-b');

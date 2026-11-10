@@ -266,6 +266,7 @@ export class WorkflowEngine {
       runsDir?: string;
       worktree?: WorktreeProvider;
       systemContext?: string;
+      concurrency?: number;
     } = {},
   ) {}
 
@@ -294,7 +295,7 @@ export class WorkflowEngine {
         : undefined,
     });
     const scheduler = new Scheduler(
-      undefined,
+      this.opts.concurrency,
       runOpts.lifetimeAgentCap ?? 1000,
     );
     const budgetTotal = runOpts.budgetTotal ?? Number.POSITIVE_INFINITY;

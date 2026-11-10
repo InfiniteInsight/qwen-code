@@ -8525,6 +8525,66 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     // (takeFrames already locked + aborted `sess`; afterEach force-closes.)
   });
 
+  it('translateEvent: forwards originatorClientId and promptId on session_update and _qwen/notify (#497)', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const sess = await openStream(connId, 'sess-1');
+    const got = takeFrames(sess, 2);
+    await new Promise((r) => setTimeout(r, 50));
+    const q = bridge.queues.get('sess-1');
+    q?.push({
+      type: 'session_update',
+      originatorClientId: 'client-echo-1',
+      promptId: 'prompt-42',
+      data: {
+        sessionId: 'sess-1',
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'hello' },
+        },
+      },
+    });
+    q?.push({
+      type: 'prompt_cancelled',
+      originatorClientId: 'client-cancel-1',
+      promptId: 'prompt-42',
+      data: {
+        sessionId: 'sess-1',
+        promptId: 'prompt-42',
+        reason: 'cancelled_by_user',
+      },
+    });
+    const frames = (await got) as Array<{
+      method: string;
+      params: Record<string, unknown>;
+    }>;
+    expect(frames[0]).toMatchObject({
+      method: 'session/update',
+      params: {
+        sessionId: 'sess-1',
+        originatorClientId: 'client-echo-1',
+        promptId: 'prompt-42',
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'hello' },
+        },
+      },
+    });
+    expect(frames[1]).toMatchObject({
+      method: '_qwen/notify',
+      params: {
+        kind: 'prompt_cancelled',
+        originatorClientId: 'client-cancel-1',
+        promptId: 'prompt-42',
+        data: {
+          sessionId: 'sess-1',
+          promptId: 'prompt-42',
+          reason: 'cancelled_by_user',
+        },
+      },
+    });
+  });
+
   it('keeps availableSkillDetails verbatim on pumped session_update frames (#9234)', async () => {
     // Mirror of the SSE redaction tests: the SDK/browser surface strips
     // `_meta.availableSkillDetails`, but the /acp surface must keep

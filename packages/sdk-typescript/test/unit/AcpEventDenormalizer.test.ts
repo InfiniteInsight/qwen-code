@@ -220,6 +220,59 @@ describe('denormalizeAcpNotification', () => {
     expect(event!.originatorClientId).toBe('client-42');
   });
 
+  it('extracts originatorClientId and promptId for session/update and _qwen/notify (#497)', () => {
+    const sessionUpdate: JsonRpcNotification = {
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionId: 's1',
+        originatorClientId: 'client-echo-1',
+        promptId: 'prompt-42',
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'hello' },
+        },
+      },
+    };
+    const updateEvent = denormalizeAcpNotification(sessionUpdate);
+    expect(updateEvent).toMatchObject({
+      type: 'user_message_chunk',
+      originatorClientId: 'client-echo-1',
+      promptId: 'prompt-42',
+      data: {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'hello' },
+        sessionId: 's1',
+      },
+    });
+
+    const notify: JsonRpcNotification = {
+      jsonrpc: '2.0',
+      method: '_qwen/notify',
+      params: {
+        kind: 'prompt_cancelled',
+        originatorClientId: 'client-cancel-1',
+        promptId: 'prompt-42',
+        data: {
+          sessionId: 's1',
+          promptId: 'prompt-42',
+          reason: 'cancelled_by_user',
+        },
+      },
+    };
+    const notifyEvent = denormalizeAcpNotification(notify);
+    expect(notifyEvent).toMatchObject({
+      type: 'prompt_cancelled',
+      originatorClientId: 'client-cancel-1',
+      promptId: 'prompt-42',
+      data: {
+        sessionId: 's1',
+        promptId: 'prompt-42',
+        reason: 'cancelled_by_user',
+      },
+    });
+  });
+
   it('handles missing params gracefully', () => {
     const notification: JsonRpcNotification = {
       jsonrpc: '2.0',

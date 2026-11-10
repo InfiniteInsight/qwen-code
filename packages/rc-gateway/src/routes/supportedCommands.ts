@@ -211,6 +211,27 @@ export function createSessionCommandInvokeRoute(
     // is still watching it.
     //
     // Same knob and same 504 shape as the composer route (routes/prompt.ts:81).
+    const actorTokenId = req.rcClient?.id;
+    const subActor = req.rcClient?.subActor;
+    const recordCompleted = (stopReason: string) => {
+      void audit?.record({
+        action: 'session_command_invoked',
+        actorTokenId,
+        subActor,
+        target: sessionId,
+        detail: { name, stopReason },
+      });
+    };
+    const recordTimedOut = () => {
+      void audit?.record({
+        action: 'session_command_invoked',
+        actorTokenId,
+        subActor,
+        target: sessionId,
+        detail: { name, timedOut: true },
+      });
+    };
+
     const timerAbort = new AbortController();
     let abortSource = '';
     const timer = setTimeout(() => {
@@ -222,7 +243,6 @@ export function createSessionCommandInvokeRoute(
       departed = () => resolve('gone');
     });
     const onResClose = () => {
-      if (abortSource === '') abortSource = 'disconnect';
       departed();
     };
     res.on('close', onResClose);
@@ -255,27 +275,33 @@ export function createSessionCommandInvokeRoute(
     let result;
     try {
       const winner = await Promise.race([prompting, clientGone]);
-      if (winner === 'gone') return;
+      if (winner === 'gone') {
+        void prompting.then(
+          (lateResult) => {
+            recordCompleted(lateResult.stopReason);
+          },
+          () => {
+            if (abortSource === 'timer') {
+              recordTimedOut();
+            }
+          },
+        );
+        return;
+      }
       result = winner;
     } catch (err) {
       if (abortSource === 'timer') {
         // The command WAS invoked, then this route cancelled its turn. No
         // stopReason, because there isn't one.
-        void audit?.record({
-          action: 'session_command_invoked',
-          actorTokenId: req.rcClient?.id,
-          subActor: req.rcClient?.subActor,
-          target: sessionId,
-          detail: { name, timedOut: true },
-        });
-        if (!res.closed) {
+        recordTimedOut();
+        if (!res.closed && !res.writableEnded) {
           res
             .status(504)
             .json({ error: 'prompt_timeout', code: 'prompt_timeout' });
         }
         return;
       }
-      if (abortSource === 'disconnect') return;
+      if (res.closed || res.writableEnded) return;
       if (err instanceof UnknownSessionError || isSessionLevelGone(err)) {
         res.status(409).json({
           error: 'Open this conversation before running commands',
@@ -287,21 +313,17 @@ export function createSessionCommandInvokeRoute(
         .status(502)
         .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
       return;
+    } finally {
+      res.off('close', onResClose);
     }
 
     // A timer that fired only after the turn had already resolved is not a
     // failure: the SDK cancels from its catch path alone, so nothing was
     // interrupted and the stopReason it returned is real.
-    if (abortSource === 'disconnect') return;
+    recordCompleted(result.stopReason);
 
-    void audit?.record({
-      action: 'session_command_invoked',
-      actorTokenId: req.rcClient?.id,
-      subActor: req.rcClient?.subActor,
-      target: sessionId,
-      detail: { name, stopReason: result.stopReason },
-    });
-
-    res.status(200).json({ stopReason: result.stopReason });
+    if (!res.closed && !res.writableEnded) {
+      res.status(200).json({ stopReason: result.stopReason });
+    }
   };
 }

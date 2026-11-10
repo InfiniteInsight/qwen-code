@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DaemonSessionProvider,
+  useActions,
   useConnection,
   useWorkspace,
 } from '@qwen-code/web-shell/daemon-react-sdk';
@@ -187,6 +188,7 @@ function SubagentDetailContent({
 }) {
   const { t } = useI18n();
   const connection = useConnection();
+  const actions = useActions();
   const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot();
   const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
   const { artifacts } = useSessionArtifacts();
@@ -244,6 +246,13 @@ function SubagentDetailContent({
     },
     [connection.sessionId, onRightPanelOpen],
   );
+
+  useEffect(() => {
+    actions?.setDaemonActivePrompt?.(isRunning, {
+      workspaceCwd: connection.workspaceCwd,
+      sessionId: resolution.sessionId,
+    });
+  }, [actions, connection.workspaceCwd, isRunning, resolution.sessionId]);
 
   useEffect(() => {
     if (isRunning) return;
@@ -440,6 +449,13 @@ export function SubagentDetail({
 }) {
   const { t } = useI18n();
   const workspace = useWorkspace();
+  const subagentClient = useMemo(() => {
+    if (!workspace?.client) return null;
+    if (workspaceCwd && typeof workspace.client.workspaceByCwd === 'function') {
+      return workspace.client.workspaceByCwd(workspaceCwd);
+    }
+    return workspace.client;
+  }, [workspace?.client, workspaceCwd]);
   const parentConnection = useConnection();
   const { blocks: parentBlocks, blockChangeSummary: parentBlockChangeSummary } =
     useAnimationFrameTranscriptSnapshot();
@@ -485,8 +501,9 @@ export function SubagentDetail({
     };
     const refresh = async () => {
       clearRefreshTimer();
+      if (!subagentClient) return;
       try {
-        const resolved = await workspace.client.resolveSubagentSession(
+        const resolved = await subagentClient.resolveSubagentSession(
           sessionId,
           rootToolCallId,
         );
@@ -530,7 +547,7 @@ export function SubagentDetail({
         ensurePollingRef.current = undefined;
       }
     };
-  }, [instance.key, rootToolCallId, sessionId, workspace.client]);
+  }, [instance.key, rootToolCallId, sessionId, subagentClient]);
 
   useEffect(() => {
     if (resolution?.status === 'running') {
@@ -589,12 +606,13 @@ export function SubagentDetail({
         }
         onError={onError}
         onStop={
-          initialRootTool.rawOutput &&
-          typeof initialRootTool.rawOutput === 'object' &&
-          'workflowRunId' in initialRootTool.rawOutput
+          !subagentClient ||
+          (initialRootTool.rawOutput &&
+            typeof initialRootTool.rawOutput === 'object' &&
+            'workflowRunId' in initialRootTool.rawOutput)
             ? undefined
             : async () => {
-                const res = await workspace.client.cancelSubagentSession(
+                const res = await subagentClient.cancelSubagentSession(
                   sessionId,
                   rootToolCallId,
                 );
@@ -603,13 +621,14 @@ export function SubagentDetail({
               }
         }
         onSendMessage={
-          initialRootTool.rawOutput &&
-          typeof initialRootTool.rawOutput === 'object' &&
-          'workflowRunId' in initialRootTool.rawOutput
+          !subagentClient ||
+          (initialRootTool.rawOutput &&
+            typeof initialRootTool.rawOutput === 'object' &&
+            'workflowRunId' in initialRootTool.rawOutput)
             ? undefined
-            : typeof workspace.client.messageSubagentSession === 'function'
+            : typeof subagentClient.messageSubagentSession === 'function'
               ? async (message: string) => {
-                  const res = await workspace.client.messageSubagentSession(
+                  const res = await subagentClient.messageSubagentSession(
                     sessionId,
                     rootToolCallId,
                     message,

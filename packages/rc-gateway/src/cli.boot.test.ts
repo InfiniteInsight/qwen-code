@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer as createHttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import {
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   statSync,
@@ -422,6 +423,82 @@ describe('boot daemon ownership', () => {
         delete process.env['QWEN_RC_LOOP_GUARD_MS'];
       else process.env['QWEN_RC_LOOP_GUARD_MS'] = priorLoopGuard;
       await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
+  });
+
+  it('cleans up boot timers (including hostTabSweepTimer and bridgeReaper) when runServe fails before listen (#493)', async () => {
+    const fakeDaemon = createHttpServer((req, res) => {
+      if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok' }));
+        return;
+      }
+      if (req.url === '/capabilities') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ v: 1, workspaceCwd: '/tmp' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify([]));
+    });
+    await new Promise<void>((resolve) =>
+      fakeDaemon.listen(0, '127.0.0.1', () => resolve()),
+    );
+    const daemonPort = (fakeDaemon.address() as AddressInfo).port;
+    const tempHome = mkdtempSync(join(tmpdir(), 'rc-boot-493-'));
+    const rcDir = join(tempHome, '.qwen', 'rc');
+    mkdirSync(rcDir, { recursive: true });
+    // Write a malformed user policy so loadLayeredPolicy throws after
+    // bridgeReaper, hostTabSweepTimer, startWalRetention, and startLoopGuard start.
+    writeFileSync(join(rcDir, 'policy.yaml'), 'rules: [unterminated\n', 'utf8');
+
+    const priorHome = process.env['HOME'];
+    const priorLoopGuard = process.env['QWEN_RC_LOOP_GUARD_MS'];
+    process.env['HOME'] = tempHome;
+    process.env['QWEN_RC_LOOP_GUARD_MS'] = '5000';
+
+    const activeIntervals = new Set<ReturnType<typeof setInterval>>();
+    const origSetInterval = globalThis.setInterval;
+    const origClearInterval = globalThis.clearInterval;
+    const setIntervalSpy = vi
+      .spyOn(globalThis, 'setInterval')
+      .mockImplementation(((...args: Parameters<typeof setInterval>) => {
+        const handle = origSetInterval(...args);
+        activeIntervals.add(handle);
+        return handle;
+      }) as typeof setInterval);
+    const clearIntervalSpy = vi
+      .spyOn(globalThis, 'clearInterval')
+      .mockImplementation(((handle?: ReturnType<typeof setInterval>) => {
+        if (handle !== undefined) activeIntervals.delete(handle);
+        return origClearInterval(handle);
+      }) as typeof clearInterval);
+
+    try {
+      await expect(
+        runServe({
+          host: '127.0.0.1',
+          gatewayPort: 0,
+          attachDaemonUrl: `http://127.0.0.1:${daemonPort}`,
+          attachDaemonToken: 'tok',
+          reopenCrashedTabs: true,
+          noMdns: true,
+          qwenBin: process.execPath,
+        }),
+      ).rejects.toThrow();
+      expect(setIntervalSpy).toHaveBeenCalled();
+      expect(activeIntervals.size).toBe(0);
+      expect(await stopBootOwnedDaemon(1000)).toBe(true);
+    } finally {
+      setIntervalSpy.mockRestore();
+      clearIntervalSpy.mockRestore();
+      for (const h of activeIntervals) origClearInterval(h);
+      if (priorHome === undefined) delete process.env['HOME'];
+      else process.env['HOME'] = priorHome;
+      if (priorLoopGuard === undefined)
+        delete process.env['QWEN_RC_LOOP_GUARD_MS'];
+      else process.env['QWEN_RC_LOOP_GUARD_MS'] = priorLoopGuard;
+      await new Promise<void>((resolve) => fakeDaemon.close(() => resolve()));
     }
   });
 });

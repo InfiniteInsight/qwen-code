@@ -387,8 +387,10 @@ describe('special session resolver telemetry publication', () => {
       title: 'nested agent',
       status: 'running',
     });
+    const updateTargetStatus = vi.fn();
     const subagentSessions = {
       resolve,
+      updateTargetStatus,
     } as unknown as VirtualSubagentSessions;
 
     const app = makeApp([primary, secondary], subagentSessions);
@@ -415,6 +417,11 @@ describe('special session resolver telemetry publication', () => {
       rootSessionId,
       nestedAgentId,
       'agent',
+    );
+    expect(updateTargetStatus).toHaveBeenCalledWith(
+      secondary,
+      virtualNestedId,
+      'cancelled',
     );
 
     resolve.mockClear();

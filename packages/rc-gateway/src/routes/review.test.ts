@@ -19,6 +19,7 @@ import { ReviewRegistry } from '../reviews/reviewRegistry.js';
 import type { ReviewPermissionBridge } from '../reviews/reviewPermissionBridge.js';
 import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
 import type { OwnerEvent } from '../ownerEvents.js';
+import { DEFAULT_PROMPT_TIMEOUT_MS } from './promptTimeout.js';
 
 let server: Server | undefined;
 let stub: StubDaemon | undefined;
@@ -473,6 +474,18 @@ describe('POST /rc/reviews (trigger saga)', () => {
     expect(res.status).toBe(202);
     const body = (await res.json()) as { reviewId: string };
     expect(registry.get(body.reviewId)?.target).toEqual({ kind: 'local' });
+  });
+
+  it('passes promptTimeoutMs (defaulting to DEFAULT_PROMPT_TIMEOUT_MS, not 10 min) to AbortSignal.timeout (#492)', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    try {
+      const { url, tokens } = await setup({ promptDelayMs: 100 });
+      const res = await post(url, tokens.owner, { target: { local: true } });
+      expect(res.status).toBe(202);
+      expect(timeoutSpy).toHaveBeenCalledWith(DEFAULT_PROMPT_TIMEOUT_MS);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
   });
 });
 

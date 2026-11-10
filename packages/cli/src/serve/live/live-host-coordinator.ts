@@ -878,7 +878,7 @@ export class LiveHostCoordinator {
     }
     if (this.call) {
       const replacedCall = this.call;
-      this.pendingStartMode = mode;
+      this.pendingStartMode = 'new';
       this.beginCallStop(replacedCall);
       const reportedCall = this.call ?? replacedCall;
       return {

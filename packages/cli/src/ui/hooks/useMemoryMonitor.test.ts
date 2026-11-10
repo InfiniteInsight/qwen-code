@@ -9,7 +9,7 @@ import { performance as nodePerf } from 'node:perf_hooks';
 import { renderHook } from '@testing-library/react';
 import { vi } from 'vitest';
 
-const { mockDebugLogger } = vi.hoisted(() => ({
+const { mockDebugLogger, mockRelaunchApp } = vi.hoisted(() => ({
   mockDebugLogger: {
     isEnabled: vi.fn().mockReturnValue(false),
     debug: vi.fn(),
@@ -17,9 +17,13 @@ const { mockDebugLogger } = vi.hoisted(() => ({
     warn: vi.fn(),
     error: vi.fn(),
   },
+  mockRelaunchApp: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock('@qwen-code/qwen-code-core/utils/debugLogger.js', () => ({
   createDebugLogger: () => mockDebugLogger,
+}));
+vi.mock('../../utils/processUtils.js', () => ({
+  relaunchApp: () => mockRelaunchApp(),
 }));
 
 import {
@@ -27,6 +31,7 @@ import {
   MEMORY_CHECK_INTERVAL,
   MEMORY_WARNING_THRESHOLD,
   MEMORY_UI_COMPACT_THRESHOLD,
+  MEMORY_SELF_HEAL_THRESHOLD,
   MEMORY_DEBUG_INTERVAL,
   UI_COMPACT_COOLDOWN_MS,
 } from './useMemoryMonitor.js';
@@ -215,5 +220,48 @@ describe('useMemoryMonitor', () => {
     renderHook(() => useMemoryMonitor({ addItem }));
     vi.advanceTimersByTime(MEMORY_DEBUG_INTERVAL);
     expect(nodePerf.getEntriesByType('measure')).toHaveLength(0);
+  });
+
+  it('exposes globalThis.gc via installReactDevMemoryGuard and invokes gc after compactOldItems', () => {
+    expect(typeof globalThis.gc).toBe('function');
+    const gcSpy = vi.spyOn(globalThis as { gc: () => void }, 'gc');
+    const compactOldItems = vi.fn();
+    memoryUsageSpy.mockReturnValue({
+      rss: 1024,
+      heapUsed: MEMORY_UI_COMPACT_THRESHOLD() + 1,
+      heapTotal: MEMORY_UI_COMPACT_THRESHOLD() * 2,
+    } as NodeJS.MemoryUsage);
+
+    renderHook(() => useMemoryMonitor({ addItem, compactOldItems }));
+    vi.advanceTimersByTime(MEMORY_DEBUG_INTERVAL);
+
+    expect(compactOldItems).toHaveBeenCalledTimes(1);
+    expect(gcSpy).toHaveBeenCalledTimes(1);
+    gcSpy.mockRestore();
+  });
+
+  it('self-heals via relaunchApp when attached daemon TUI remains above MEMORY_SELF_HEAL_THRESHOLD after compaction and GC', () => {
+    const origArgv = process.argv;
+    process.argv = [...origArgv, '--attach-daemon'];
+    try {
+      const compactOldItems = vi.fn();
+      memoryUsageSpy.mockReturnValue({
+        rss: 1024,
+        heapUsed: MEMORY_SELF_HEAL_THRESHOLD() + 1024,
+        heapTotal: MEMORY_SELF_HEAL_THRESHOLD() + 4096,
+      } as NodeJS.MemoryUsage);
+
+      renderHook(() => useMemoryMonitor({ addItem, compactOldItems }));
+      vi.advanceTimersByTime(MEMORY_DEBUG_INTERVAL);
+
+      expect(compactOldItems).toHaveBeenCalledTimes(1);
+      expect(mockRelaunchApp).toHaveBeenCalledTimes(1);
+
+      // Should only trigger self-heal relaunch once
+      vi.advanceTimersByTime(MEMORY_DEBUG_INTERVAL);
+      expect(mockRelaunchApp).toHaveBeenCalledTimes(1);
+    } finally {
+      process.argv = origArgv;
+    }
   });
 });

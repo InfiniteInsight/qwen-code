@@ -1753,4 +1753,115 @@ describe('AcpHttpTransport — session-reply pump (no-subscriber session RPC)', 
     ).rejects.toThrow(DaemonTransportClosedError);
     t.dispose();
   });
+
+  it('rejects pending 202 connection-scoped RPCs with DaemonTransportClosedError and resets connection state when connection SSE stream fails with an error (#498)', async () => {
+    const fetchImpl = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === 'string'
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        const method = init?.method ?? 'GET';
+        const body = typeof init?.body === 'string' ? init.body : null;
+
+        if (url.endsWith('/acp') && method === 'POST') {
+          const parsed = body ? JSON.parse(body) : {};
+          if (parsed.method === 'initialize') {
+            return jsonResponse(
+              200,
+              { jsonrpc: '2.0', id: parsed.id, result: { v: 1 } },
+              { 'acp-connection-id': 'conn-err' },
+            );
+          }
+          if (parsed.method === 'session/new') {
+            return new Response(null, { status: 202 });
+          }
+        }
+        if (url.endsWith('/capabilities') && method === 'GET') {
+          return jsonResponse(200, { v: 1, transports: ['acp-http'] });
+        }
+        if (url.endsWith('/acp') && method === 'GET') {
+          return new Response('Unknown Acp-Connection-Id', {
+            status: 404,
+            statusText: 'Not Found',
+          });
+        }
+        return jsonResponse(200, {});
+      },
+    ) as unknown as typeof globalThis.fetch;
+
+    const t = new AcpHttpTransport('http://d', undefined, fetchImpl);
+    await expect(
+      t.fetch('http://d/session', {
+        method: 'POST',
+        body: JSON.stringify({ cwd: '/tmp' }),
+      }),
+    ).rejects.toThrow(DaemonTransportClosedError);
+    expect(t.connected).toBe(false);
+    t.dispose();
+  });
+
+  it('throws DaemonTransportClosedError and resets connection state when POST /acp returns 404 for a stale Acp-Connection-Id (#498)', async () => {
+    let initCount = 0;
+    const fetchImpl = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === 'string'
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        const method = init?.method ?? 'GET';
+        const body = typeof init?.body === 'string' ? init.body : null;
+
+        if (url.endsWith('/acp') && method === 'POST') {
+          const parsed = body ? JSON.parse(body) : {};
+          if (parsed.method === 'initialize') {
+            initCount++;
+            return jsonResponse(
+              200,
+              { jsonrpc: '2.0', id: parsed.id, result: { v: 1 } },
+              { 'acp-connection-id': `conn-${initCount}` },
+            );
+          }
+          if (initCount === 1) {
+            return jsonResponse(404, {
+              jsonrpc: '2.0',
+              id: parsed.id ?? null,
+              error: { code: -32600, message: 'Unknown Acp-Connection-Id' },
+            });
+          }
+          return jsonResponse(200, {
+            jsonrpc: '2.0',
+            id: parsed.id,
+            result: { sessionId: 'sess-reconnected' },
+          });
+        }
+        if (url.endsWith('/capabilities') && method === 'GET') {
+          return jsonResponse(200, { v: 1, transports: ['acp-http'] });
+        }
+        return jsonResponse(200, {});
+      },
+    ) as unknown as typeof globalThis.fetch;
+
+    const t = new AcpHttpTransport('http://d', undefined, fetchImpl);
+    await expect(
+      t.fetch('http://d/session', {
+        method: 'POST',
+        body: JSON.stringify({ cwd: '/tmp' }),
+      }),
+    ).rejects.toThrow(DaemonTransportClosedError);
+    expect(t.connected).toBe(false);
+
+    const retryRes = await t.fetch('http://d/session', {
+      method: 'POST',
+      body: JSON.stringify({ cwd: '/tmp' }),
+    });
+    expect(retryRes.status).toBe(200);
+    expect(initCount).toBe(2);
+    expect(t.connected).toBe(true);
+    t.dispose();
+  });
 });

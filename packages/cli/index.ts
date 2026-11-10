@@ -13,6 +13,9 @@
 // PerformanceMeasure entries in Node's global PerformanceEntry buffer.
 delete (console as { timeStamp?: unknown }).timeStamp;
 delete (console as { createTask?: unknown }).createTask;
+import('./src/utils/react-dev-memory-guard.js')
+  .then(({ installReactDevMemoryGuard }) => installReactDevMemoryGuard())
+  .catch(() => {});
 
 // Java's private stdio worker bypasses the normal CLI module graph.
 const startup =

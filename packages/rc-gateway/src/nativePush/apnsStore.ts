@@ -4,9 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
+import { writeFileAtomic } from '../atomicWrite.js';
+
+export const DEFAULT_MAX_APNS_DEVICES_PER_TOKEN = 8;
 
 /**
  * APNs device-token subscriptions for the iOS native shell
@@ -62,6 +64,7 @@ export class ApnsStore {
     deviceToken: string;
     bundleId: string;
     shellVersion: string;
+    maxPerToken?: number;
   }): Promise<ApnsSubscriptionRecord> {
     const now = this.nowFn();
     const existing = this.records.find(
@@ -73,6 +76,21 @@ export class ApnsStore {
       existing.bundleId = input.bundleId;
       await this.persist();
       return existing;
+    }
+    const cap = Math.max(
+      1,
+      input.maxPerToken ?? DEFAULT_MAX_APNS_DEVICES_PER_TOKEN,
+    );
+    const mine = this.records
+      .filter((r) => r.tokenId === input.tokenId)
+      .sort((a, b) => a.lastSeenAt - b.lastSeenAt || a.createdAt - b.createdAt);
+    const evicted: ApnsSubscriptionRecord[] = [];
+    while (mine.length - evicted.length >= cap) {
+      evicted.push(mine[evicted.length]!);
+    }
+    if (evicted.length > 0) {
+      const gone = new Set(evicted.map((r) => r.id));
+      this.records = this.records.filter((r) => !gone.has(r.id));
     }
     const rec: ApnsSubscriptionRecord = {
       id: randomBytes(16).toString('hex'),
@@ -139,10 +157,13 @@ export class ApnsStore {
   }
 
   private async persist(): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true });
-    const body: PersistShape = { subscriptions: this.records };
-    await writeFile(this.filePath, JSON.stringify(body, null, 2), {
-      mode: 0o600,
-    });
+    await writeFileAtomic(
+      this.filePath,
+      () => {
+        const body: PersistShape = { subscriptions: this.records };
+        return JSON.stringify(body, null, 2);
+      },
+      { mode: 0o600 },
+    );
   }
 }

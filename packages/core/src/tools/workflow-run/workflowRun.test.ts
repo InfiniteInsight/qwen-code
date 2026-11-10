@@ -19,7 +19,9 @@ import type {
 function fakeConfig(spawner: AgentSpawner, runsDir: string) {
   const activities: Array<{ name: string; description: string }> = [];
   const registry = {
-    register: vi.fn(() => ({ id: 't1' })),
+    register: vi.fn((_entry?: { abortController: AbortController }) => ({
+      id: 't1',
+    })),
     appendActivity: vi.fn(
       (_id: string, a: { name: string; description: string }) =>
         activities.push(a),
@@ -169,8 +171,9 @@ describe('WorkflowRunTool', () => {
     };
     const { config, registry } = fakeConfig(spawner, '/tmp/wf-test-runs');
     registry.register.mockImplementation(
-      (entry: { abortController: AbortController }) => {
-        registeredAbortController = entry.abortController;
+      (entry?: { abortController: AbortController }) => {
+        registeredAbortController = entry?.abortController;
+        return { id: 't1' };
       },
     );
 

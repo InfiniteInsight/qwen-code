@@ -659,4 +659,86 @@ describe('POST /rc/session/:id/command/:name', () => {
     expect(res.status).toBe(200);
     expect(calls[0].text).toBe('body for echo x y');
   });
+
+  it('records slash_command_invoked after client disconnect when the turn completes or times out, and removes the close listener (#488)', async () => {
+    await writeFile(join(workspaceDir, 'echo.md'), cmd('echo'));
+    const audit = new FakeAudit();
+    stub = await startStubDaemon({ promptDelayMs: 120 });
+    const handler = createInvokeCommandRoute(
+      new DaemonClient({ baseUrl: stub.baseUrl }),
+      commandLoader(audit),
+      audit,
+      30_000,
+    );
+    let closeListenersAfter = -1;
+    const app = express();
+    app.use(express.json());
+    app.post(
+      '/session/:id/command/:name',
+      fakeClient([SESSION_READ, WRITE]),
+      async (req, res, next) => {
+        await handler(req, res, next);
+        closeListenersAfter = res.listenerCount('close');
+      },
+    );
+    const url = await listen(app);
+
+    const controller = new AbortController();
+    const pending = fetch(`${url}/session/s1/command/echo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ args: ['hi'] }),
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(stub!.lastPromptBody).toBeDefined());
+    controller.abort();
+    await expect(pending).rejects.toThrow();
+
+    await vi.waitFor(() =>
+      expect(
+        audit.entries.some((e) => e.action === 'slash_command_invoked'),
+      ).toBe(true),
+    );
+    const invoked = audit.entries.find(
+      (e) => e.action === 'slash_command_invoked',
+    )!;
+    expect(invoked.detail).toEqual({
+      name: 'echo',
+      stopReason: 'end_turn',
+      argc: 1,
+    });
+    expect(closeListenersAfter).toBe(0);
+  });
+
+  it('attributes a deadline timeout after client disconnect as timedOut: true (#488)', async () => {
+    await writeFile(join(workspaceDir, 'echo.md'), cmd('echo'));
+    const audit = new FakeAudit();
+    const { url } = await bootInvoke({
+      scopes: [SESSION_READ, WRITE],
+      audit,
+      stubOpts: { promptDelayMs: 5_000 },
+      promptTimeoutMs: 100,
+    });
+
+    const controller = new AbortController();
+    const pending = fetch(`${url}/session/s1/command/echo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(stub!.lastPromptBody).toBeDefined());
+    controller.abort();
+    await expect(pending).rejects.toThrow();
+
+    await vi.waitFor(() =>
+      expect(
+        audit.entries.some((e) => e.action === 'slash_command_invoked'),
+      ).toBe(true),
+    );
+    const invoked = audit.entries.find(
+      (e) => e.action === 'slash_command_invoked',
+    )!;
+    expect(invoked.detail).toEqual({ name: 'echo', timedOut: true });
+  });
 });

@@ -2939,6 +2939,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       audit,
       costFor: deps.agents.costFor,
       promptAcceptWindowMs: deps.agents.promptAcceptWindowMs,
+      promptTimeoutMs: deps.promptTimeoutMs,
       promptQueue,
     };
     app.post(
@@ -3018,6 +3019,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       audit,
       costFor: deps.review.costFor,
       promptAcceptWindowMs: deps.review.promptAcceptWindowMs,
+      promptTimeoutMs: deps.promptTimeoutMs,
       promptQueue,
     };
     app.post(

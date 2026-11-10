@@ -235,6 +235,25 @@ export function createInvokeCommandRoute(
     // cancel that kills the running turn and everything queued behind it
     // (#157), so a disconnect merely wins a race against the prompt promise.
     // Full reasoning there.
+    const targetSessionId = req.params.id;
+    const actorTokenId = req.rcClient?.id;
+    const recordCompleted = (stopReason: string) => {
+      void audit?.record({
+        action: 'slash_command_invoked',
+        actorTokenId,
+        target: targetSessionId,
+        detail: { name: cmd.name, stopReason, argc },
+      });
+    };
+    const recordTimedOut = () => {
+      void audit?.record({
+        action: 'slash_command_invoked',
+        actorTokenId,
+        target: targetSessionId,
+        detail: { name: cmd.name, timedOut: true },
+      });
+    };
+
     const timerAbort = new AbortController();
     let abortSource = '';
     const timer = setTimeout(() => {
@@ -246,7 +265,6 @@ export function createInvokeCommandRoute(
       departed = () => resolve('gone');
     });
     const onResClose = () => {
-      if (abortSource === '') abortSource = 'disconnect';
       departed();
     };
     res.on('close', onResClose);
@@ -256,7 +274,7 @@ export function createInvokeCommandRoute(
 
     const prompting = Promise.resolve().then(() =>
       daemon.prompt(
-        req.params.id,
+        targetSessionId,
         { prompt: [{ type: 'text', text }] },
         timerAbort.signal,
       ),
@@ -279,24 +297,31 @@ export function createInvokeCommandRoute(
     let result;
     try {
       const winner = await Promise.race([prompting, clientGone]);
-      if (winner === 'gone') return;
+      if (winner === 'gone') {
+        void prompting.then(
+          (lateResult) => {
+            recordCompleted(lateResult.stopReason);
+          },
+          () => {
+            if (abortSource === 'timer') {
+              recordTimedOut();
+            }
+          },
+        );
+        return;
+      }
       result = winner;
     } catch (err) {
       if (abortSource === 'timer') {
-        void audit?.record({
-          action: 'slash_command_invoked',
-          actorTokenId: req.rcClient?.id,
-          target: req.params.id,
-          detail: { name: cmd.name, timedOut: true },
-        });
-        if (!res.closed) {
+        recordTimedOut();
+        if (!res.closed && !res.writableEnded) {
           res
             .status(504)
             .json({ error: 'prompt_timeout', code: 'prompt_timeout' });
         }
         return;
       }
-      if (abortSource === 'disconnect') return;
+      if (res.closed || res.writableEnded) return;
       if (err instanceof UnknownSessionError || isSessionLevelGone(err)) {
         res.status(409).json({
           error: 'Open this conversation before running commands',
@@ -308,17 +333,14 @@ export function createInvokeCommandRoute(
         .status(502)
         .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
       return;
+    } finally {
+      res.off('close', onResClose);
     }
 
-    if (abortSource === 'disconnect') return;
+    recordCompleted(result.stopReason);
 
-    void audit?.record({
-      action: 'slash_command_invoked',
-      actorTokenId: req.rcClient?.id,
-      target: req.params.id,
-      detail: { name: cmd.name, stopReason: result.stopReason, argc },
-    });
-
-    res.status(200).json({ stopReason: result.stopReason });
+    if (!res.closed && !res.writableEnded) {
+      res.status(200).json({ stopReason: result.stopReason });
+    }
   };
 }

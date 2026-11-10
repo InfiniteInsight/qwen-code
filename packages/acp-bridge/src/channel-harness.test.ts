@@ -287,7 +287,7 @@ describe('channel harness ownership', () => {
       .fn<() => Promise<AcpChannel>>()
       .mockResolvedValueOnce(first.channel)
       .mockResolvedValueOnce(second.channel);
-    const terminationStarted: number[] = [];
+    const terminationStarted: Array<number | string> = [];
     let harness!: ReturnType<typeof createChannelHarness>;
     const bridge = createSessionControlPlane(
       {

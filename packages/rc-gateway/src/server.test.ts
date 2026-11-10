@@ -2745,4 +2745,16 @@ describe('public/index.html regression checks (#469, #470, #471)', () => {
       "typeof from === 'number' && Number.isFinite(from) && from >= 0",
     );
   });
+
+  it('guards claimSelfEcho on insideReplay, unmarks self-send before 409 auto-resume, and marks unrecovered 409 as refused (#489)', async () => {
+    const { url } = await boot();
+    const html = await (await fetch(`${url}/ui/index.html`)).text();
+    expect(html).toContain('if (insideReplay || !claimSelfEcho(text))');
+    expect(html).toContain(
+      "if (failBody409 && failBody409.code === 'session_not_loaded') {\n              unmarkSelfSend(prompt);",
+    );
+    expect(html).toContain(
+      "else if (res.status === 409) {\n              const failBody = await res.json().catch(() => null);\n              setStatus(describeFailure(res, failBody, 'sending the prompt'));\n              refused = (failBody && failBody.code) || 'session not loaded';",
+    );
+  });
 });

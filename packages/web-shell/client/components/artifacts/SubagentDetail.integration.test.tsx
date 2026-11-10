@@ -10,6 +10,7 @@ const {
   animationFrameBlocks,
   connection,
   messagesFromBlocks,
+  sessionActions,
   workspaceActions,
   workspaceClient,
   latestMessageListProps,
@@ -33,6 +34,9 @@ const {
     catchingUp: true,
   },
   messagesFromBlocks: vi.fn(),
+  sessionActions: {
+    setDaemonActivePrompt: vi.fn(),
+  },
   workspaceActions: {
     readFile: vi.fn(),
     stat: vi.fn().mockResolvedValue({ type: 'file' }),
@@ -41,6 +45,7 @@ const {
     resolveSubagentSession: vi.fn(),
     cancelSubagentSession: vi.fn(),
     messageSubagentSession: vi.fn(),
+    workspaceByCwd: undefined as ReturnType<typeof vi.fn> | undefined,
   },
   latestMessageListProps: {
     current: undefined as Record<string, unknown> | undefined,
@@ -70,6 +75,7 @@ const {
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DaemonSessionProvider: ({ children }: { children: ReactNode }) => children,
+  useActions: () => sessionActions,
   useConnection: () => connection,
   useWorkspace: () => ({
     client: workspaceClient,
@@ -154,10 +160,14 @@ afterEach(() => {
   latestMessageListProps.current = undefined;
   latestOpenSubagent.current = undefined;
   messagesFromBlocks.mockClear();
+  sessionActions.setDaemonActivePrompt.mockReset();
   previewTest.enabled = false;
   connection.sessionId = 'subagent-session';
   workspaceActions.stat.mockReset().mockResolvedValue({ type: 'file' });
   workspaceClient.resolveSubagentSession.mockReset();
+  workspaceClient.cancelSubagentSession.mockReset();
+  workspaceClient.messageSubagentSession.mockReset();
+  workspaceClient.workspaceByCwd = undefined;
   vi.useRealTimers();
 });
 
@@ -711,5 +721,72 @@ it('prefers larger updated resolution metrics over stale initial executionSummar
     inputTokens: 1_800,
     outputTokens: 600,
     cachedTokens: 900,
+  });
+});
+
+it('scopes subagent RPCs via workspaceByCwd and syncs isRunning to setDaemonActivePrompt (#499)', async () => {
+  vi.useFakeTimers();
+  const scopedClient = {
+    resolveSubagentSession: vi
+      .fn()
+      .mockResolvedValueOnce({
+        sessionId: 'subagent-session',
+        status: 'running',
+      })
+      .mockResolvedValueOnce({
+        sessionId: 'subagent-session',
+        status: 'completed',
+      }),
+    cancelSubagentSession: vi.fn().mockResolvedValue({ cancelled: true }),
+    messageSubagentSession: vi.fn().mockResolvedValue({
+      delivered: true,
+      action: 'queued',
+      status: 'running',
+    }),
+  };
+  workspaceClient.workspaceByCwd = vi.fn().mockReturnValue(scopedClient);
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  await act(async () => {
+    root!.render(
+      <I18nProvider language="en">
+        <SubagentDetail
+          sessionId="parent-session"
+          rootToolCallId="agent-1"
+          workspaceCwd="/work/sub-project"
+          initialRootTool={{
+            callId: 'agent-1',
+            toolName: 'agent',
+            status: 'in_progress',
+            rawOutput: {
+              type: 'task_execution',
+            },
+          }}
+        />
+      </I18nProvider>,
+    );
+    await Promise.resolve();
+  });
+
+  expect(workspaceClient.workspaceByCwd).toHaveBeenCalledWith(
+    '/work/sub-project',
+  );
+  expect(scopedClient.resolveSubagentSession).toHaveBeenCalledWith(
+    'parent-session',
+    'agent-1',
+  );
+  expect(workspaceClient.resolveSubagentSession).not.toHaveBeenCalled();
+  expect(sessionActions.setDaemonActivePrompt).toHaveBeenLastCalledWith(true, {
+    workspaceCwd: '/work/project',
+    sessionId: 'subagent-session',
+  });
+
+  await act(async () => vi.advanceTimersByTimeAsync(3_000));
+  expect(scopedClient.resolveSubagentSession).toHaveBeenCalledTimes(2);
+  expect(sessionActions.setDaemonActivePrompt).toHaveBeenLastCalledWith(false, {
+    workspaceCwd: '/work/project',
+    sessionId: 'subagent-session',
   });
 });

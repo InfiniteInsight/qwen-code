@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import express from 'express';
 import type { AddressInfo } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -17,7 +17,11 @@ let dir: string;
 let store: ApnsStore;
 let server: import('node:http').Server | undefined;
 
-async function mount(client: { id: string; scopes: string[] }) {
+async function mount(client: {
+  id: string;
+  scopes: string[];
+  sessionLockId?: string;
+}) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -171,9 +175,73 @@ describe('POST /rc/native-push/apns/register', () => {
     });
     expect(r.status).toBe(400);
   });
+
+  it('403s a session-locked share token with share_token_forbidden (#490)', async () => {
+    const base = await mount({
+      id: 'share_1',
+      scopes: ['session:read', 'share'],
+      sessionLockId: 'sess-locked',
+    });
+    const r = await fetch(`${base}/rc/native-push/apns/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(reg()),
+    });
+    expect(r.status).toBe(403);
+    expect(await r.json()).toEqual({
+      error: 'Share tokens may not register push',
+      code: 'share_token_forbidden',
+    });
+    expect(store.listAll()).toHaveLength(0);
+  });
+
+  it('500s with push_persistence_failed when store.register rejects (#490)', async () => {
+    const base = await mount({ id: 'tkn_a', scopes: ['session:read'] });
+    const spy = vi
+      .spyOn(store, 'register')
+      .mockRejectedValueOnce(new Error('ENOSPC'));
+    try {
+      const r = await fetch(`${base}/rc/native-push/apns/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(reg()),
+      });
+      expect(r.status).toBe(500);
+      expect(await r.json()).toEqual({
+        error: 'Failed to persist push registration',
+        code: 'push_persistence_failed',
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe('DELETE /rc/native-push/apns/register/:id', () => {
+  it('500s with push_persistence_failed when store.remove rejects (#490)', async () => {
+    const base = await mount({ id: 'tkn_a', scopes: ['session:read'] });
+    const rec = await store.register({
+      tokenId: 'tkn_a',
+      deviceToken: 'd',
+      bundleId: 'b',
+      shellVersion: '1',
+    });
+    const spy = vi
+      .spyOn(store, 'remove')
+      .mockRejectedValueOnce(new Error('EACCES'));
+    try {
+      const r = await fetch(`${base}/rc/native-push/apns/register/${rec.id}`, {
+        method: 'DELETE',
+      });
+      expect(r.status).toBe(500);
+      expect(await r.json()).toEqual({
+        error: 'Failed to persist push registration',
+        code: 'push_persistence_failed',
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
   it('lets a token delete its own subscription', async () => {
     const base = await mount({ id: 'tkn_a', scopes: ['session:read'] });
     const rec = await store.register({

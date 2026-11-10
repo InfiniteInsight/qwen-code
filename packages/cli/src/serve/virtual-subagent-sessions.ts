@@ -56,6 +56,7 @@ interface ResolvedAgentTask {
   outputFile: string;
   status: string;
   startTime: number;
+  toolUseId?: string;
   durationMs?: number;
   toolCalls?: number;
   totalTokens?: number;
@@ -339,7 +340,54 @@ class VirtualSubagentTarget {
     readonly task: ResolvedAgentTask,
     private readonly workspaceCwd: string,
     private readonly onExpired: () => void,
+    private readonly resolveTaskStatus?: () => Promise<string | undefined>,
   ) {}
+
+  private publishTerminalEvent(status: string): void {
+    this.streamOffset = 0;
+    this.canonicalStreamOffset = 0;
+    if (status === 'failed') {
+      this.bus.publish({
+        type: 'turn_error',
+        data: { sessionId: this.sessionId, message: 'Subagent failed' },
+      });
+      return;
+    }
+    if (status === 'cancelled' || status === 'canceled') {
+      this.bus.publish({
+        type: 'prompt_cancelled',
+        data: { sessionId: this.sessionId, reason: 'cancelled' },
+      });
+      return;
+    }
+    this.bus.publish({
+      type: 'turn_complete',
+      data: { sessionId: this.sessionId, stopReason: 'end_turn' },
+    });
+  }
+
+  readSidecarStatus(): string | undefined {
+    if (!this.task.outputFile.endsWith('.jsonl')) return undefined;
+    const metaPath =
+      this.task.outputFile.slice(0, -'.jsonl'.length) + '.meta.json';
+    const meta = readAgentMeta(metaPath);
+    if (!meta) return undefined;
+    const status =
+      meta.status === 'running' &&
+      meta.isBackgrounded === false &&
+      meta.workflowOwner?.hostname === hostname() &&
+      !isProcessRunning(meta.workflowOwner.pid)
+        ? 'failed'
+        : meta.status;
+    return status && status !== 'running' ? status : undefined;
+  }
+
+  private async readLatestStatus(): Promise<string | undefined> {
+    const sidecarStatus = this.readSidecarStatus();
+    if (sidecarStatus) return sidecarStatus;
+    const liveStatus = await this.resolveTaskStatus?.().catch(() => undefined);
+    return liveStatus && liveStatus !== 'running' ? liveStatus : undefined;
+  }
 
   updateStatus(status: string): void {
     const wasRunning = this.task.status === 'running';
@@ -361,7 +409,12 @@ class VirtualSubagentTarget {
       this.pollTimer = undefined;
     }
     if (wasRunning || this.subscribers > 0) {
-      void this.refreshLive().catch(() => undefined);
+      void this.enqueueRefresh(async () => {
+        await this.refreshAt();
+        if (wasRunning) {
+          this.publishTerminalEvent(status);
+        }
+      }).catch(() => undefined);
     }
   }
 
@@ -383,7 +436,6 @@ class VirtualSubagentTarget {
   private resetStreamState(): void {
     this.streamOffset = 0;
     this.canonicalStreamOffset = 0;
-    this.completedStreamRounds.clear();
     this.streamRunIds.clear();
     this.streamedRounds.clear();
     this.legacyStreamedSinceCanonical = false;
@@ -456,8 +508,10 @@ class VirtualSubagentTarget {
         this.resetStreamState();
       }
       this.streamIdentity = identity;
-      if (stat.size < this.streamOffset) this.resetStreamState();
       const size = Math.min(stat.size, endOffset ?? stat.size);
+      if (stat.size < this.streamOffset || size < this.streamOffset) {
+        this.resetStreamState();
+      }
       if (size <= this.streamOffset) return;
       const bytes = Buffer.alloc(size - this.streamOffset);
       const { bytesRead } = await handle.read(
@@ -638,6 +692,23 @@ class VirtualSubagentTarget {
 
   private refreshAt(bounds?: TranscriptReadBounds): Promise<void> {
     return this.refreshOnce(bounds?.transcript).then(async () => {
+      if (this.task.status === 'running' && !bounds) {
+        const nextStatus = await this.readLatestStatus();
+        if (
+          this.task.status === 'running' &&
+          nextStatus &&
+          nextStatus !== 'running'
+        ) {
+          this.task.status = nextStatus;
+          if (this.pollTimer) {
+            clearInterval(this.pollTimer);
+            this.pollTimer = undefined;
+          }
+          await this.refreshOnce();
+          this.publishTerminalEvent(nextStatus);
+          return;
+        }
+      }
       if (this.task.status === 'running') {
         await this.readStreamUpdates(bounds?.stream);
       }
@@ -836,6 +907,7 @@ export class VirtualSubagentSessions {
         outputFile: task.outputFile,
         status: task.status,
         startTime: task.startTime,
+        toolUseId: task.toolUseId,
         durationMs:
           task.stats?.durationMs ??
           (task.endTime === undefined
@@ -881,6 +953,7 @@ export class VirtualSubagentSessions {
         id: meta.agentId,
         title: meta.description || meta.agentType,
         outputFile: metaPath.slice(0, -'.meta.json'.length) + '.jsonl',
+        toolUseId: meta.toolUseId,
         status:
           meta.status === 'running' &&
           meta.isBackgrounded === false &&
@@ -1115,29 +1188,70 @@ export class VirtualSubagentSessions {
     };
   }
 
+  updateTargetStatus(
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+    status: string,
+  ): void {
+    this.targets
+      .get(`${runtime.workspaceId}:${sessionId}`)
+      ?.updateStatus(status);
+  }
+
   private async getTarget(
     runtime: WorkspaceRuntime,
     sessionId: string,
   ): Promise<VirtualSubagentTarget | undefined> {
-    const targetKey = `${runtime.workspaceId}:${sessionId}`;
-    const cached = this.targets.get(targetKey);
-    if (cached) return cached;
     const key = parseVirtualSubagentSessionId(sessionId);
     if (!key) return undefined;
+    const targetKey = `${runtime.workspaceId}:${sessionId}`;
+    const cached = this.targets.get(targetKey);
     const task = await this.findTask(
       runtime,
       key.parentSessionId,
       (candidate) => candidate.id === key.agentId,
     );
-    if (!task) return undefined;
+    const metrics =
+      task && task.status !== 'running' && task.toolUseId
+        ? await this.readParentToolCallMetrics(
+            runtime,
+            key.parentSessionId,
+            task.toolUseId,
+          )
+        : undefined;
+    const status = task
+      ? preferTerminalTaskStatus(
+          metrics?.status ?? cached?.readSidecarStatus(),
+          task.status,
+        )
+      : undefined;
+    if (cached) {
+      if (status) {
+        cached.updateStatus(status);
+      }
+      return cached;
+    }
+    if (!task || !status) return undefined;
+    task.status = status;
     const existing = this.targets.get(targetKey);
-    if (existing) return existing;
+    if (existing) {
+      existing.updateStatus(status);
+      return existing;
+    }
     const target = new VirtualSubagentTarget(
       sessionId,
       key.parentSessionId,
       task,
       runtime.workspaceCwd,
       () => this.targets.delete(targetKey),
+      async () => {
+        const latest = await this.findTask(
+          runtime,
+          key.parentSessionId,
+          (candidate) => candidate.id === key.agentId,
+        );
+        return latest?.status;
+      },
     );
     this.targets.set(targetKey, target);
     return target;

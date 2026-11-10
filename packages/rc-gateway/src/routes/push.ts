@@ -190,7 +190,17 @@ export function createPushRouter(
       res.status(404).json({ error: 'Not found', code: 'not_found' });
       return;
     }
-    await store.remove(rec.id);
+    try {
+      await store.remove(rec.id);
+    } catch {
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: 'Failed to persist push registration',
+          code: 'push_persistence_failed',
+        });
+      }
+      return;
+    }
     // Free the subscription's in-memory rate-limit window so stale counters
     // don't accumulate as subscriptions churn (no-op without a limiter).
     notifier.forgetRateLimit(rec.id);

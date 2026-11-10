@@ -743,6 +743,17 @@ export function readTranscriptMessagesSync(
     return { messages };
   }
 
+  const completedRounds = new Set<string>();
+  for (const record of records) {
+    if (
+      record.type === 'assistant' &&
+      typeof record.agentRunId === 'string' &&
+      typeof record.agentRound === 'number'
+    ) {
+      completedRounds.add(`${record.agentRunId}:${record.agentRound}`);
+    }
+  }
+
   let liveText = '';
   let liveThought = '';
   try {
@@ -752,9 +763,18 @@ export function readTranscriptMessagesSync(
       if (!trimmed) continue;
       try {
         const chunk = JSON.parse(trimmed) as {
+          runId?: string;
+          round?: number;
           text?: string;
           thought?: boolean;
         };
+        if (
+          typeof chunk.runId === 'string' &&
+          typeof chunk.round === 'number' &&
+          completedRounds.has(`${chunk.runId}:${chunk.round}`)
+        ) {
+          continue;
+        }
         if (typeof chunk.text === 'string' && chunk.text.length > 0) {
           if (chunk.thought) {
             liveThought += chunk.text;
@@ -898,7 +918,7 @@ export function attachJsonlTranscriptWriter(
   let fd: number | null = null;
   let streamFd: number | null = null;
   const streamPath = `${jsonlPath}.stream`;
-  const streamRunId = randomUUID();
+  let streamRunId = randomUUID();
   let pendingStreamText = '';
   let pendingStreamBytes = 0;
   let streamFlushTimer: NodeJS.Timeout | null = null;
@@ -912,6 +932,37 @@ export function attachJsonlTranscriptWriter(
       error,
     );
   }
+
+  const truncateStreamFile = () => {
+    if (streamFlushTimer !== null) {
+      clearTimeout(streamFlushTimer);
+      streamFlushTimer = null;
+    }
+    pendingStreamText = '';
+    pendingStreamBytes = 0;
+    if (streamFd !== null) {
+      try {
+        fs.ftruncateSync(streamFd, 0);
+      } catch {
+        // Best-effort truncation.
+      }
+      try {
+        fs.closeSync(streamFd);
+      } catch {
+        // Best-effort close.
+      }
+      streamFd = null;
+    }
+  };
+
+  const onStart = () => {
+    streamRunId = randomUUID();
+    truncateStreamFile();
+  };
+
+  const onFinishOrError = () => {
+    truncateStreamFile();
+  };
 
   const ensureOpen = (): boolean => {
     if (fd !== null) return true;
@@ -1012,6 +1063,7 @@ export function attachJsonlTranscriptWriter(
       agentRunId: event.runId ?? streamRunId,
       agentRound: event.round,
     });
+    truncateStreamFile();
   };
 
   const sessionReadiness = new Map<string, boolean>();
@@ -1168,6 +1220,7 @@ export function attachJsonlTranscriptWriter(
     recordSystem('agent_retry', { attempt: options.retryAttempt });
   }
 
+  emitter.on(AgentEventType.START, onStart);
   emitter.on(AgentEventType.ROUND_TEXT, onRoundText);
   emitter.on(AgentEventType.STREAM_TEXT, appendStreamText);
   emitter.on(AgentEventType.TOOL_CALL, onToolCall);
@@ -1175,10 +1228,13 @@ export function attachJsonlTranscriptWriter(
   emitter.on(AgentEventType.TOOL_OUTPUT_UPDATE, onToolOutputUpdate);
   emitter.on(AgentEventType.TOOL_RESPONSES_FINALIZED, onToolResponsesFinalized);
   emitter.on(AgentEventType.EXTERNAL_MESSAGE, onExternalMessage);
+  emitter.on(AgentEventType.FINISH, onFinishOrError);
+  emitter.on(AgentEventType.ERROR, onFinishOrError);
 
   const cleanup = () => {
     if (cleanedUp) return;
     cleanedUp = true;
+    emitter.off(AgentEventType.START, onStart);
     emitter.off(AgentEventType.ROUND_TEXT, onRoundText);
     emitter.off(AgentEventType.STREAM_TEXT, appendStreamText);
     emitter.off(AgentEventType.TOOL_CALL, onToolCall);
@@ -1187,6 +1243,8 @@ export function attachJsonlTranscriptWriter(
       onToolResponsesFinalized,
     );
     emitter.off(AgentEventType.EXTERNAL_MESSAGE, onExternalMessage);
+    emitter.off(AgentEventType.FINISH, onFinishOrError);
+    emitter.off(AgentEventType.ERROR, onFinishOrError);
     if (streamFlushTimer !== null) {
       clearTimeout(streamFlushTimer);
       streamFlushTimer = null;
