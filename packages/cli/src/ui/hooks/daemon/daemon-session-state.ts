@@ -29,12 +29,78 @@ export interface DaemonSessionStateLike {
  * callers say so rather than falling back to the tab's own Config, which is not
  * what the session runs on.
  */
+export interface DaemonRewindSnapshotSummary {
+  promptId: string;
+  turnIndex: number;
+  timestamp: string;
+  diffStats: {
+    filesChanged: number;
+    insertions: number;
+    deletions: number;
+  };
+}
+
+export interface DaemonRewindOutcome {
+  rewound: boolean;
+  targetTurnIndex: number;
+  filesChanged: string[];
+  filesFailed: string[];
+  fileRewindError?: string;
+  warnings?: string[];
+}
+
 export interface DaemonSessionControl {
   readonly state?: DaemonSessionStateLike;
   /** `POST /session/:id/model`; the daemon answers with `model_switched`. */
   setModel?(modelId: string): Promise<unknown>;
   /** `POST /session/:id/approval-mode`; answers with `approval_mode_changed`. */
-  setApprovalMode?(mode: string): Promise<unknown>;
+  setApprovalMode?(
+    mode: string,
+    opts?: { persist?: boolean; planMode?: boolean },
+  ): Promise<unknown>;
+  /** `POST /session/:id/config-option` (e.g. `reasoning_effort`). */
+  setConfigOption?(
+    configId: 'reasoning_effort',
+    value: string,
+    opts?: { persist?: boolean },
+  ): Promise<unknown>;
+  /** `POST /session/:id/btw`; side question against the daemon session's context. */
+  btw?(
+    question: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<{ sessionId: string; answer: string | null }>;
+  /** `POST /session/:id/fork`; background fork agent on the daemon session. */
+  fork?(directive: string): Promise<{
+    agentId?: string;
+    sessionId?: string;
+    description?: string;
+    outputFile?: string;
+  }>;
+  /** `POST /session/:id/recap`; one-sentence session recap from the daemon. */
+  recap?(opts?: {
+    signal?: AbortSignal;
+  }): Promise<{ sessionId: string; recap: string | null }>;
+  /** `GET /session/:id/rewind/snapshots`. */
+  getRewindSnapshots?(): Promise<{
+    snapshots: DaemonRewindSnapshotSummary[];
+  }>;
+  /** `POST /session/:id/rewind`. */
+  rewind?(
+    promptId: string,
+    opts?: { rewindFiles?: boolean },
+  ): Promise<DaemonRewindOutcome>;
+  /** `POST /session/:id/shell`; direct shell execution in the daemon session. */
+  shellCommand?(
+    command: string,
+    signal?: AbortSignal,
+  ): Promise<{ exitCode: number | null; output: string; aborted: boolean }>;
+  /** `POST /session/:id/continue`; resume an interrupted turn on the daemon. */
+  continueSession?(
+    signal?: AbortSignal,
+    options?: { confirmCancellation?: string },
+  ): Promise<unknown>;
+  /** `PATCH /session/:id/metadata`; update session title / PR metadata. */
+  updateMetadata?(metadata: { displayName?: string }): Promise<unknown>;
 }
 
 export interface DaemonModelOption {

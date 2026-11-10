@@ -100,6 +100,10 @@ export interface DaemonPermissionResponse {
   [key: string]: unknown;
 }
 
+export type DaemonPromptBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image'; data: string; mimeType: string };
+
 /**
  * The minimal slice of `DaemonSessionClient` this hook drives. An attached
  * `DaemonSessionClient` satisfies it structurally (no import needed).
@@ -131,9 +135,7 @@ export interface DaemonSessionDriver
   events(opts?: {
     signal?: AbortSignal;
   }): AsyncGenerator<DaemonFrame, void, unknown>;
-  prompt(req: {
-    prompt: Array<{ type: 'text'; text: string }>;
-  }): Promise<unknown>;
+  prompt(req: { prompt: DaemonPromptBlock[] }): Promise<unknown>;
   cancel(): Promise<void>;
   respondToSessionPermission(
     requestId: string,
@@ -179,7 +181,12 @@ export interface UseDaemonStreamResult {
   /** Synchronous getter for current streaming state (unaffected by stale closures). */
   getStreamingState?: () => StreamingState;
   /** Submit a user turn: echo locally (responsive) + send to the daemon. */
-  submitQuery: (query: string) => Promise<void>;
+  submitQuery: (
+    query: string | DaemonPromptBlock[],
+    options?: { echoText?: string },
+  ) => Promise<void>;
+  /** Execute a direct `!` shell command in the daemon session. */
+  runShellCommand?: (command: string) => Promise<void>;
   /** Reset local pending turn state to Idle (used by local slash commands). */
   clearPendingState: () => void;
   /** Forward `/clear` to the daemon while suppressing echo/output and resetting state. */
@@ -201,6 +208,8 @@ export interface UseDaemonStreamResult {
   daemonModelId: string | undefined;
   /** The session's approval mode as the daemon reports it. */
   daemonApprovalMode: string | undefined;
+  /** The session's display title as the daemon reports it. */
+  daemonSessionTitle: string | undefined;
   retryLastPrompt: () => Promise<void>;
   handleApprovalModeChange: (newApprovalMode?: string) => Promise<void>;
   activePtyId: number | undefined;
@@ -276,7 +285,8 @@ function hasRenderableStateChange(
     prev.tools !== next.tools ||
     prev.pendingPermission !== next.pendingPermission ||
     prev.modelId !== next.modelId ||
-    prev.approvalMode !== next.approvalMode
+    prev.approvalMode !== next.approvalMode ||
+    prev.sessionTitle !== next.sessionTitle
   );
 }
 
@@ -305,7 +315,7 @@ export function useDaemonStream(
   onFrameRef.current = onFrame;
   const goneRef = useRef(false);
   const pendingClearTokensRef = useRef(new Set<symbol>());
-  const lastPromptRef = useRef<string | null>(null);
+  const lastPromptRef = useRef<string | DaemonPromptBlock[] | null>(null);
   // The driver whose replay snapshot has been committed. A ref (not state) so
   // StrictMode's effect re-run on the same instance sees it and never seeds a
   // second copy of the transcript.
@@ -397,7 +407,8 @@ export function useDaemonStream(
       }
       stateRef.current = state;
       for (const item of committed) addItemRef.current(item, now());
-      streamingResponseLengthRef.current = state.pendingText.length;
+      streamingResponseLengthRef.current =
+        state.pendingThought.length + state.pendingText.length;
       setSnapshot((prev) =>
         hasRenderableStateChange(prev, state) ? state : prev,
       );
@@ -506,7 +517,8 @@ export function useDaemonStream(
           recordDaemonUsage(seeded.lastUsage, seeded.modelId);
         }
         for (const item of committed) addItemRef.current(item, now());
-        streamingResponseLengthRef.current = seeded.pendingText.length;
+        streamingResponseLengthRef.current =
+          seeded.pendingThought.length + seeded.pendingText.length;
         setSnapshot(seeded);
         // The raw wire events are in history now; let the client drop them.
         driver.consumeReplaySnapshot?.();
@@ -595,7 +607,21 @@ export function useDaemonStream(
   ]);
 
   const submitQuery = useCallback(
-    async (query: string) => {
+    async (
+      query: string | DaemonPromptBlock[],
+      options?: { echoText?: string },
+    ) => {
+      const blocks: DaemonPromptBlock[] = Array.isArray(query)
+        ? query
+        : [{ type: 'text', text: query }];
+      const echoText =
+        options?.echoText ??
+        (typeof query === 'string'
+          ? query
+          : blocks
+              .map((b) => (b.type === 'text' ? b.text : ''))
+              .filter(Boolean)
+              .join(''));
       lastPromptRef.current = query;
       pendingClearTokensRef.current.clear();
       const hadActiveTurnAtSubmit =
@@ -609,7 +635,7 @@ export function useDaemonStream(
       }
       // Echo locally for responsiveness; the reducer drops the daemon's
       // self-echo (matched by originatorClientId === our clientId).
-      addItemRef.current({ type: 'user', text: query }, now());
+      addItemRef.current({ type: 'user', text: echoText }, now());
       if (stateRef.current.streamingState === StreamingState.Idle) {
         const respondingState = {
           ...stateRef.current,
@@ -622,11 +648,11 @@ export function useDaemonStream(
             : prev,
         );
       }
-      dbg(`submitQuery len=${query.length}`);
+      dbg(`submitQuery len=${echoText.length}`);
       let result: unknown;
       try {
         result = await driver.prompt({
-          prompt: [{ type: 'text', text: query }],
+          prompt: blocks,
         });
       } catch (err) {
         // The turn failed in the daemon (it published `turn_error`, which the
@@ -681,6 +707,47 @@ export function useDaemonStream(
       finalizeTurn((result as { stopReason?: unknown } | null)?.stopReason);
     },
     [driver, finalizeTurn, confirmAndDeclareGone],
+  );
+
+  const runShellCommand = useCallback(
+    async (command: string) => {
+      const trimmed = command.trim();
+      if (!trimmed || typeof driver.shellCommand !== 'function') return;
+      addItemRef.current({ type: 'user_shell', text: trimmed }, now());
+      const res = await driver.shellCommand(trimmed);
+      if (stateRef.current.pendingShellCommand === undefined) {
+        // When the driver resolves synchronously without having emitted SSE
+        // shell frames yet, commit the result directly so the UI always shows
+        // the shell output.
+        const out = typeof res?.output === 'string' ? res.output : '';
+        applyFrame({
+          type: 'user_shell_command',
+          data: { command: trimmed },
+          originatorClientId: driver.clientId,
+        });
+        if (out) {
+          applyFrame({
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'shell_output',
+                output: out,
+              },
+            },
+            originatorClientId: driver.clientId,
+          });
+        }
+        applyFrame({
+          type: 'user_shell_result',
+          data: {
+            exitCode: res?.exitCode ?? 0,
+            aborted: res?.aborted ?? false,
+          },
+          originatorClientId: driver.clientId,
+        });
+      }
+    },
+    [driver, applyFrame],
   );
 
   const cancelOngoingRequest = useCallback(() => {
@@ -784,6 +851,7 @@ export function useDaemonStream(
     streamingState: snapshot.streamingState,
     getStreamingState,
     submitQuery,
+    runShellCommand,
     clearPendingState,
     clearRemoteSession,
     initError,
@@ -797,6 +865,7 @@ export function useDaemonStream(
     respondToPermission,
     daemonModelId: snapshot.modelId,
     daemonApprovalMode: snapshot.approvalMode,
+    daemonSessionTitle: snapshot.sessionTitle,
     retryLastPrompt,
     handleApprovalModeChange,
     activePtyId: undefined,

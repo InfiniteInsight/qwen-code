@@ -218,6 +218,24 @@ export const renameCommand: SlashCommand = {
       };
     }
 
+    if (context.services.daemon?.updateMetadata && name) {
+      try {
+        await context.services.daemon.updateMetadata({ displayName: name });
+      } catch {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t('Failed to rename session.'),
+        };
+      }
+      context.ui.setSessionName(name);
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t('Session renamed to "{{name}}"', { name }),
+      };
+    }
+
     // Record the custom title in the current session's JSONL file
     const chatRecordingService = config.getChatRecordingService();
     if (chatRecordingService) {

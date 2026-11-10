@@ -20,7 +20,7 @@
 import { useContext, useEffect, useRef } from 'react';
 import { StreamingState } from '../../types.js';
 import { isSlashCommand } from '../../utils/commandUtils.js';
-import { useDaemonStream } from './useDaemonStream.js';
+import { useDaemonStream, type DaemonPromptBlock } from './useDaemonStream.js';
 import { useDaemonSubagentSync } from './use-daemon-subagent-sync.js';
 import {
   DaemonLossContext,
@@ -32,7 +32,7 @@ import {
  * Slash commands that execute locally in an attached daemon TUI tab (either
  * because they drive `context.services.daemon` directly, such as `/model` and
  * `/approval-mode`, or because they are interactive-only UI dialogs/actions).
- * Daemon-session commands (such as `/compress`, `/goal`, `/btw`, `/context`,
+ * Daemon-session commands (such as `/compress`, `/goal`, `/context`,
  * `/diff`, skills, etc.) are forwarded to `driver.prompt()` so they execute
  * against the daemon's live session.
  */
@@ -40,6 +40,14 @@ const LOCAL_DAEMON_TUI_SLASH_COMMANDS = new Set([
   '?',
   'model',
   'approval-mode',
+  'effort',
+  'btw',
+  'stats',
+  'usage',
+  'tasks',
+  'workflows',
+  'output-style',
+  'advisor',
   'quit',
   'exit',
   'help',
@@ -86,7 +94,6 @@ const LOCAL_DAEMON_TUI_SLASH_COMMANDS = new Set([
   'recap',
   'tools',
   'rollback',
-  'continue',
   'tag',
 ]);
 
@@ -110,6 +117,64 @@ function toText(query: unknown): string {
   return '';
 }
 
+/**
+ * Convert a `PartListUnion` into `DaemonPromptBlock[]`, preserving inline
+ * image attachments (`inlineData`) while coalescing adjacent text segments.
+ */
+function toPromptBlocks(query: unknown): DaemonPromptBlock[] {
+  if (typeof query === 'string') {
+    return [{ type: 'text', text: query }];
+  }
+  const parts = Array.isArray(query) ? query : [query];
+  const blocks: DaemonPromptBlock[] = [];
+  for (const part of parts) {
+    if (typeof part === 'string') {
+      const last = blocks.at(-1);
+      if (last && last.type === 'text') {
+        last.text += part;
+      } else {
+        blocks.push({ type: 'text', text: part });
+      }
+      continue;
+    }
+    if (!part || typeof part !== 'object') continue;
+    if (
+      'text' in part &&
+      typeof (part as { text?: unknown }).text === 'string'
+    ) {
+      const text = (part as { text: string }).text;
+      const last = blocks.at(-1);
+      if (last && last.type === 'text') {
+        last.text += text;
+      } else {
+        blocks.push({ type: 'text', text });
+      }
+      continue;
+    }
+    if (
+      'inlineData' in part &&
+      part.inlineData &&
+      typeof part.inlineData === 'object'
+    ) {
+      const inline = part.inlineData as {
+        data?: unknown;
+        mimeType?: unknown;
+      };
+      if (
+        typeof inline.data === 'string' &&
+        typeof inline.mimeType === 'string'
+      ) {
+        blocks.push({
+          type: 'image',
+          data: inline.data,
+          mimeType: inline.mimeType,
+        });
+      }
+    }
+  }
+  return blocks.length > 0 ? blocks : [{ type: 'text', text: '' }];
+}
+
 export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
   _geminiClient,
   _history,
@@ -119,7 +184,7 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
   _settings,
   _onDebugMessage,
   handleSlashCommand,
-  _shellModeActive,
+  shellModeActive,
   _getPreferredEditor,
   _onAuthError,
   _performMemoryRefresh,
@@ -204,14 +269,29 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
   return {
     streamingState: ds.streamingState,
     submitQuery: async (query, _submitType, promptId, metadata) => {
-      if (getCurrentStreamingState() !== StreamingState.Idle) {
+      const text = toText(query);
+      const trimmed = text.trim();
+      const isBtw =
+        /^\/btw(?:\s|$)/i.test(trimmed) && typeof driver.btw === 'function';
+      if (!isBtw && getCurrentStreamingState() !== StreamingState.Idle) {
         metadata?.onAdmissionFailed?.();
         metadata?.onDeliveryFailed?.();
         return;
       }
-      const text = toText(query);
-      const trimmed = text.trim();
       try {
+        if (metadata?.shellMode ?? shellModeActive) {
+          if (typeof driver.shellCommand === 'function' && ds.runShellCommand) {
+            await ds.runShellCommand(trimmed);
+            return;
+          }
+        }
+        if (
+          trimmed.toLowerCase() === '/continue' &&
+          typeof driver.continueSession === 'function'
+        ) {
+          await driver.continueSession();
+          return;
+        }
         if (
           handleSlashCommand &&
           (isSlashCommand(trimmed) || trimmed === '?')
@@ -240,7 +320,9 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
             if (!slashResult || slashResult.type !== 'submit_prompt') {
               return;
             }
+            const promptBlocks = toPromptBlocks(slashResult.content);
             const promptText = toText(slashResult.content);
+            const hasImages = promptBlocks.some((b) => b.type !== 'text');
             if (getCurrentStreamingState() !== StreamingState.Idle) {
               if (midTurnRestoreRef?.current) {
                 midTurnRestoreRef.current([promptText]);
@@ -250,11 +332,15 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
               }
               return;
             }
-            await ds.submitQuery(promptText);
+            await ds.submitQuery(hasImages ? promptBlocks : promptText, {
+              echoText: promptText,
+            });
             return;
           }
         }
-        await ds.submitQuery(text);
+        const blocks = toPromptBlocks(query);
+        const hasImages = blocks.some((b) => b.type !== 'text');
+        await ds.submitQuery(hasImages ? blocks : text, { echoText: text });
       } catch (err) {
         metadata?.onDeliveryFailed?.();
         addItem(
@@ -286,5 +372,6 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
     isReceivingContent: ds.isReceivingContent,
     daemonModelId: ds.daemonModelId,
     daemonApprovalMode: ds.daemonApprovalMode,
+    daemonSessionTitle: ds.daemonSessionTitle,
   };
 };

@@ -37,4 +37,5 @@ export type DaemonAwareStreamHook = (
 ) => ReturnType<typeof useLlmStream> & {
   daemonModelId?: string;
   daemonApprovalMode?: string;
+  daemonSessionTitle?: string;
 };

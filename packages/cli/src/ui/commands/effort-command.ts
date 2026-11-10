@@ -120,6 +120,19 @@ export const effortCommand: SlashCommand = {
         tier,
       );
     }
+    if (context.services.daemon?.setConfigOption) {
+      try {
+        await context.services.daemon.setConfigOption(
+          'reasoning_effort',
+          tier,
+          {
+            persist: context.executionPolicy?.persistModelSelection !== false,
+          },
+        );
+      } catch {
+        /* local config and settings still updated */
+      }
+    }
 
     return {
       type: 'message',

@@ -1962,4 +1962,81 @@ describe('multi-step tool turns commit sub-turns as they complete (#247)', () =>
       },
     ]);
   });
+
+  it('projects user_shell_command, shell_output, user_shell_result, and sessionTitle updates (#528)', () => {
+    let s = initialDaemonProjectionState(SELF);
+
+    // 1. Remote user shell command commits user_shell and starts live Shell Command tool
+    const cmdFrame = projectDaemonEvent(s, {
+      type: 'user_shell_command',
+      originatorClientId: PHONE,
+      data: { sessionId: 's1', command: 'git status -s' },
+    });
+    expect(cmdFrame.committed).toEqual([
+      { type: 'user_shell', text: 'git status -s' },
+    ]);
+    expect(cmdFrame.state.streamingState).toBe(StreamingState.Responding);
+    expect(pendingToolCallsOf(cmdFrame.state)).toEqual([
+      expect.objectContaining({
+        callId: 'user-shell',
+        name: 'Shell Command',
+        description: 'git status -s',
+        status: ToolCallStatus.Executing,
+      }),
+    ]);
+
+    // 2. shell_output appends live output
+    const outFrame = projectDaemonEvent(
+      cmdFrame.state,
+      sessionUpdate(
+        {
+          sessionUpdate: 'shell_output',
+          output: 'M src/index.ts\n',
+        },
+        PHONE,
+      ),
+    );
+    expect(pendingToolCallsOf(outFrame.state)[0]?.resultDisplay).toBe(
+      'M src/index.ts\n',
+    );
+
+    // 3. user_shell_result commits the user-initiated tool_group and goes Idle
+    const resFrame = projectDaemonEvent(outFrame.state, {
+      type: 'user_shell_result',
+      originatorClientId: PHONE,
+      data: { sessionId: 's1', exitCode: 0, aborted: false },
+    });
+    expect(resFrame.state.streamingState).toBe(StreamingState.Idle);
+    expect(resFrame.committed).toEqual([
+      {
+        type: 'tool_group',
+        isUserInitiated: true,
+        tools: [
+          expect.objectContaining({
+            callId: 'user-shell',
+            name: 'Shell Command',
+            description: 'git status -s',
+            status: ToolCallStatus.Success,
+            resultDisplay: 'M src/index.ts',
+          }),
+        ],
+      },
+    ]);
+
+    // 4. session_info_update and session_metadata_updated update sessionTitle
+    s = projectDaemonEvent(
+      resFrame.state,
+      sessionUpdate({
+        sessionUpdate: 'session_info_update',
+        title: 'Auto Session Title',
+      }),
+    ).state;
+    expect(s.sessionTitle).toBe('Auto Session Title');
+
+    s = projectDaemonEvent(s, {
+      type: 'session_metadata_updated',
+      data: { sessionId: 's1', displayName: 'Renamed Session' },
+    }).state;
+    expect(s.sessionTitle).toBe('Renamed Session');
+  });
 });

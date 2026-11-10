@@ -139,6 +139,12 @@ export interface DaemonProjectionState {
   modelId?: string;
   /** The session's approval mode (`approval_mode_changed.next`, or load state). */
   approvalMode?: string;
+  /** The session's display title (`session_info_update.title` or `session_metadata_updated.displayName`). */
+  sessionTitle?: string;
+  /** In-flight user shell command (`user_shell_command`), if any. */
+  pendingShellCommand?: string;
+  /** Accumulated stdout/stderr for an in-flight user shell command (`shell_output`). */
+  pendingShellOutput?: string;
 }
 
 export interface ProjectionResult {
@@ -696,10 +702,24 @@ function projectSessionUpdate(
       const isSelfEcho =
         state.ownClientId !== undefined &&
         originatorClientId === state.ownClientId;
+      const meta = asRecord(update['_meta']);
+      const promptId =
+        typeof meta['promptId'] === 'string' && meta['promptId'].length > 0
+          ? meta['promptId']
+          : undefined;
       const committed = [...flushed.committed];
-      if (text && !isSelfEcho) committed.push({ type: 'user', text });
+      if (text && !isSelfEcho) {
+        committed.push({
+          type: 'user',
+          text,
+          ...(promptId ? { promptId } : {}),
+        });
+      }
       return {
-        state: { ...flushed.state, streamingState: StreamingState.Responding },
+        state: {
+          ...flushed.state,
+          streamingState: StreamingState.Responding,
+        },
         committed,
       };
     }
@@ -884,6 +904,55 @@ function projectSessionUpdate(
           lastUsage: nextLastUsage,
         },
         committed,
+      };
+    }
+
+    case 'session_info_update': {
+      const title =
+        typeof update['title'] === 'string' ? update['title'].trim() : '';
+      if (!title || state.sessionTitle === title) {
+        return { state, committed: [] };
+      }
+      return {
+        state: {
+          ...state,
+          sessionTitle: title,
+        },
+        committed: [],
+      };
+    }
+
+    case 'shell_output': {
+      const chunk =
+        typeof update['output'] === 'string' ? update['output'] : '';
+      if (!chunk) {
+        return { state, committed: [] };
+      }
+      const nextShellOutput = capToolResultText(
+        (state.pendingShellOutput ?? '') + chunk,
+      );
+      const shellTool: IndividualToolCallDisplay = {
+        callId: 'user-shell',
+        name: 'Shell Command',
+        description: state.pendingShellCommand ?? 'Shell Command',
+        status: ToolCallStatus.Executing,
+        confirmationDetails: undefined,
+        resultDisplay: nextShellOutput,
+        renderOutputAsMarkdown: false,
+      };
+      const prevIdx = state.tools.findIndex((t) => t.callId === 'user-shell');
+      const tools =
+        prevIdx >= 0
+          ? state.tools.map((t, i) => (i === prevIdx ? shellTool : t))
+          : [...state.tools, shellTool];
+      return {
+        state: {
+          ...state,
+          streamingState: StreamingState.Responding,
+          pendingShellOutput: nextShellOutput,
+          tools,
+        },
+        committed: [],
       };
     }
 
@@ -1183,6 +1252,118 @@ function projectFrame(
       return { state: { ...state, approvalMode: next }, committed: [] };
     }
 
+    case 'session_metadata_updated': {
+      const displayName =
+        typeof data['displayName'] === 'string'
+          ? data['displayName'].trim()
+          : '';
+      if (!displayName || state.sessionTitle === displayName) {
+        return { state, committed: [] };
+      }
+      return {
+        state: {
+          ...state,
+          sessionTitle: displayName,
+        },
+        committed: [],
+      };
+    }
+
+    case 'user_shell_command': {
+      const command =
+        typeof data['command'] === 'string' ? data['command'].trim() : '';
+      if (!command) {
+        return { state, committed: [] };
+      }
+      const flushed = flushPendingTurn(state);
+      const isSelfEcho =
+        state.ownClientId !== undefined &&
+        frame.originatorClientId === state.ownClientId;
+      const committed: HistoryItemWithoutId[] = [...flushed.committed];
+      if (!isSelfEcho) {
+        committed.push({ type: 'user_shell', text: command });
+      }
+      const shellTool: IndividualToolCallDisplay = {
+        callId: 'user-shell',
+        name: 'Shell Command',
+        description: command,
+        status: ToolCallStatus.Executing,
+        confirmationDetails: undefined,
+        resultDisplay: '',
+        renderOutputAsMarkdown: false,
+      };
+      return {
+        state: {
+          ...flushed.state,
+          streamingState: StreamingState.Responding,
+          pendingShellCommand: command,
+          pendingShellOutput: '',
+          tools: [shellTool],
+        },
+        committed,
+      };
+    }
+
+    case 'user_shell_result': {
+      const command = state.pendingShellCommand ?? 'Shell Command';
+      const rawOutput = (state.pendingShellOutput ?? '').trim();
+      const mainContent = rawOutput || '(Command produced no output)';
+      let finalOutput = mainContent;
+      let finalStatus = ToolCallStatus.Success;
+      const errText =
+        typeof data['error'] === 'string' && data['error'].trim().length > 0
+          ? data['error'].trim()
+          : undefined;
+      const aborted = data['aborted'] === true;
+      const signal = data['signal'];
+      const exitCode =
+        typeof data['exitCode'] === 'number' ? data['exitCode'] : null;
+      if (errText) {
+        finalStatus = ToolCallStatus.Error;
+        finalOutput = `${errText}\n${finalOutput}`;
+      } else if (aborted) {
+        finalStatus = ToolCallStatus.Canceled;
+        finalOutput = `Command was cancelled.\n${finalOutput}`;
+      } else if (
+        (typeof signal === 'string' && signal.length > 0) ||
+        (typeof signal === 'number' && signal !== 0)
+      ) {
+        finalStatus = ToolCallStatus.Error;
+        finalOutput = `Command terminated by signal: ${String(signal)}.\n${finalOutput}`;
+      } else if (exitCode !== null && exitCode !== 0) {
+        finalStatus = ToolCallStatus.Error;
+        finalOutput = `Command exited with code ${exitCode}.\n${finalOutput}`;
+      }
+      const finalToolDisplay: IndividualToolCallDisplay = {
+        callId: 'user-shell',
+        name: 'Shell Command',
+        description: command,
+        status: finalStatus,
+        confirmationDetails: undefined,
+        resultDisplay: capToolResultText(finalOutput),
+        renderOutputAsMarkdown: false,
+      };
+      const remainingTools = state.tools.filter(
+        (t) => t.callId !== 'user-shell',
+      );
+      return {
+        state: {
+          ...state,
+          streamingState: StreamingState.Idle,
+          pendingShellCommand: undefined,
+          pendingShellOutput: undefined,
+          tools: remainingTools,
+        },
+        committed: [
+          {
+            type: 'tool_group',
+            tools: [finalToolDisplay],
+            isUserInitiated: true,
+          },
+        ],
+      };
+    }
+
     case 'mid_turn_message_injected': {
       const messages = Array.isArray(data['messages'])
         ? (data['messages'] as unknown[])
@@ -1235,6 +1416,8 @@ function projectFrame(
           pendingThought: '',
           tools: [],
           pendingPermission: undefined,
+          pendingShellCommand: undefined,
+          pendingShellOutput: undefined,
         },
         committed: [],
       };
@@ -1251,6 +1434,8 @@ function projectFrame(
             tools: [],
             pendingPermission: undefined,
             lastEventId: undefined,
+            pendingShellCommand: undefined,
+            pendingShellOutput: undefined,
           },
           committed: [],
         };

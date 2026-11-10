@@ -81,6 +81,27 @@ export const forkCommand: SlashCommand = {
       };
     }
 
+    if (context.services.daemon?.fork) {
+      try {
+        await context.services.daemon.fork(directive);
+      } catch (error) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t('Failed to launch fork: {{error}}', {
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        };
+      }
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t(
+          'Forked into a background agent. It inherits this conversation and runs without blocking \u2014 track it in the background tasks panel; it reports back when done.',
+        ),
+      };
+    }
+
     if (!config.getModel()) {
       return {
         type: 'message',

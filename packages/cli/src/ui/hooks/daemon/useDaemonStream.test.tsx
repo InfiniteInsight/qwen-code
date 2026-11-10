@@ -16,6 +16,8 @@ import {
 import { StreamingState, type HistoryItemWithoutId } from '../../types.js';
 import {
   useDaemonStream,
+  type AddHistoryItem,
+  type DaemonPromptBlock,
   type DaemonSessionDriver,
   type DaemonPermissionResponse,
 } from './useDaemonStream.js';
@@ -62,7 +64,7 @@ function makeFakeDriver(
   let replay = opts.replay;
   let resolvePrompt: ((v: unknown) => void) | null = null;
   let rejectPrompt: ((e: unknown) => void) | null = null;
-  const prompts: Array<{ prompt: Array<{ type: 'text'; text: string }> }> = [];
+  const prompts: Array<{ prompt: DaemonPromptBlock[] }> = [];
   const permissions: Array<{
     requestId: string;
     response: DaemonPermissionResponse;
@@ -1956,5 +1958,174 @@ describe('useDaemonStream', () => {
       await result.current.handleApprovalModeChange('yolo' as never);
     });
     expect(setApprovalMode).toHaveBeenCalledWith('yolo');
+  });
+
+  it('supports shell mode execution, /continue, multimodal image blocks, and shell/monitor task sync (#528)', async () => {
+    const baseDriver = makeFakeDriver({ clientId: 'me', manualPrompt: true });
+    const shellCommand = vi.fn().mockResolvedValue({
+      exitCode: 0,
+      output: 'hello from daemon shell\n',
+      aborted: false,
+    });
+    const continueSession = vi.fn().mockResolvedValue({ status: 'continued' });
+    const btw = vi.fn().mockResolvedValue({ answer: 'side answer' });
+    const cancelTask = vi.fn().mockResolvedValue({ cancelled: true });
+    const tasks = vi.fn().mockResolvedValue({
+      tasks: [
+        {
+          kind: 'shell' as const,
+          id: 'sh-1',
+          description: 'npm run dev',
+          command: 'npm run dev',
+          cwd: '/repo',
+          pid: 4242,
+          status: 'running' as const,
+          startTime: 1000,
+          outputFile: '/tmp/sh-1.output',
+        },
+        {
+          kind: 'monitor' as const,
+          id: 'mon-1',
+          description: 'Watch logs',
+          command: 'tail -f app.log',
+          pid: 4343,
+          status: 'running' as const,
+          startTime: 1100,
+          eventCount: 3,
+          lastEventTime: 1200,
+          droppedLines: 0,
+        },
+      ],
+    });
+    const driver: DaemonSessionDriver = {
+      ...baseDriver,
+      shellCommand,
+      continueSession,
+      btw,
+      tasks,
+      cancelTask,
+    };
+
+    const agentRegistry = new BackgroundTaskRegistry();
+    const shellEntries = new Map<string, Record<string, unknown>>();
+    const monitorEntries = new Map<string, Record<string, unknown>>();
+    const mockConfig = {
+      getBackgroundTaskRegistry: () => agentRegistry,
+      getBackgroundShellRegistry: () => ({
+        get: (id: string) => shellEntries.get(id),
+        getAll: () => [...shellEntries.values()],
+        register: (reg: Record<string, unknown>) => {
+          shellEntries.set(String(reg['shellId']), reg);
+          return reg;
+        },
+        complete: vi.fn(),
+        fail: vi.fn(),
+        cancel: vi.fn(),
+      }),
+      getMonitorRegistry: () => ({
+        get: (id: string) => monitorEntries.get(id),
+        getAll: () => [...monitorEntries.values()],
+        register: (reg: Record<string, unknown>) => {
+          monitorEntries.set(String(reg['monitorId']), reg);
+          return reg;
+        },
+        complete: vi.fn(),
+        fail: vi.fn(),
+        cancel: vi.fn(),
+      }),
+    };
+
+    const added: HistoryItemWithoutId[] = [];
+    const addItem: AddHistoryItem = (item) => {
+      added.push(item);
+      return added.length;
+    };
+    const handleSlashCommand = vi.fn().mockResolvedValue({ type: 'handled' });
+
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <DaemonStreamContext.Provider value={driver}>
+        {children}
+      </DaemonStreamContext.Provider>
+    );
+
+    const { result } = renderHook(
+      () =>
+        (
+          useDaemonStreamAdapter as (
+            ...args: unknown[]
+          ) => ReturnType<typeof useDaemonStreamAdapter>
+        )(
+          {} as never,
+          [],
+          addItem,
+          mockConfig as never,
+          true,
+          {} as never,
+          vi.fn(),
+          handleSlashCommand,
+        ),
+      { wrapper },
+    );
+
+    // 1. Background shell and monitor tasks are synced into local registries
+    await waitFor(() => {
+      expect(shellEntries.has('sh-1')).toBe(true);
+      expect(monitorEntries.has('mon-1')).toBe(true);
+    });
+
+    // 2. Shell mode execution via metadata.shellMode calls driver.shellCommand
+    await act(async () => {
+      await result.current.submitQuery('echo hi', undefined, undefined, {
+        shellMode: true,
+      });
+    });
+    expect(shellCommand).toHaveBeenCalledWith('echo hi');
+    expect(added).toContainEqual({ type: 'user_shell', text: 'echo hi' });
+
+    // 3. /continue invokes driver.continueSession()
+    await act(async () => {
+      await result.current.submitQuery('/continue');
+    });
+    expect(continueSession).toHaveBeenCalledTimes(1);
+
+    // 4. Multimodal PartListUnion with inlineData image sends text + image blocks
+    let pMulti!: Promise<void>;
+    act(() => {
+      pMulti = result.current.submitQuery([
+        { text: 'describe this image' },
+        {
+          inlineData: {
+            data: 'aGVsbG8=',
+            mimeType: 'image/png',
+          },
+        },
+      ]);
+    });
+    await waitFor(() => {
+      expect(baseDriver.stats().prompts).toHaveLength(1);
+    });
+    expect(baseDriver.stats().prompts[0]).toEqual({
+      prompt: [
+        { type: 'text', text: 'describe this image' },
+        { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' },
+      ],
+    });
+
+    // 5. While Responding, /btw is allowed through when driver.btw is available
+    await act(async () => {
+      await result.current.submitQuery('/btw quick question');
+    });
+    expect(handleSlashCommand).toHaveBeenCalledWith(
+      '/btw quick question',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    );
+
+    await act(async () => {
+      baseDriver.finishPrompt({ stopReason: 'end_turn' });
+      await pMulti;
+    });
   });
 });

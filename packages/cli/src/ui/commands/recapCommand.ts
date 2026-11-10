@@ -48,7 +48,24 @@ export const recapCommand: SlashCommand = {
       }
     }
 
-    const recap = await generateSessionRecap(config, abortSignal);
+    let recap: string | null;
+    if (context.services.daemon?.recap) {
+      try {
+        const res = await context.services.daemon.recap({
+          signal: abortSignal,
+        });
+        recap = res.recap;
+      } catch (error) {
+        if (abortSignal.aborted) return;
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: error instanceof Error ? error.message : String(error),
+        };
+      }
+    } else {
+      recap = await generateSessionRecap(config, abortSignal);
+    }
 
     if (abortSignal.aborted) return;
 

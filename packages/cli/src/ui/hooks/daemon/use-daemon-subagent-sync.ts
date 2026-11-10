@@ -49,6 +49,48 @@ export interface DaemonSubagentTaskSnapshot {
   messages?: BackgroundAgentMessage[];
 }
 
+export interface DaemonShellTaskSnapshot {
+  kind: 'shell';
+  id: string;
+  label?: string;
+  description: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  startTime: number;
+  endTime?: number;
+  runtimeMs?: number;
+  outputFile?: string;
+  command: string;
+  cwd: string;
+  pid?: number;
+  exitCode?: number;
+  error?: string;
+}
+
+export interface DaemonMonitorTaskSnapshot {
+  kind: 'monitor';
+  id: string;
+  label?: string;
+  description: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  startTime: number;
+  endTime?: number;
+  runtimeMs?: number;
+  command: string;
+  pid?: number;
+  eventCount: number;
+  lastEventTime: number;
+  droppedLines: number;
+  exitCode?: number;
+  error?: string;
+  ownerAgentId?: string;
+  toolUseId?: string;
+}
+
+export type DaemonAnyTaskSnapshot =
+  | DaemonSubagentTaskSnapshot
+  | DaemonShellTaskSnapshot
+  | DaemonMonitorTaskSnapshot;
+
 export interface DaemonSubagentSyncDriver {
   readonly session?: { readonly sessionId?: string };
   readonly client?: {
@@ -65,9 +107,10 @@ export interface DaemonSubagentSyncDriver {
   agents?: (
     signal?: AbortSignal,
   ) => Promise<{ tasks?: DaemonSubagentTaskSnapshot[] }>;
+  tasks?: () => Promise<{ tasks?: DaemonAnyTaskSnapshot[] }>;
   cancelTask?: (
     taskId: string,
-    kind: 'agent',
+    kind: 'agent' | 'shell' | 'monitor',
   ) => Promise<{ cancelled: boolean }>;
 }
 
@@ -453,11 +496,147 @@ export function useDaemonSubagentSync(
     [config, wireCancelAndMessaging],
   );
 
+  const reconcileProcessTasks = useCallback(
+    (tasks: DaemonAnyTaskSnapshot[]) => {
+      const shellRegistry = config?.getBackgroundShellRegistry?.();
+      const monitorRegistry = config?.getMonitorRegistry?.();
+      for (const task of tasks) {
+        if (!task || typeof task.id !== 'string' || !task.id) continue;
+        if (task.kind === 'shell' && shellRegistry) {
+          let entry = shellRegistry.get(task.id);
+          if (!entry) {
+            const abortController = new AbortController();
+            abortController.signal.addEventListener(
+              'abort',
+              () => {
+                if (syncingAbortIdsRef.current.has(task.id)) return;
+                if (driver.cancelTask) {
+                  void driver.cancelTask(task.id, 'shell').catch(() => {});
+                }
+              },
+              { once: true },
+            );
+            entry = shellRegistry.register({
+              shellId: task.id,
+              command: task.command || task.description || task.id,
+              cwd: task.cwd || '',
+              pid: task.pid,
+              status: 'running',
+              startTime:
+                typeof task.startTime === 'number' && task.startTime > 0
+                  ? task.startTime
+                  : Date.now(),
+              outputPath: task.outputFile ?? '',
+              abortController,
+            });
+          }
+          if (task.pid !== undefined) {
+            entry.pid = task.pid;
+          }
+          if (task.outputFile !== undefined) {
+            entry.outputFile = task.outputFile;
+            entry.outputPath = task.outputFile;
+          }
+          if (task.status !== entry.status) {
+            const endTime = task.endTime ?? Date.now();
+            if (task.status === 'completed') {
+              shellRegistry.complete(task.id, task.exitCode ?? 0, endTime);
+            } else if (task.status === 'failed') {
+              shellRegistry.fail(
+                task.id,
+                task.error ?? 'Shell task failed',
+                endTime,
+              );
+            } else if (task.status === 'cancelled') {
+              syncingAbortIdsRef.current.add(task.id);
+              try {
+                shellRegistry.cancel(task.id, endTime);
+              } finally {
+                syncingAbortIdsRef.current.delete(task.id);
+              }
+            }
+          }
+        } else if (task.kind === 'monitor' && monitorRegistry) {
+          let entry = monitorRegistry.get(task.id);
+          if (!entry) {
+            const abortController = new AbortController();
+            abortController.signal.addEventListener(
+              'abort',
+              () => {
+                if (syncingAbortIdsRef.current.has(task.id)) return;
+                if (driver.cancelTask) {
+                  void driver.cancelTask(task.id, 'monitor').catch(() => {});
+                }
+              },
+              { once: true },
+            );
+            try {
+              entry = monitorRegistry.register({
+                monitorId: task.id,
+                command: task.command || task.description || task.id,
+                description: task.description || task.command || task.id,
+                status: 'running',
+                pid: task.pid,
+                toolUseId: task.toolUseId,
+                ownerAgentId: task.ownerAgentId,
+                eventCount: task.eventCount ?? 0,
+                lastEventTime: task.lastEventTime ?? Date.now(),
+                maxEvents: 1000,
+                idleTimeoutMs: 0,
+                droppedLines: task.droppedLines ?? 0,
+                startTime:
+                  typeof task.startTime === 'number' && task.startTime > 0
+                    ? task.startTime
+                    : Date.now(),
+                outputFile: '',
+                abortController,
+              });
+            } catch {
+              continue;
+            }
+          }
+          if (task.pid !== undefined) entry.pid = task.pid;
+          if (typeof task.eventCount === 'number') {
+            entry.eventCount = task.eventCount;
+          }
+          if (typeof task.lastEventTime === 'number') {
+            entry.lastEventTime = task.lastEventTime;
+          }
+          if (typeof task.droppedLines === 'number') {
+            entry.droppedLines = task.droppedLines;
+          }
+          if (task.status !== entry.status) {
+            if (task.status === 'completed') {
+              monitorRegistry.complete(task.id, task.exitCode ?? null);
+            } else if (task.status === 'failed') {
+              monitorRegistry.fail(task.id, task.error ?? 'Monitor failed');
+            } else if (task.status === 'cancelled') {
+              syncingAbortIdsRef.current.add(task.id);
+              try {
+                monitorRegistry.cancel(task.id, { notify: false });
+              } finally {
+                syncingAbortIdsRef.current.delete(task.id);
+              }
+            }
+            if (task.endTime !== undefined) {
+              entry.endTime = task.endTime;
+            }
+          }
+        }
+      }
+    },
+    [config, driver],
+  );
+
   const refreshAgents = useCallback(() => {
-    if (
-      typeof config?.getBackgroundTaskRegistry !== 'function' ||
-      typeof driver.agents !== 'function'
-    ) {
+    const canSyncAgents =
+      typeof config?.getBackgroundTaskRegistry === 'function' &&
+      typeof driver.agents === 'function';
+    const canSyncTasks =
+      (typeof config?.getBackgroundShellRegistry === 'function' ||
+        typeof config?.getMonitorRegistry === 'function') &&
+      typeof driver.tasks === 'function';
+    if (!canSyncAgents && !canSyncTasks) {
       return;
     }
     if (refreshInFlightRef.current) {
@@ -466,10 +645,32 @@ export function useDaemonSubagentSync(
     }
     const run = async () => {
       try {
-        const res = await driver.agents?.();
+        const [agentsRes, tasksRes] = await Promise.all([
+          canSyncAgents
+            ? driver.agents?.().catch(() => undefined)
+            : Promise.resolve(undefined),
+          canSyncTasks
+            ? driver.tasks?.().catch(() => undefined)
+            : Promise.resolve(undefined),
+        ]);
         if (!mountedRef.current) return;
-        if (res && Array.isArray(res.tasks)) {
-          reconcileTasks(res.tasks);
+        if (agentsRes && Array.isArray(agentsRes.tasks)) {
+          reconcileTasks(agentsRes.tasks);
+        }
+        if (tasksRes && Array.isArray(tasksRes.tasks)) {
+          reconcileProcessTasks(tasksRes.tasks);
+          if (
+            !canSyncAgents &&
+            typeof config?.getBackgroundTaskRegistry === 'function'
+          ) {
+            const agentSnapshots = tasksRes.tasks.filter(
+              (t): t is DaemonSubagentTaskSnapshot =>
+                !t.kind || t.kind === 'agent',
+            );
+            if (agentSnapshots.length > 0) {
+              reconcileTasks(agentSnapshots);
+            }
+          }
         }
       } catch {
         // Best-effort sync; ignore unsupported or transient errors.
@@ -482,22 +683,30 @@ export function useDaemonSubagentSync(
       }
     };
     refreshInFlightRef.current = run();
-  }, [config, driver, reconcileTasks]);
+  }, [config, driver, reconcileTasks, reconcileProcessTasks]);
 
   useEffect(() => {
     mountedRef.current = true;
     refreshAgents();
     if (
       typeof config?.getBackgroundTaskRegistry !== 'function' ||
-      typeof driver.agents !== 'function'
+      (typeof driver.agents !== 'function' &&
+        typeof driver.tasks !== 'function')
     ) {
       return () => {
         mountedRef.current = false;
       };
     }
     const registry = config.getBackgroundTaskRegistry();
+    const shellRegistry = config.getBackgroundShellRegistry?.();
+    const monitorRegistry = config.getMonitorRegistry?.();
     const timer = setInterval(() => {
-      const hasRunning = registry.getAll().some((a) => a.status === 'running');
+      const hasRunning =
+        registry.getAll().some((a) => a.status === 'running') ||
+        (shellRegistry?.getAll().some((s) => s.status === 'running') ??
+          false) ||
+        (monitorRegistry?.getAll().some((m) => m.status === 'running') ??
+          false);
       if (hasRunning) {
         refreshAgents();
       }

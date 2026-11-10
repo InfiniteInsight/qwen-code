@@ -45,8 +45,14 @@ export const planCommand: SlashCommand = {
           content: t('Not in plan mode. Use "/plan" to enter plan mode first.'),
         };
       }
+      const restoredMode = config.getPrePlanMode();
       try {
-        config.setApprovalMode(config.getPrePlanMode());
+        config.setApprovalMode(restoredMode);
+        if (context.services.daemon?.setApprovalMode) {
+          await context.services.daemon.setApprovalMode(restoredMode, {
+            planMode: false,
+          });
+        }
       } catch (e) {
         return {
           type: 'message',
@@ -64,6 +70,11 @@ export const planCommand: SlashCommand = {
     if (currentMode !== ApprovalMode.PLAN) {
       try {
         config.setApprovalMode(ApprovalMode.PLAN);
+        if (context.services.daemon?.setApprovalMode) {
+          await context.services.daemon.setApprovalMode(ApprovalMode.PLAN, {
+            planMode: true,
+          });
+        }
       } catch (e) {
         return {
           type: 'message',

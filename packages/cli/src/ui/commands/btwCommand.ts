@@ -48,7 +48,11 @@ async function askBtw(
   question: string,
   abortSignal: AbortSignal,
 ): Promise<string> {
-  const { config } = context.services;
+  const { config, daemon } = context.services;
+  if (daemon?.btw) {
+    const res = await daemon.btw(question, { signal: abortSignal });
+    return res.answer || t('No response received.');
+  }
   if (!config) throw new Error('Config not loaded');
 
   const cacheSafeParams = getBtwCacheSafeParams(context);
@@ -110,7 +114,7 @@ export const btwCommand: SlashCommand = {
     }
 
     const model = config.getModel();
-    if (!model) {
+    if (!model && !context.services.daemon?.btw) {
       return {
         type: 'message',
         messageType: 'error',

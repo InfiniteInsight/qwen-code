@@ -1807,7 +1807,7 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const { isEffortDialogOpen, openEffortDialog, handleEffortSelect } =
-    useEffortCommand(settings, config, historyManager.addItem);
+    useEffortCommand(settings, config, historyManager.addItem, daemonDriver);
 
   const {
     isOutputStyleDialogOpen,
@@ -2544,6 +2544,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isReceivingContent,
     daemonModelId,
     daemonApprovalMode,
+    daemonSessionTitle,
     // `useStream` is a stable, unconditional hook call (defaulted prop, fixed
     // per mounted container) - see AppContainerProps.useStream.
   } = useStream(
@@ -2590,6 +2591,13 @@ export const AppContainer = (props: AppContainerProps) => {
     refreshStatic();
     setCurrentModel(daemonModelId);
   }, [daemonModelId, refreshStatic]);
+
+  useEffect(() => {
+    if (!daemonSessionTitle) {
+      return;
+    }
+    setSessionName(daemonSessionTitle);
+  }, [daemonSessionTitle]);
 
   // Now that streamingState is available, keep isIdleRef in sync and
   // flush any deferred update notifications when the model finishes responding.
@@ -4387,6 +4395,113 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
 
+        if (daemonDriver && typeof daemonDriver.rewind === 'function') {
+          const originalHistory = historyManager.history;
+          let targetTurnIndex = 0;
+          for (const h of originalHistory) {
+            if (h.id === userItem.id) break;
+            if (isRealUserTurn(h)) targetTurnIndex++;
+          }
+          let promptId = (userItem as HistoryItemUser).promptId;
+          if (
+            !promptId &&
+            typeof daemonDriver.getRewindSnapshots === 'function'
+          ) {
+            try {
+              const snapRes = await daemonDriver.getRewindSnapshots();
+              const matched = snapRes?.snapshots?.find(
+                (s) => s.turnIndex === targetTurnIndex,
+              );
+              if (matched?.promptId) {
+                promptId = matched.promptId;
+              }
+            } catch {
+              /* fall back to canonical promptId below */
+            }
+          }
+          if (!promptId) {
+            const sid =
+              daemonDriver.session?.sessionId ?? config.getSessionId();
+            promptId = `${sid}########${targetTurnIndex}`;
+          }
+
+          const rewindFiles = option === 'code' || option === 'both';
+          const outcome = await daemonDriver.rewind(promptId, { rewindFiles });
+
+          let fileRestoreMessage: string | undefined;
+          let fileRestoreError: string | undefined;
+          let hasRestoreFailure = false;
+          if (rewindFiles) {
+            const changed = outcome?.filesChanged ?? [];
+            const failed = outcome?.filesFailed ?? [];
+            const errText = outcome?.fileRewindError;
+            if (errText) {
+              hasRestoreFailure = true;
+              fileRestoreError = t('Failed to restore files: {{error}}', {
+                error: errText,
+              });
+            } else if (failed.length > 0) {
+              hasRestoreFailure = true;
+              fileRestoreError = t(
+                'Failed to restore {{count}} file(s): {{files}}',
+                {
+                  count: String(failed.length),
+                  files: failed.map((f) => f.split('/').pop()).join(', '),
+                },
+              );
+            } else if (changed.length > 0) {
+              fileRestoreMessage = t('Restored {{count}} file(s).', {
+                count: String(changed.length),
+              });
+            } else {
+              fileRestoreMessage = t('No files needed to be restored.');
+            }
+          }
+
+          const needsConversation =
+            option === 'conversation' || option === 'both';
+          if (needsConversation && !(option === 'both' && hasRestoreFailure)) {
+            const truncatedUi = recoalesceFindingsHistoryItems(
+              expandCollapsedHistory(
+                originalHistory.filter((h) => h.id < userItem.id),
+              ),
+            );
+            clearPendingStateRef.current();
+            loadHistoryWithLatchReconciliation(truncatedUi);
+            refreshStatic();
+
+            if (userItem.type === 'user' && userItem.text) {
+              restoredSubmissionRef.current = null;
+              submittedPromptProvenanceUnavailableRef.current = true;
+              buffer.setText(userItem.text);
+            }
+
+            historyManager.addItem(
+              {
+                type: 'info',
+                text: t(
+                  'Conversation rewound. Edit your prompt and press Enter to continue.',
+                ),
+              },
+              Date.now(),
+            );
+          }
+
+          if (fileRestoreMessage) {
+            historyManager.addItem(
+              { type: 'info', text: fileRestoreMessage },
+              Date.now(),
+            );
+          }
+          if (fileRestoreError) {
+            historyManager.addItem(
+              { type: 'error', text: fileRestoreError },
+              Date.now(),
+            );
+          }
+          return;
+        }
+
         // For 'both', validate that conversation can be truncated BEFORE
         // touching files — otherwise we'd roll back the workspace while
         // the conversation stays at the newer state.
@@ -4597,6 +4712,7 @@ export const AppContainer = (props: AppContainerProps) => {
     },
     [
       config,
+      daemonDriver,
       historyManager,
       loadHistoryWithLatchReconciliation,
       refreshStatic,

@@ -12,6 +12,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import { formatEffortChangeMessage } from '../commands/effort-utils.js';
+import type { DaemonSessionControl } from './daemon/daemon-session-state.js';
 
 interface UseEffortCommandReturn {
   isEffortDialogOpen: boolean;
@@ -23,6 +24,7 @@ export const useEffortCommand = (
   loadedSettings: LoadedSettings,
   config: Config,
   addItem?: (item: HistoryItemWithoutId, baseTimestamp: number) => void,
+  daemon?: DaemonSessionControl | null,
 ): UseEffortCommandReturn => {
   const [isEffortDialogOpen, setIsEffortDialogOpen] = useState(false);
 
@@ -45,6 +47,9 @@ export const useEffortCommand = (
           'model.reasoningEffort',
           effort,
         );
+        void daemon
+          ?.setConfigOption?.('reasoning_effort', effort, { persist: true })
+          ?.catch(() => {});
         // Report the outcome in-chat instead of silently closing (the status
         // line is the only other signal). The setter no-ops when thinking is
         // explicitly disabled (`reasoning: false`): the tier is still persisted
@@ -66,7 +71,7 @@ export const useEffortCommand = (
         setIsEffortDialogOpen(false);
       }
     },
-    [config, loadedSettings, addItem],
+    [config, loadedSettings, addItem, daemon],
   );
 
   return {
