@@ -33,6 +33,13 @@
  */
 import { appendFileSync } from 'node:fs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { EVENT_API_RESPONSE } from '@qwen-code/qwen-code-core/telemetry/constants.js';
+import { ApiResponseEvent } from '@qwen-code/qwen-code-core/telemetry/types.js';
+import {
+  uiTelemetryService,
+  type UiEvent,
+} from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
+import type { ToolConfirmationPayload } from '@qwen-code/qwen-code-core/tools/tools.js';
 import {
   StreamingState,
   type HistoryItemWithoutId,
@@ -65,6 +72,7 @@ import {
   type DaemonFrame,
   type DaemonProjectionState,
   type DaemonReplaySnapshotFrames,
+  type DaemonTurnUsage,
   type PendingPermission,
 } from './projectDaemonEvent.js';
 import { buildDaemonConfirmation } from './daemonConfirmation.js';
@@ -131,6 +139,8 @@ export interface DaemonSessionDriver
     requestId: string,
     response: DaemonPermissionResponse,
   ): Promise<boolean>;
+  enqueueMidTurnMessage?(message: string): Promise<unknown>;
+  sendMidTurnMessagesNow?(): Promise<unknown>;
 }
 
 /**
@@ -183,19 +193,58 @@ export interface UseDaemonStreamResult {
   streamingResponseLengthRef: React.MutableRefObject<number>;
   /** Daemon-mode permission gate + vote (the interactive wiring binds these). */
   activePermission: PendingPermission | undefined;
-  respondToPermission: (optionId: string | null) => Promise<void>;
+  respondToPermission: (
+    optionId: string | null,
+    payload?: ToolConfirmationPayload,
+  ) => Promise<void>;
   /** The model the daemon runs this session on; undefined until it says. */
   daemonModelId: string | undefined;
   /** The session's approval mode as the daemon reports it. */
   daemonApprovalMode: string | undefined;
-  // --- contract stubs not yet wired for daemon mode (interactive pass) ---
   retryLastPrompt: () => Promise<void>;
-  handleApprovalModeChange: () => Promise<void>;
+  handleApprovalModeChange: (newApprovalMode?: string) => Promise<void>;
   activePtyId: number | undefined;
   loopDetectionConfirmationRequest: null;
 }
 
 const now = () => Date.now();
+
+function recordDaemonUsage(
+  usage: DaemonTurnUsage | undefined,
+  modelId: string | undefined,
+): void {
+  if (!usage) return;
+  if (typeof usage.inputTokens === 'number' && usage.inputTokens >= 0) {
+    uiTelemetryService.setLastPromptTokenCount(usage.inputTokens);
+  }
+  if (
+    usage.outputTokens !== undefined ||
+    usage.totalTokens !== undefined ||
+    usage.durationMs !== undefined
+  ) {
+    const input = usage.inputTokens ?? 0;
+    const output = usage.outputTokens ?? 0;
+    const total = usage.totalTokens ?? input + output;
+    const event = new ApiResponseEvent(
+      'daemon',
+      modelId ?? 'default',
+      usage.durationMs ?? 0,
+      'daemon',
+      undefined,
+      {
+        promptTokenCount: input,
+        candidatesTokenCount: output,
+        cachedContentTokenCount: usage.cachedReadTokens ?? 0,
+        thoughtsTokenCount: usage.thoughtTokens ?? 0,
+        totalTokenCount: total,
+      },
+    );
+    uiTelemetryService.addEvent({
+      ...event,
+      'event.name': EVENT_API_RESPONSE,
+    } as UiEvent);
+  }
+}
 
 /**
  * Overlay the load response's model and mode onto a projection. The load state
@@ -256,6 +305,7 @@ export function useDaemonStream(
   onFrameRef.current = onFrame;
   const goneRef = useRef(false);
   const pendingClearTokensRef = useRef(new Set<symbol>());
+  const lastPromptRef = useRef<string | null>(null);
   // The driver whose replay snapshot has been committed. A ref (not state) so
   // StrictMode's effect re-run on the same instance sees it and never seeds a
   // second copy of the transcript.
@@ -325,7 +375,11 @@ export function useDaemonStream(
           return;
         }
       }
+      const prevUsage = stateRef.current.lastUsage;
       const { state, committed } = projectDaemonEvent(stateRef.current, frame);
+      if (state.lastUsage && state.lastUsage !== prevUsage) {
+        recordDaemonUsage(state.lastUsage, state.modelId);
+      }
       const su = (frame.data as { update?: { sessionUpdate?: string } })?.update
         ?.sessionUpdate;
       dbg(
@@ -448,6 +502,9 @@ export function useDaemonStream(
         );
         const seeded = withLoadState(state, driver.state);
         stateRef.current = seeded;
+        if (seeded.lastUsage) {
+          recordDaemonUsage(seeded.lastUsage, seeded.modelId);
+        }
         for (const item of committed) addItemRef.current(item, now());
         streamingResponseLengthRef.current = seeded.pendingText.length;
         setSnapshot(seeded);
@@ -539,6 +596,7 @@ export function useDaemonStream(
 
   const submitQuery = useCallback(
     async (query: string) => {
+      lastPromptRef.current = query;
       pendingClearTokensRef.current.clear();
       const hadActiveTurnAtSubmit =
         stateRef.current.streamingState !== StreamingState.Idle;
@@ -629,15 +687,40 @@ export function useDaemonStream(
     void driver.cancel();
   }, [driver]);
 
+  const retryLastPrompt = useCallback(async () => {
+    if (stateRef.current.streamingState !== StreamingState.Idle) return;
+    const last = lastPromptRef.current;
+    if (!last) return;
+    await submitQuery(last);
+  }, [submitQuery]);
+
+  const handleApprovalModeChange = useCallback(
+    async (newApprovalMode?: string) => {
+      if (!newApprovalMode || typeof driver.setApprovalMode !== 'function') {
+        return;
+      }
+      try {
+        await driver.setApprovalMode(newApprovalMode);
+      } catch {
+        /* surfaced via daemon stream or ignored */
+      }
+    },
+    [driver],
+  );
+
   const respondToPermission = useCallback(
-    async (optionId: string | null) => {
+    async (optionId: string | null, payload?: ToolConfirmationPayload) => {
       const gate = stateRef.current.pendingPermission;
       if (!gate) return;
+      const extra: Record<string, unknown> = {};
+      if (payload?.answers) {
+        extra['answers'] = payload.answers;
+      }
       await driver.respondToSessionPermission(
         gate.requestId,
         optionId === null
-          ? { outcome: { outcome: 'cancelled' } }
-          : { outcome: { outcome: 'selected', optionId } },
+          ? { outcome: { outcome: 'cancelled' }, ...extra }
+          : { outcome: { outcome: 'selected', optionId }, ...extra },
       );
     },
     [driver],
@@ -708,9 +791,8 @@ export function useDaemonStream(
     respondToPermission,
     daemonModelId: snapshot.modelId,
     daemonApprovalMode: snapshot.approvalMode,
-    // Stubs — these in-process behaviors are wired in the interactive pass.
-    retryLastPrompt: async () => {},
-    handleApprovalModeChange: async () => {},
+    retryLastPrompt,
+    handleApprovalModeChange,
     activePtyId: undefined,
     loopDetectionConfirmationRequest: null,
   };

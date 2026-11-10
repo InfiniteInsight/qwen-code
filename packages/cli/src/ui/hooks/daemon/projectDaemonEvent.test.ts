@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { CompressionStatus } from '@qwen-code/qwen-code-core';
 import {
   StreamingState,
   ToolCallStatus,
@@ -429,6 +430,7 @@ describe('projectDaemonEvent', () => {
     expect(activePermissionOf(s)).toEqual({
       requestId: 'req_1',
       toolCallId: 'call_1',
+      toolCall: { toolCallId: 'call_1' },
       options: [
         { optionId: 'proceed_once', name: 'Yes' },
         { optionId: 'cancel', name: 'No' },
@@ -500,6 +502,10 @@ describe('projectDaemonEvent', () => {
       requestId: 'b95e50a2',
       toolCallId: 'eZfspYl89m4FgWl2OUmlx4KXUHRJNZk0',
       title: 'Writing to /tmp/capture_probe.txt',
+      toolCall: expect.objectContaining({
+        kind: 'edit',
+        toolCallId: 'eZfspYl89m4FgWl2OUmlx4KXUHRJNZk0',
+      }),
       options: [
         {
           kind: 'allow_always',
@@ -1666,5 +1672,191 @@ describe('multi-step tool turns commit sub-turns as they complete (#247)', () =>
       { ownClientId: SELF, lastEventId: 42 },
     );
     expect(emptyWithWatermark.state.lastEventId).toBe(42);
+  });
+
+  it('projects ACP plan, usage_update, diff blocks, structured _meta items, and mid-turn frames (#526)', () => {
+    let s = initialDaemonProjectionState(SELF);
+
+    // 1. ACP `plan` update projects into a `todo_write` tool item with `todo_list` resultDisplay
+    s = projectDaemonEvent(
+      s,
+      sessionUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect daemon hooks',
+            status: 'completed',
+            _meta: { qwenTodo: { id: '1' } },
+          },
+          {
+            content: 'Verify parity',
+            status: 'in_progress',
+            _meta: { qwenTodo: { id: '2', blockedBy: ['1'] } },
+          },
+        ],
+        _meta: { qwenTranscript: { planToolCallId: 'todo_call_1' } },
+      }),
+    ).state;
+    expect(pendingToolCallsOf(s)).toEqual([
+      expect.objectContaining({
+        callId: 'todo_call_1',
+        name: 'todo_write',
+        status: ToolCallStatus.Success,
+        resultDisplay: {
+          type: 'todo_list',
+          todos: [
+            { id: '1', content: 'Inspect daemon hooks', status: 'completed' },
+            {
+              id: '2',
+              content: 'Verify parity',
+              status: 'in_progress',
+              blockedBy: ['1'],
+            },
+          ],
+        },
+      }),
+    ]);
+
+    // 2. ACP `usage_update` updates `lastUsage.inputTokens`
+    s = projectDaemonEvent(
+      s,
+      sessionUpdate({
+        sessionUpdate: 'usage_update',
+        used: 48_000,
+        size: 128_000,
+      }),
+    ).state;
+    expect(s.lastUsage?.inputTokens).toBe(48_000);
+
+    // 3. Tool call with ACP `diff` content block synthesizes `FileDiff` resultDisplay
+    s = projectDaemonEvent(
+      s,
+      sessionUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'edit_1',
+        title: 'Edit src/app.ts',
+        status: 'completed',
+        content: [
+          {
+            type: 'diff',
+            path: '/repo/src/app.ts',
+            oldText: 'const a = 1;\n',
+            newText: 'const a = 2;\n',
+          },
+        ],
+        _meta: { toolName: 'edit' },
+      }),
+    ).state;
+    const editTool = pendingToolCallsOf(s).find((t) => t.callId === 'edit_1');
+    expect(editTool?.resultDisplay).toMatchObject({
+      fileName: 'app.ts',
+      filePath: '/repo/src/app.ts',
+      originalContent: 'const a = 1;\n',
+      newContent: 'const a = 2;\n',
+      fileDiff: expect.stringContaining('-const a = 1;'),
+    });
+
+    // 4. Structured `_meta` items on `agent_message_chunk`: goal_status, stop_hook_loop, vision_notice, compression
+    const goalRes = projectDaemonEvent(
+      s,
+      sessionUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          goalStatus: {
+            kind: 'checking',
+            condition: 'All tests pass',
+            iterations: 2,
+          },
+          stopHookLoop: {
+            iterationCount: 3,
+            reasons: ['lint failed'],
+            stopHookCount: 1,
+          },
+        },
+      }),
+    );
+    expect(goalRes.committed).toEqual([
+      {
+        type: 'goal_status',
+        kind: 'checking',
+        condition: 'All tests pass',
+        iterations: 2,
+      },
+      {
+        type: 'stop_hook_loop',
+        iterationCount: 3,
+        reasons: ['lint failed'],
+        stopHookCount: 1,
+      },
+    ]);
+
+    const visionRes = projectDaemonEvent(
+      goalRes.state,
+      sessionUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: {
+          type: 'text',
+          text: 'Analyzed screenshot with vision model',
+        },
+        _meta: { source: 'vision_bridge_notice' },
+      }),
+    );
+    expect(visionRes.committed).toEqual([
+      {
+        type: 'vision_notice',
+        text: 'Analyzed screenshot with vision model',
+      },
+    ]);
+    expect(visionRes.state.pendingText).toBe('');
+
+    const compressRes = projectDaemonEvent(
+      visionRes.state,
+      sessionUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: {
+          type: 'text',
+          text: 'Chat history compressed from 90000 to 15000 tokens.',
+        },
+        _meta: {
+          contextCompression: {
+            phase: 'done',
+            originalTokenCount: 90_000,
+            newTokenCount: 15_000,
+          },
+        },
+      }),
+    );
+    expect(compressRes.committed).toEqual([
+      {
+        type: 'compression',
+        compression: {
+          isPending: false,
+          originalTokenCount: 90_000,
+          newTokenCount: 15_000,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      },
+    ]);
+    expect(compressRes.state.pendingText).toBe('');
+
+    // 5. `mid_turn_message_injected` and `pending_prompt_started` commit user lines
+    const midTurnRes = projectDaemonEvent(compressRes.state, {
+      type: 'mid_turn_message_injected',
+      data: { messages: ['focus on auth.ts'] },
+    });
+    expect(midTurnRes.committed).toContainEqual({
+      type: 'user',
+      text: 'focus on auth.ts',
+    });
+
+    const pendingPromptRes = projectDaemonEvent(midTurnRes.state, {
+      type: 'pending_prompt_started',
+      originatorClientId: SELF,
+      data: { text: 'follow-up queued prompt' },
+    });
+    expect(pendingPromptRes.committed).toEqual([
+      { type: 'user', text: 'follow-up queued prompt' },
+    ]);
   });
 });

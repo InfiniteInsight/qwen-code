@@ -17,7 +17,7 @@
  * reducer commits a `tool_group` history item on `turn_complete`. Live tool
  * display + the permission prompt binding are a following slice.
  */
-import { useContext, useRef } from 'react';
+import { useContext, useEffect, useRef } from 'react';
 import { StreamingState } from '../../types.js';
 import { isSlashCommand } from '../../utils/commandUtils.js';
 import { useDaemonStream } from './useDaemonStream.js';
@@ -130,7 +130,7 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
   _setShellInputFocused,
   _terminalWidth,
   _terminalHeight,
-  _midTurnDrainRef,
+  midTurnDrainRef,
   _logger,
   _availableTerminalHeightRef,
   _terminalWidthRef,
@@ -154,6 +154,52 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
   streamingStateRef.current = ds.streamingState;
   const getCurrentStreamingState = () =>
     ds.getStreamingState?.() ?? streamingStateRef.current;
+
+  useEffect(() => {
+    if (
+      getCurrentStreamingState() !== StreamingState.Responding ||
+      typeof driver.enqueueMidTurnMessage !== 'function' ||
+      !midTurnDrainRef?.current
+    ) {
+      return;
+    }
+    const drained = midTurnDrainRef.current(false);
+    if (drained.length === 0) {
+      return;
+    }
+    void (async () => {
+      const unaccepted: string[] = [];
+      let anyAccepted = false;
+      for (let i = 0; i < drained.length; i++) {
+        const msg = drained[i]!;
+        try {
+          const res = await driver.enqueueMidTurnMessage!(msg);
+          const accepted =
+            res && typeof res === 'object' && 'accepted' in res
+              ? (res as { accepted?: unknown }).accepted !== false
+              : true;
+          if (accepted) {
+            anyAccepted = true;
+          } else {
+            unaccepted.push(msg);
+          }
+        } catch {
+          unaccepted.push(...drained.slice(i));
+          break;
+        }
+      }
+      if (anyAccepted && typeof driver.sendMidTurnMessagesNow === 'function') {
+        try {
+          await driver.sendMidTurnMessagesNow();
+        } catch {
+          /* daemon injects at next model boundary if immediate nudge fails */
+        }
+      }
+      if (unaccepted.length > 0) {
+        midTurnRestoreRef?.current?.(unaccepted);
+      }
+    })();
+  });
 
   return {
     streamingState: ds.streamingState,
@@ -229,10 +275,11 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
     // session's goal turns are not admitted through this adapter.
     preemptGoalTurn: () => {},
     retryLastPrompt: ds.retryLastPrompt,
-    // Live tool display deferred (see file header); results land via history.
+    // Live tool display rides pendingHistoryItems tool_group items.
     pendingToolCalls: [],
-    // Approval-mode switching is a daemon-side concern not wired this slice.
-    handleApprovalModeChange: async () => {},
+    handleApprovalModeChange: async (newApprovalMode) => {
+      await ds.handleApprovalModeChange(String(newApprovalMode));
+    },
     activePtyId: ds.activePtyId,
     loopDetectionConfirmationRequest: ds.loopDetectionConfirmationRequest,
     streamingResponseLengthRef: ds.streamingResponseLengthRef,

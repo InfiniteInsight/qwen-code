@@ -50,9 +50,14 @@
  *   text commits as `gemini` (not `gemini_content`); both are deliberate
  *   simplifications to revisit against the in-process path at integration.
  */
+import { basename } from 'node:path';
+import * as Diff from 'diff';
+import { CompressionStatus } from '@qwen-code/qwen-code-core/core/turn.js';
+import type { GoalSnapshotV2 } from '@qwen-code/qwen-code-core/goals/index.js';
 import {
   StreamingState,
   ToolCallStatus,
+  isGoalStatusKind,
   type HistoryItemWithoutId,
   type IndividualToolCallDisplay,
   type ThoughtSummary,
@@ -92,10 +97,12 @@ export interface PendingPermission {
   toolCallId?: string;
   /** Human-readable tool title (e.g. "Writing to /tmp/x"); shown in the prompt. */
   title?: string;
+  /** Raw ACP toolCall payload from the permission request (kind, rawInput, content, _meta). */
+  toolCall?: Record<string, unknown>;
   /**
    * Daemon-defined options. Each carries an ACP `kind`
    * (`allow_once`/`allow_always`/`reject_once`/`reject_always`) the hook maps a
-   * `ToolConfirmationOutcome` onto — the opaque `optionId` is never hardcoded.
+   * `ToolConfirmationOutcome` onto.
    */
   options: Array<{ optionId: string; kind?: string; [key: string]: unknown }>;
 }
@@ -458,6 +465,64 @@ function resolveResultDisplay(
     return rawOutput as unknown as IndividualToolCallDisplay['resultDisplay'];
   }
 
+  if (
+    toolName.toLowerCase() === 'todo_write' &&
+    Array.isArray(rawInput['todos'])
+  ) {
+    const todos = (rawInput['todos'] as unknown[]).map((entry, idx) => {
+      const item = asRecord(entry);
+      const rawStatus = item['status'];
+      const todoStatus: 'pending' | 'in_progress' | 'completed' =
+        rawStatus === 'in_progress' || rawStatus === 'completed'
+          ? rawStatus
+          : 'pending';
+      return {
+        id: String(item['id'] ?? idx + 1),
+        content: String(item['content'] ?? ''),
+        status: todoStatus,
+        ...(Array.isArray(item['blockedBy'])
+          ? { blockedBy: (item['blockedBy'] as unknown[]).map(String) }
+          : {}),
+      };
+    });
+    return {
+      type: 'todo_list',
+      todos,
+    } as unknown as IndividualToolCallDisplay['resultDisplay'];
+  }
+
+  const contentBlocks = Array.isArray(update['content'])
+    ? (update['content'] as unknown[])
+    : [];
+  const diffBlock = contentBlocks
+    .map(asRecord)
+    .find((b) => b['type'] === 'diff' && typeof b['newText'] === 'string');
+  if (diffBlock) {
+    const filePath =
+      (typeof diffBlock['path'] === 'string' && diffBlock['path']) ||
+      (typeof rawInput['file_path'] === 'string' && rawInput['file_path']) ||
+      'file';
+    const fileName = basename(filePath) || filePath;
+    const originalContent =
+      typeof diffBlock['oldText'] === 'string' ? diffBlock['oldText'] : '';
+    const newContent = diffBlock['newText'] as string;
+    const fileDiff = Diff.createPatch(
+      fileName,
+      originalContent,
+      newContent,
+      'Current',
+      'Proposed',
+      { context: 3 },
+    );
+    return {
+      fileDiff,
+      fileName,
+      filePath,
+      originalContent,
+      newContent,
+    } as unknown as IndividualToolCallDisplay['resultDisplay'];
+  }
+
   return textResult ?? prevResultDisplay;
 }
 
@@ -668,10 +733,105 @@ function projectSessionUpdate(
 
     case 'agent_message_chunk': {
       const usage = readUsage(update);
+      const meta = asRecord(update['_meta']);
       const committed: HistoryItemWithoutId[] = [];
       let tools = state.tools;
       let pendingThought = state.pendingThought;
-      if (text.trim().length > 0 && areAllToolsTerminal(tools)) {
+      let suppressChunkText = false;
+
+      const goalStatus = asRecord(meta['goalStatus']);
+      if (
+        isGoalStatusKind(goalStatus['kind']) &&
+        typeof goalStatus['condition'] === 'string'
+      ) {
+        committed.push({
+          type: 'goal_status',
+          kind: goalStatus['kind'],
+          condition: goalStatus['condition'],
+          ...(typeof goalStatus['iterations'] === 'number'
+            ? { iterations: goalStatus['iterations'] }
+            : {}),
+          ...(typeof goalStatus['setAt'] === 'number'
+            ? { setAt: goalStatus['setAt'] }
+            : {}),
+          ...(typeof goalStatus['durationMs'] === 'number'
+            ? { durationMs: goalStatus['durationMs'] }
+            : {}),
+          ...(typeof goalStatus['lastReason'] === 'string'
+            ? { lastReason: goalStatus['lastReason'] }
+            : {}),
+        });
+      } else {
+        const goalState = asRecord(meta['goalState']);
+        if (typeof goalState['v'] === 'number') {
+          committed.push({
+            type: 'goal_state',
+            snapshot: goalState as unknown as GoalSnapshotV2,
+          });
+        }
+      }
+
+      const stopHookLoop = asRecord(meta['stopHookLoop']);
+      if (typeof stopHookLoop['iterationCount'] === 'number') {
+        committed.push({
+          type: 'stop_hook_loop',
+          iterationCount: stopHookLoop['iterationCount'],
+          reasons: Array.isArray(stopHookLoop['reasons'])
+            ? (stopHookLoop['reasons'] as unknown[]).map(String)
+            : [],
+          stopHookCount:
+            typeof stopHookLoop['stopHookCount'] === 'number'
+              ? stopHookLoop['stopHookCount']
+              : 0,
+        });
+      }
+
+      if (meta['source'] === 'vision_bridge_notice' && text.trim().length > 0) {
+        committed.push({
+          type: 'vision_notice',
+          text: text.trim(),
+        });
+        suppressChunkText = true;
+      }
+
+      const cc = asRecord(meta['contextCompression']);
+      if (typeof cc['phase'] === 'string') {
+        suppressChunkText = true;
+        if (
+          cc['phase'] === 'done' &&
+          typeof cc['originalTokenCount'] === 'number' &&
+          typeof cc['newTokenCount'] === 'number'
+        ) {
+          committed.push({
+            type: 'compression',
+            compression: {
+              isPending: false,
+              originalTokenCount: cc['originalTokenCount'],
+              newTokenCount: cc['newTokenCount'],
+              compressionStatus: CompressionStatus.COMPRESSED,
+              ...(cc['originalTokenCountIsEstimated'] === true
+                ? { originalTokenCountIsEstimated: true }
+                : {}),
+              ...(cc['newTokenCountIsEstimated'] === true
+                ? { newTokenCountIsEstimated: true }
+                : {}),
+            },
+          });
+        } else if (cc['phase'] === 'noop') {
+          committed.push({
+            type: 'compression',
+            compression: {
+              isPending: false,
+              originalTokenCount: null,
+              newTokenCount: null,
+              compressionStatus: CompressionStatus.NOOP,
+            },
+          });
+        }
+      }
+
+      const effectiveText = suppressChunkText ? '' : text;
+      if (effectiveText.trim().length > 0 && areAllToolsTerminal(tools)) {
         committed.push({ type: 'tool_group', tools });
         tools = [];
         pendingThought = '';
@@ -686,7 +846,7 @@ function projectSessionUpdate(
       const nextStreamingState = hasChunkContent(update)
         ? StreamingState.Responding
         : state.streamingState;
-      const nextPendingText = state.pendingText + text;
+      const nextPendingText = state.pendingText + effectiveText;
       const nextLastUsage = usage ?? state.lastUsage;
       if (
         committed.length === 0 &&
@@ -704,12 +864,87 @@ function projectSessionUpdate(
           streamingState: nextStreamingState,
           tools,
           pendingThought,
-          // Concatenate verbatim — a terminal chunk may carry empty text plus
-          // `_meta.usage`; appending '' is a no-op.
           pendingText: nextPendingText,
           lastUsage: nextLastUsage,
         },
         committed,
+      };
+    }
+
+    case 'plan': {
+      const rawEntries = Array.isArray(update['entries'])
+        ? (update['entries'] as unknown[])
+        : [];
+      const todos = rawEntries.map((entry, idx) => {
+        const item = asRecord(entry);
+        const entryMeta = asRecord(item['_meta']);
+        const qwenTodo = asRecord(entryMeta['qwenTodo']);
+        const rawStatus = item['status'];
+        const status: 'pending' | 'in_progress' | 'completed' =
+          rawStatus === 'in_progress' || rawStatus === 'completed'
+            ? rawStatus
+            : 'pending';
+        return {
+          id: String(qwenTodo['id'] ?? idx + 1),
+          content: String(item['content'] ?? ''),
+          status,
+          ...(Array.isArray(qwenTodo['blockedBy'])
+            ? { blockedBy: (qwenTodo['blockedBy'] as unknown[]).map(String) }
+            : {}),
+        };
+      });
+      const meta = asRecord(update['_meta']);
+      const qwenTranscript = asRecord(meta['qwenTranscript']);
+      const callId =
+        typeof qwenTranscript['planToolCallId'] === 'string' &&
+        qwenTranscript['planToolCallId'].length > 0
+          ? qwenTranscript['planToolCallId']
+          : 'todo_write_plan';
+      const flushed = flushBeforeToolActivity(state);
+      const todoTool: IndividualToolCallDisplay = {
+        callId,
+        name: 'todo_write',
+        description: 'TodoWrite',
+        status: ToolCallStatus.Success,
+        confirmationDetails: undefined,
+        resultDisplay: {
+          type: 'todo_list',
+          todos,
+        } as unknown as IndividualToolCallDisplay['resultDisplay'],
+        renderOutputAsMarkdown: false,
+      };
+      const prevIdx = flushed.state.tools.findIndex((t) => t.callId === callId);
+      const tools =
+        prevIdx >= 0
+          ? flushed.state.tools.map((t, i) => (i === prevIdx ? todoTool : t))
+          : [...flushed.state.tools, todoTool];
+      return {
+        state: {
+          ...flushed.state,
+          streamingState: StreamingState.Responding,
+          tools,
+        },
+        committed: flushed.committed,
+      };
+    }
+
+    case 'usage_update': {
+      const used = update['used'];
+      if (typeof used !== 'number' || !Number.isFinite(used) || used < 0) {
+        return { state, committed: [] };
+      }
+      if (state.lastUsage?.inputTokens === used) {
+        return { state, committed: [] };
+      }
+      return {
+        state: {
+          ...state,
+          lastUsage: {
+            ...state.lastUsage,
+            inputTokens: used,
+          },
+        },
+        committed: [],
       };
     }
 
@@ -834,7 +1069,13 @@ function projectFrame(
           ...flushed.state,
           streamingState: StreamingState.WaitingForConfirmation,
           tools,
-          pendingPermission: { requestId, toolCallId, title, options },
+          pendingPermission: {
+            requestId,
+            toolCallId,
+            title,
+            ...(Object.keys(toolCall).length > 0 ? { toolCall } : {}),
+            options,
+          },
         },
         committed: flushed.committed,
       };
@@ -924,6 +1165,49 @@ function projectFrame(
         return { state, committed: [] };
       }
       return { state: { ...state, approvalMode: next }, committed: [] };
+    }
+
+    case 'mid_turn_message_injected': {
+      const messages = Array.isArray(data['messages'])
+        ? (data['messages'] as unknown[])
+            .filter((m): m is string => typeof m === 'string')
+            .map((m) => m.trim())
+            .filter((m) => m.length > 0)
+        : [];
+      if (messages.length === 0) {
+        return { state, committed: [] };
+      }
+      const flushed = flushPendingTurn(state);
+      return {
+        state: {
+          ...flushed.state,
+          streamingState: StreamingState.Responding,
+        },
+        committed: [
+          ...flushed.committed,
+          ...messages.map(
+            (text): HistoryItemWithoutId => ({ type: 'user', text }),
+          ),
+        ],
+      };
+    }
+
+    case 'pending_prompt_started': {
+      const text = typeof data['text'] === 'string' ? data['text'].trim() : '';
+      const isSelfOrigin =
+        state.ownClientId !== undefined &&
+        frame.originatorClientId === state.ownClientId;
+      if (!text || !isSelfOrigin) {
+        return { state, committed: [] };
+      }
+      const flushed = flushPendingTurn(state);
+      return {
+        state: {
+          ...flushed.state,
+          streamingState: StreamingState.Responding,
+        },
+        committed: [...flushed.committed, { type: 'user', text }],
+      };
     }
 
     case 'session_rewound': {

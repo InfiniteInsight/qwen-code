@@ -102,9 +102,7 @@ export const DaemonAppContainer = (props: DaemonAppContainerProps) => {
         // `useDaemonStream` commits it to history before subscribing. Without
         // an id, omit workspaceCwd and get the daemon's bound workspace session.
         const session = sessionId
-          ? await DaemonSessionClient.load(client, sessionId, {
-              liveReplayMode: 'summary',
-            })
+          ? await DaemonSessionClient.load(client, sessionId)
           : await DaemonSessionClient.createOrAttach(client, {});
         if (!cancelled) setDriver(session);
       } catch (e) {

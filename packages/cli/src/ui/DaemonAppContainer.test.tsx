@@ -115,4 +115,12 @@ describe('DaemonAppContainer initial attach failure', () => {
     await new Promise((r) => setTimeout(r, 40));
     expect(exit).not.toHaveBeenCalled();
   });
+
+  it('loads the session without liveReplayMode: summary so subagent tool calls are preserved on attach (#526)', async () => {
+    sdk.load.mockResolvedValue({ clientId: 'c1' });
+    const exit = vi.fn();
+    mount(exit);
+    await vi.waitFor(() => expect(sdk.load).toHaveBeenCalledTimes(1));
+    expect(sdk.load).toHaveBeenCalledWith(expect.anything(), 's1');
+  });
 });

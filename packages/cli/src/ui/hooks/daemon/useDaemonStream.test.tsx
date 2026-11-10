@@ -11,6 +11,7 @@ import { renderHook, act, waitFor } from '@testing-library/react';
 import {
   BackgroundTaskRegistry,
   ToolConfirmationOutcome,
+  uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import { StreamingState, type HistoryItemWithoutId } from '../../types.js';
 import {
@@ -1813,5 +1814,132 @@ describe('useDaemonStream', () => {
     await waitFor(() => {
       expect(registry.get('agent-1')?.status).toBe('completed');
     });
+  });
+
+  it('updates uiTelemetryService, retries last prompt, forwards approval mode changes, and drains mid-turn steering messages (#526)', async () => {
+    const baseDriver = makeFakeDriver({ clientId: 'me', manualPrompt: true });
+    const setApprovalMode = vi.fn().mockResolvedValue({});
+    const enqueueMidTurnMessage = vi
+      .fn()
+      .mockResolvedValueOnce({ accepted: true })
+      .mockResolvedValueOnce({ accepted: false });
+    const sendMidTurnMessagesNow = vi.fn().mockResolvedValue({ nudged: true });
+    const driver: DaemonSessionDriver = {
+      ...baseDriver,
+      setApprovalMode,
+      enqueueMidTurnMessage,
+      sendMidTurnMessagesNow,
+    };
+
+    const queuedMidTurn = ['steer 1', 'steer 2'];
+    const midTurnDrain = vi.fn(() =>
+      queuedMidTurn.splice(0, queuedMidTurn.length),
+    );
+    const midTurnDrainRef = { current: midTurnDrain };
+    const midTurnRestore = vi.fn();
+    const midTurnRestoreRef = { current: midTurnRestore };
+
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <DaemonStreamContext.Provider value={driver}>
+        {children}
+      </DaemonStreamContext.Provider>
+    );
+
+    const { result } = renderHook(
+      () =>
+        (
+          useDaemonStreamAdapter as (
+            ...args: unknown[]
+          ) => ReturnType<typeof useDaemonStreamAdapter>
+        )(
+          {} as never,
+          [],
+          vi.fn(),
+          {} as never,
+          true,
+          {} as never,
+          vi.fn(),
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          midTurnDrainRef,
+          undefined,
+          undefined,
+          undefined,
+          midTurnRestoreRef,
+        ),
+      { wrapper },
+    );
+
+    // 1. Start a turn; midTurnDrainRef should be drained and forwarded to enqueueMidTurnMessage
+    let p1!: Promise<void>;
+    act(() => {
+      p1 = result.current.submitQuery('initial prompt');
+    });
+    await waitFor(() => {
+      expect(enqueueMidTurnMessage).toHaveBeenCalledTimes(2);
+    });
+    expect(enqueueMidTurnMessage).toHaveBeenNthCalledWith(1, 'steer 1');
+    expect(enqueueMidTurnMessage).toHaveBeenNthCalledWith(2, 'steer 2');
+    expect(sendMidTurnMessagesNow).toHaveBeenCalledTimes(1);
+    expect(midTurnRestore).toHaveBeenCalledWith(['steer 2']);
+
+    // 2. Stream usage chunk and verify uiTelemetryService.getLastPromptTokenCount() updates
+    act(() => {
+      baseDriver.push(
+        su({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            usage: {
+              inputTokens: 31_415,
+              outputTokens: 271,
+              totalTokens: 31_686,
+            },
+            durationMs: 1200,
+          },
+        }),
+      );
+    });
+    await waitFor(() => {
+      expect(uiTelemetryService.getLastPromptTokenCount()).toBe(31_415);
+    });
+
+    await act(async () => {
+      baseDriver.finishPrompt({ stopReason: 'end_turn' });
+      await p1;
+    });
+    expect(result.current.streamingState).toBe(StreamingState.Idle);
+
+    // 3. retryLastPrompt re-submits 'initial prompt' when Idle
+    let pRetry!: Promise<void>;
+    act(() => {
+      pRetry = result.current.retryLastPrompt();
+    });
+    await waitFor(() => {
+      expect(baseDriver.stats().prompts).toHaveLength(2);
+    });
+    expect(baseDriver.stats().prompts[1]).toEqual({
+      prompt: [{ type: 'text', text: 'initial prompt' }],
+    });
+    await act(async () => {
+      baseDriver.finishPrompt({ stopReason: 'end_turn' });
+      await pRetry;
+    });
+
+    // 4. handleApprovalModeChange forwards to driver.setApprovalMode
+    await act(async () => {
+      await result.current.handleApprovalModeChange('yolo' as never);
+    });
+    expect(setApprovalMode).toHaveBeenCalledWith('yolo');
   });
 });
