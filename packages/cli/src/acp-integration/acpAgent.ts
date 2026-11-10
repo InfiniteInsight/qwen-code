@@ -7320,8 +7320,14 @@ class QwenAgent implements Agent {
     });
   }
 
-  private loadPermissionSettings(cwd: string): LoadedSettings {
-    return this.adoptRequestSettings(this.loadRequestSettings(cwd), cwd);
+  private loadPermissionSettings(
+    cwd: string,
+    options?: { preserveInvalidWorkspaceSettings?: boolean },
+  ): LoadedSettings {
+    return this.adoptRequestSettings(
+      this.loadRequestSettings(cwd, options),
+      cwd,
+    );
   }
 
   /**
@@ -7380,10 +7386,16 @@ class QwenAgent implements Agent {
    * explicitly because passing an options object replaces `loadSettings`'s
    * `= true` default.
    */
-  private loadRequestSettings(settingsCwd: string): LoadedSettings {
+  private loadRequestSettings(
+    settingsCwd: string,
+    options?: { preserveInvalidWorkspaceSettings?: boolean },
+  ): LoadedSettings {
     return loadSettings(settingsCwd, {
       consumeCorruptionEnvVars: true,
       skipLoadEnvironment: true,
+      ...(options?.preserveInvalidWorkspaceSettings
+        ? { preserveInvalidWorkspaceSettings: true }
+        : {}),
     });
   }
 
@@ -10842,6 +10854,8 @@ class QwenAgent implements Agent {
               const canonicalBootstrapCwd = this.canonicalWorkspacePath(
                 this.config.getTargetDir(),
               );
+              const isBootstrapWorkspace =
+                canonicalChangeCwd === canonicalBootstrapCwd;
               const before =
                 this.syncedPermissionRuleSets.get(canonicalChangeCwd) ??
                 this.lastSyncedBootstrapPermissionRuleSet ??
@@ -10849,23 +10863,29 @@ class QwenAgent implements Agent {
               if (
                 typeof this.settings.reloadScopesFromDiskAtomically ===
                   'function' &&
-                !this.settings.reloadScopesFromDiskAtomically([
-                  SettingScope.User,
-                  SettingScope.Workspace,
-                ])
+                !this.settings.reloadScopesFromDiskAtomically(
+                  isBootstrapWorkspace
+                    ? [SettingScope.User, SettingScope.Workspace]
+                    : [SettingScope.User],
+                )
               ) {
                 throw new Error(
                   'The permission rules could not be reloaded for a workspace change.',
                 );
               }
-              const targetSettings =
-                canonicalChangeCwd === canonicalBootstrapCwd
+              let targetSettings: LoadedSettings;
+              try {
+                targetSettings = isBootstrapWorkspace
                   ? this.settings
-                  : this.loadPermissionSettings(changeCwd);
-              if (
-                Array.isArray(targetSettings.errors) &&
-                targetSettings.errors.length > 0
-              ) {
+                  : this.loadPermissionSettings(changeCwd, {
+                      preserveInvalidWorkspaceSettings: true,
+                    });
+              } catch {
+                throw new Error(
+                  'The permission rules could not be reloaded for a workspace change.',
+                );
+              }
+              if (targetSettings.corruptedPath) {
                 throw new Error(
                   'The permission rules could not be reloaded for a workspace change.',
                 );

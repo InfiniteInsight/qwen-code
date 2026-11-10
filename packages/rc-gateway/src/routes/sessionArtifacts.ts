@@ -83,6 +83,11 @@ const SNAPSHOT_HEADERS = {
   'Cache-Control': 'private, no-store',
 } as const;
 
+const SESSION_NOT_LOADED_BODY = {
+  error: 'Open this conversation before reading its artifacts',
+  code: 'session_not_loaded',
+} as const;
+
 /**
  * GET /session/:id/artifacts - what the session produced. The envelope is the
  * daemon's (`v`, `sessionId`, `artifacts`, `generatedAt`, `limits`) and each
@@ -104,18 +109,8 @@ export function createSessionArtifactListRoute(
       const envelope = await daemon.listSessionArtifacts(sessionId);
       res.status(200).json(envelope);
     } catch (err) {
-      const daemonStatus = (err as { status?: unknown } | undefined)?.status;
-      if (daemonStatus === 404) {
-        res
-          .status(404)
-          .json({ error: 'Session not found', code: 'session_not_found' });
-        return;
-      }
-      if (err instanceof UnknownSessionError) {
-        res.status(409).json({
-          error: 'Open this conversation before reading its artifacts',
-          code: 'session_not_loaded',
-        });
+      if (err instanceof UnknownSessionError || isSessionLevelGone(err)) {
+        res.status(409).json(SESSION_NOT_LOADED_BODY);
         return;
       }
       res
@@ -166,10 +161,7 @@ export function createSessionArtifactContentRoute(
         | { error?: unknown; message?: unknown }
         | undefined;
       if (err instanceof UnknownSessionError || isSessionLevelGone(err)) {
-        res.status(409).json({
-          error: 'Open this conversation before reading its artifacts',
-          code: 'session_not_loaded',
-        });
+        res.status(409).json(SESSION_NOT_LOADED_BODY);
         return;
       }
       if (daemonStatus === 404) {

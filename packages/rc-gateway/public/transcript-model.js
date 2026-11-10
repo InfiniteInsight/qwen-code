@@ -811,6 +811,8 @@
     function dropBookkeeping() {
       toolIndex.clear();
       subagentTypes.clear();
+      orphanSubs.clear();
+      pendingOrphans.clear();
       curAsst = null;
       forkItem = null;
       processingItem = null;
@@ -933,6 +935,13 @@
       }
       return into;
     }
+    function settleSubIfTerminal(t) {
+      if (t && t.sub && TERMINAL_TOOL_STATUSES[t.status] && !t.sub.done) {
+        t.sub.done = true;
+        t.sub.failed = t.status === 'failed';
+        t.sub.endedAt = t.sub.endedAt || now();
+      }
+    }
     function fillTool(into, from) {
       if (nameless(into) && !nameless(from)) into.label = from.label;
       if (into.input === undefined && from.input !== undefined)
@@ -942,6 +951,7 @@
       if (!into.status && from.status) into.status = from.status;
       if (!into.sub && from.sub) into.sub = from.sub;
       else if (into.sub && from.sub) mergeSub(into.sub, from.sub);
+      settleSubIfTerminal(into);
     }
     // A user message split by a page boundary: the older page ends in the first
     // part of it, the row already on screen opens with the rest. The same two
@@ -979,6 +989,7 @@
         if (row) {
           if (row.sub) mergeSub(row.sub, sub);
           else row.sub = sub;
+          settleSubIfTerminal(row);
           emitUpdate(row);
         } else if (pendingOrphans.has(id)) {
           mergeSub(pendingOrphans.get(id), sub);
@@ -997,6 +1008,7 @@
         if (!held) continue;
         pendingOrphans.delete(r.toolCallId);
         r.sub = r.sub ? mergeSub(held, r.sub) : held;
+        settleSubIfTerminal(r);
       }
     }
     // Two rows are the same record unless both know when they were sent and

@@ -21,6 +21,11 @@ import { createSessionBtwRoute } from './sessionBtw.js';
 import { createSessionRecapRoute } from './sessionRecap.js';
 import { createSessionWorktreeResetRoute } from './sessionWorktreeReset.js';
 import { createWorkspaceListRoute } from './workspaceFiles.js';
+import { createSessionSourcesRoute } from './sessionSources.js';
+import { createSessionOrganizationRoute } from './sessionOrganization.js';
+import { createSessionArtifactAddRoute } from './sessionArtifactMutations.js';
+import { createSessionGoalReadRoute } from './sessionGoal.js';
+import { createSessionHooksReadRoute } from './sessionHooks.js';
 
 const SID = '11111111-1111-1111-1111-111111111111';
 
@@ -62,7 +67,7 @@ function walledDaemon(): SessionDaemon {
 
 const cases: Array<{
   name: string;
-  method: 'GET' | 'POST';
+  method: 'GET' | 'POST' | 'PATCH';
   path: string;
   mount: string;
   handler: (d: SessionDaemon) => RequestHandler;
@@ -118,6 +123,43 @@ const cases: Array<{
     path: '/rc/workspace/list?path=src',
     handler: (d) => createWorkspaceListRoute(d),
   },
+  {
+    name: 'session_sources',
+    method: 'GET',
+    mount: '/session/:id/sources',
+    path: `/session/${SID}/sources`,
+    handler: (d) => createSessionSourcesRoute(d),
+  },
+  {
+    name: 'session_organization',
+    method: 'PATCH',
+    mount: '/session/:id/organization',
+    path: `/session/${SID}/organization`,
+    body: { isPinned: true },
+    handler: (d) => createSessionOrganizationRoute(d),
+  },
+  {
+    name: 'session_artifacts',
+    method: 'POST',
+    mount: '/session/:id/artifacts',
+    path: `/session/${SID}/artifacts`,
+    body: { title: 'doc', url: 'https://example.com' },
+    handler: (d) => createSessionArtifactAddRoute(d),
+  },
+  {
+    name: 'session_goal',
+    method: 'GET',
+    mount: '/session/:id/goal',
+    path: `/session/${SID}/goal`,
+    handler: (d) => createSessionGoalReadRoute(d),
+  },
+  {
+    name: 'session_hooks',
+    method: 'GET',
+    mount: '/session/:id/hooks',
+    path: `/session/${SID}/hooks`,
+    handler: (d) => createSessionHooksReadRoute(d),
+  },
 ];
 
 describe("a daemon 401 is not relayed as the caller's own 401", () => {
@@ -133,6 +175,7 @@ describe("a daemon 401 is not relayed as the caller's own 401", () => {
       });
       const h = c.handler(unauthorisedDaemon());
       if (c.method === 'GET') app.get(c.mount, h);
+      else if (c.method === 'PATCH') app.patch(c.mount, h);
       else app.post(c.mount, h);
       server = await new Promise<Server>((resolve) => {
         const s = app.listen(0, '127.0.0.1', () => resolve(s));
@@ -143,7 +186,7 @@ describe("a daemon 401 is not relayed as the caller's own 401", () => {
         fetch(url, {
           method: c.method,
           headers: { 'Content-Type': 'application/json' },
-          ...(c.method === 'POST'
+          ...(c.method === 'POST' || c.method === 'PATCH'
             ? { body: JSON.stringify(c.body ?? {}) }
             : {}),
         });
@@ -179,6 +222,7 @@ describe("a daemon request-wall 403 is not relayed as the caller's own 403", () 
       });
       const h = c.handler(walledDaemon());
       if (c.method === 'GET') app.get(c.mount, h);
+      else if (c.method === 'PATCH') app.patch(c.mount, h);
       else app.post(c.mount, h);
       server = await new Promise<Server>((resolve) => {
         const s = app.listen(0, '127.0.0.1', () => resolve(s));
@@ -189,7 +233,7 @@ describe("a daemon request-wall 403 is not relayed as the caller's own 403", () 
         fetch(url, {
           method: c.method,
           headers: { 'Content-Type': 'application/json' },
-          ...(c.method === 'POST'
+          ...(c.method === 'POST' || c.method === 'PATCH'
             ? { body: JSON.stringify(c.body ?? {}) }
             : {}),
         });

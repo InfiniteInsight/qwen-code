@@ -2910,4 +2910,48 @@ describe('DaemonPool reconciles with sessions the daemon reaped (#154)', () => {
       ),
     ).toBe(false);
   });
+
+  it('does not evict the parent session when a subagent call returns 404 with subagentRef (#474)', async () => {
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      spawn: async (cwd) => ({
+        client: {
+          ...fakeClient(cwd, 'sess-parent'),
+          async resolveSubagentSession(id: string, subagentRef: string) {
+            throw new DaemonHttpError(
+              404,
+              {
+                error: `Subagent not found: ${subagentRef}`,
+                code: 'session_not_found',
+                sessionId: id,
+                subagentRef,
+              },
+              `/session/${id}/subagents/${subagentRef}`,
+            );
+          },
+          async sessionContext(id: string) {
+            return { calledOn: cwd, id } as never;
+          },
+        } as unknown as DaemonClient,
+        stop: async () => {},
+        workspaceCwd: cwd,
+      }),
+    });
+
+    const created = await pool.createOrAttachSession({
+      workspaceCwd: '/proj/a',
+    });
+    expect(created.sessionId).toBe('sess-parent');
+
+    await expect(
+      pool.resolveSubagentSession('sess-parent', 'tc-missing'),
+    ).rejects.toMatchObject({ status: 404 });
+
+    // Parent session remains bound to /proj/a in the pool.
+    expect(await pool.sessionContext('sess-parent')).toEqual({
+      calledOn: '/proj/a',
+      id: 'sess-parent',
+    });
+  });
 });

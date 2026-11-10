@@ -1253,7 +1253,7 @@ it('prefers parent transcript terminal status in resolve and does not duplicate 
     })}\n`,
   );
 
-  let reportedStatus: 'running' | 'paused' = 'running';
+  let reportedStatus: 'running' | 'paused' | 'cancelled' = 'running';
   const runtime = {
     workspaceId: 'workspace-issue-465',
     workspaceCwd,
@@ -1321,6 +1321,18 @@ it('prefers parent transcript terminal status in resolve and does not duplicate 
   expect(secondLoadJson).not.toContain('round one stream delta');
 
   reportedStatus = 'paused';
+  const resolvedWhilePaused = await sessions.resolve(
+    runtime,
+    parentSessionId,
+    toolCallId,
+  );
+  expect(resolvedWhilePaused).toMatchObject({
+    status: 'paused',
+    durationMs: 1_234,
+    totalTokens: 99,
+  });
+
+  reportedStatus = 'cancelled';
   const resolvedAfterFinish = await sessions.resolve(
     runtime,
     parentSessionId,
@@ -1331,4 +1343,323 @@ it('prefers parent transcript terminal status in resolve and does not duplicate 
     durationMs: 1_234,
     totalTokens: 99,
   });
+});
+
+it('resolves nested subagents via virtual parent session id and reads metrics from parent subagent transcript', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-nested-subagent-'));
+  tempDirs.push(dir);
+  const workspaceCwd = path.join(dir, 'workspace');
+  const runtimeBaseDir = path.join(dir, 'runtime');
+  await fs.mkdir(workspaceCwd, { recursive: true });
+  const projectDir = Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, () =>
+    new Storage(workspaceCwd).getProjectDir(),
+  );
+  const rootSessionId = 'root-session-1';
+  const parentAgentId = 'parent-agent-1';
+  const nestedAgentId = 'nested-agent-1';
+  const nestedCallId = 'nested-call-1';
+  const sessionDir = getSubagentSessionDir(projectDir, rootSessionId);
+  await fs.mkdir(sessionDir, { recursive: true });
+
+  const parentOutputFile = path.join(
+    sessionDir,
+    `agent-${parentAgentId}.jsonl`,
+  );
+  const nestedOutputFile = path.join(
+    sessionDir,
+    `agent-${nestedAgentId}.jsonl`,
+  );
+  await fs.writeFile(
+    parentOutputFile,
+    `${JSON.stringify({
+      ...record('p-call', null, 'assistant', ''),
+      sessionId: rootSessionId,
+      message: {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: nestedCallId,
+              name: 'agent',
+              args: {
+                description: 'nested research',
+                prompt: 'inspect child details',
+                subagent_type: 'general-purpose',
+              },
+            },
+          },
+        ],
+      },
+    })}\n${JSON.stringify({
+      ...record('p-result', 'p-call', 'user', ''),
+      sessionId: rootSessionId,
+      type: 'tool_result',
+      toolCallResult: {
+        callId: nestedCallId,
+        status: 'success',
+        resultDisplay: {
+          type: 'task_execution',
+          status: 'completed',
+          executionSummary: {
+            totalDurationMs: 2_500,
+            totalToolCalls: 4,
+            totalTokens: 640,
+            inputTokens: 500,
+            outputTokens: 140,
+            cachedTokens: 200,
+          },
+        },
+      },
+    })}\n`,
+  );
+  await fs.writeFile(
+    nestedOutputFile,
+    `${JSON.stringify({
+      ...record('n-u1', null, 'user', 'inspect child details'),
+      sessionId: rootSessionId,
+    })}\n`,
+  );
+  await fs.writeFile(
+    nestedOutputFile.replace(/\.jsonl$/, '.meta.json'),
+    JSON.stringify({
+      agentId: nestedAgentId,
+      agentType: 'general-purpose',
+      description: 'nested research',
+      parentSessionId: rootSessionId,
+      parentAgentId,
+      toolUseId: nestedCallId,
+      createdAt: new Date(1_000).toISOString(),
+      lastUpdatedAt: new Date(3_000).toISOString(),
+      status: 'completed',
+    }),
+  );
+
+  const requestedSessionIds: string[] = [];
+  const runtime = {
+    workspaceId: 'workspace-nested',
+    workspaceCwd,
+    sessionRuntimeBaseDir: runtimeBaseDir,
+    env: { mode: 'parent-process', overlayKeys: [] },
+    bridge: {
+      getSessionTasksStatus: async (sessionId: string) => {
+        requestedSessionIds.push(sessionId);
+        return {
+          v: 1 as const,
+          sessionId,
+          now: Date.now(),
+          tasks: [],
+        };
+      },
+    },
+  } as unknown as WorkspaceRuntime;
+
+  const virtualParentSessionId = createVirtualSubagentSessionId(
+    rootSessionId,
+    parentAgentId,
+  );
+  const sessions = new VirtualSubagentSessions();
+  const resolved = await sessions.resolve(
+    runtime,
+    virtualParentSessionId,
+    nestedCallId,
+  );
+
+  expect(requestedSessionIds).toEqual([rootSessionId]);
+  expect(resolved).toMatchObject({
+    sessionId: createVirtualSubagentSessionId(rootSessionId, nestedAgentId),
+    taskId: nestedAgentId,
+    title: 'nested research',
+    status: 'completed',
+    durationMs: 2_500,
+    toolCalls: 4,
+    totalTokens: 640,
+    inputTokens: 500,
+    outputTokens: 140,
+    cachedTokens: 200,
+  });
+});
+
+it('preserves paused status over background or completed parent toolCallResult and prefers larger continued metrics', async () => {
+  expect(preferTerminalTaskStatus('running', 'paused')).toBe('paused');
+  expect(preferTerminalTaskStatus('completed', 'paused')).toBe('paused');
+  expect(preferTerminalTaskStatus('completed', 'running')).toBe('completed');
+
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-paused-metrics-'));
+  tempDirs.push(dir);
+  const workspaceCwd = path.join(dir, 'workspace');
+  const runtimeBaseDir = path.join(dir, 'runtime');
+  await fs.mkdir(workspaceCwd, { recursive: true });
+  const projectDir = Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, () =>
+    new Storage(workspaceCwd).getProjectDir(),
+  );
+  const chatsDir = path.join(projectDir, 'chats');
+  await fs.mkdir(chatsDir, { recursive: true });
+  const parentSessionId = 'parent-paused';
+  const toolCallId = 'call-paused';
+  const outputFile = path.join(dir, 'agent-paused.jsonl');
+
+  await fs.writeFile(
+    path.join(chatsDir, `${parentSessionId}.jsonl`),
+    `${JSON.stringify({
+      ...record('result-bg', null, 'user', ''),
+      sessionId: parentSessionId,
+      type: 'tool_result',
+      toolCallResult: {
+        callId: toolCallId,
+        status: 'success',
+        resultDisplay: {
+          type: 'task_execution',
+          status: 'background',
+          executionSummary: {
+            totalDurationMs: 1_000,
+            totalToolCalls: 2,
+            totalTokens: 300,
+            inputTokens: 200,
+            outputTokens: 100,
+          },
+        },
+      },
+    })}\n`,
+  );
+  await fs.writeFile(
+    outputFile,
+    `${JSON.stringify(record('u1', null, 'user', 'initial prompt'))}\n`,
+  );
+
+  let taskStatus: 'paused' | 'completed' = 'paused';
+  const runtime = {
+    workspaceId: 'workspace-paused',
+    workspaceCwd,
+    sessionRuntimeBaseDir: runtimeBaseDir,
+    env: { mode: 'parent-process', overlayKeys: [] },
+    bridge: {
+      getSessionTasksStatus: async () => ({
+        v: 1 as const,
+        sessionId: parentSessionId,
+        now: Date.now(),
+        tasks: [
+          {
+            kind: 'agent' as const,
+            id: 'agent-paused',
+            label: 'paused agent',
+            description: 'paused agent',
+            status: taskStatus,
+            startTime: 1_000,
+            runtimeMs: 4_500,
+            stats: {
+              durationMs: 4_500,
+              toolUses: 6,
+              totalTokens: 950,
+            },
+            outputFile,
+            isBackgrounded: true,
+            toolUseId: toolCallId,
+          },
+        ],
+      }),
+    },
+  } as unknown as WorkspaceRuntime;
+
+  const sessions = new VirtualSubagentSessions();
+  const pausedResolved = await sessions.resolve(
+    runtime,
+    parentSessionId,
+    toolCallId,
+  );
+  expect(pausedResolved).toMatchObject({
+    status: 'paused',
+    durationMs: 4_500,
+    toolCalls: 6,
+    totalTokens: 950,
+    inputTokens: 200,
+    outputTokens: 100,
+  });
+
+  taskStatus = 'completed';
+  const completedResolved = await sessions.resolve(
+    runtime,
+    parentSessionId,
+    toolCallId,
+  );
+  expect(completedResolved).toMatchObject({
+    status: 'completed',
+    durationMs: 4_500,
+    toolCalls: 6,
+    totalTokens: 950,
+  });
+});
+
+it('flushes new canonical transcript records to active subscribers when a completed subagent completes a fast follow-up turn', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-fast-followup-'));
+  tempDirs.push(dir);
+  const outputFile = path.join(dir, 'agent.jsonl');
+  await fs.writeFile(
+    outputFile,
+    `${JSON.stringify(record('u1', null, 'user', 'turn 1 prompt'))}\n${JSON.stringify(
+      record('a1', 'u1', 'assistant', 'turn 1 answer'),
+    )}\n`,
+  );
+
+  const runtime = {
+    workspaceId: 'workspace-fast-followup',
+    workspaceCwd: '/workspace',
+    sessionRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+    env: { mode: 'parent-process', overlayKeys: [] },
+    bridge: {
+      getSessionTasksStatus: async () => ({
+        v: 1 as const,
+        sessionId: 'parent-session',
+        now: Date.now(),
+        tasks: [
+          {
+            kind: 'agent' as const,
+            id: 'agent-fast',
+            label: 'fast agent',
+            description: 'fast agent',
+            status: 'completed' as const,
+            startTime: 1_000,
+            runtimeMs: 500,
+            outputFile,
+            isBackgrounded: true,
+            toolUseId: 'call-fast',
+          },
+        ],
+      }),
+    },
+  } as unknown as WorkspaceRuntime;
+
+  const sessions = new VirtualSubagentSessions();
+  const resolved = await sessions.resolve(
+    runtime,
+    'parent-session',
+    'call-fast',
+  );
+  const loaded = await sessions.load(runtime, resolved!.sessionId);
+  const abort = new AbortController();
+  const stream = await sessions.subscribe(runtime, resolved!.sessionId, {
+    signal: abort.signal,
+    lastEventId: loaded!.lastEventId,
+  });
+  const iterator = stream![Symbol.asyncIterator]();
+  expect((await iterator.next()).value?.type).toBe('replay_complete');
+
+  await fs.appendFile(
+    outputFile,
+    `${JSON.stringify(record('u2', 'a1', 'user', 'turn 2 follow-up'))}\n${JSON.stringify(
+      record('a2', 'u2', 'assistant', 'turn 2 fast reply'),
+    )}\n`,
+  );
+
+  // Even though status was 'completed' before and is already 'completed' again
+  // when resolve() runs after messageSessionTask, updateStatus('completed')
+  // flushes the new turn to the active subscriber.
+  await sessions.resolve(runtime, 'parent-session', 'call-fast');
+
+  const userUpdate = await iterator.next();
+  const assistantUpdate = await iterator.next();
+  abort.abort();
+  await iterator.return?.();
+
+  expect(JSON.stringify(userUpdate.value)).toContain('turn 2 follow-up');
+  expect(JSON.stringify(assistantUpdate.value)).toContain('turn 2 fast reply');
 });

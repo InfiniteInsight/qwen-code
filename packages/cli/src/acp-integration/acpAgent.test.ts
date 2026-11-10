@@ -21647,6 +21647,153 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('rejects permission workspaceChange for a worktree with malformed .qwen/settings.json without overwriting disk or stripping live rules', async () => {
+    const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'qwen-acp-wt-perm-'));
+    const worktreeRoot = path.join(tempRoot, '.qwen', 'worktrees', 'slug-bad');
+    await fs.mkdir(path.join(worktreeRoot, '.qwen'), { recursive: true });
+    const worktreeSettingsFile = path.join(
+      worktreeRoot,
+      '.qwen',
+      'settings.json',
+    );
+
+    try {
+      vi.mocked(mockConfig.getTargetDir).mockReturnValue(tempRoot);
+
+      const bootstrapSettings = makeCoreSettings();
+      const reloadAtomicSpy = vi.fn(
+        (scopes: readonly SettingScope[]) =>
+          !scopes.includes(SettingScope.Workspace),
+      );
+      (
+        bootstrapSettings as unknown as {
+          reloadScopesFromDiskAtomically: typeof reloadAtomicSpy;
+        }
+      ).reloadScopesFromDiskAtomically = reloadAtomicSpy;
+
+      const worktreeValidSettings = makeCoreSettings();
+      worktreeValidSettings.setValue(
+        SettingScope.Workspace,
+        'permissions.deny',
+        ['Bash(git push --force:*)'],
+      );
+
+      const { agent, agentPromise } =
+        await bootCoreSettingsAgent(bootstrapSettings);
+
+      const makeManager = () => ({
+        addPersistentRule: vi.fn(),
+        removePersistentRule: vi.fn(),
+      });
+      const worktreeManager = makeManager();
+      const sessions = (agent as unknown as { sessions: Map<string, unknown> })
+        .sessions;
+      sessions.set('worktree-session', {
+        getId: () => 'worktree-session',
+        isIdle: () => true,
+        cancelPendingPrompt: vi.fn(),
+        getConfig: () => ({
+          ...mockConfig,
+          getTargetDir: vi.fn().mockReturnValue(worktreeRoot),
+          storage: { getProjectRoot: () => worktreeRoot },
+          getPermissionManager: () => worktreeManager,
+        }),
+      });
+
+      // Step 1: Sync initial valid worktree deny rule. Needs only User scope on
+      // bootstrap settings, so a broken bootstrap Workspace scope does not block
+      // healthy worktree permission reloads.
+      vi.mocked(loadSettings).mockReturnValueOnce(worktreeValidSettings);
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+        v: 1,
+        revision: 1,
+        kind: 'permissions',
+        tightening: true,
+        cwd: worktreeRoot,
+        scope: 'workspace',
+      });
+      expect(reloadAtomicSpy).toHaveBeenCalledWith([SettingScope.User]);
+      expect(worktreeManager.addPersistentRule).toHaveBeenCalledWith(
+        'Bash(git push --force:*)',
+        'deny',
+      );
+
+      // Step 2: Write malformed JSON to the worktree's .qwen/settings.json and
+      // mirror readSettingsLayers' preserveInvalidWorkspaceSettings behavior:
+      // without preserveInvalidWorkspaceSettings, it rewrites the file to '{}'
+      // and returns empty settings with corruptedPath set; with
+      // preserveInvalidWorkspaceSettings: true, it throws without touching disk.
+      const malformedContent = '{ "permissions": { "deny": [ }';
+      await fs.writeFile(worktreeSettingsFile, malformedContent, 'utf-8');
+      vi.mocked(loadSettings).mockImplementation((cwd, opts) => {
+        const filePath = path.join(cwd ?? '', '.qwen', 'settings.json');
+        const raw = readFileSync(filePath, 'utf-8');
+        try {
+          JSON.parse(raw);
+          return worktreeValidSettings;
+        } catch (err) {
+          if (opts?.preserveInvalidWorkspaceSettings) {
+            throw err;
+          }
+          const empty = makeCoreSettings();
+          (empty as unknown as { corruptedPath?: string }).corruptedPath =
+            `${filePath}.orig`;
+          return empty;
+        }
+      });
+
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+          v: 1,
+          revision: 2,
+          kind: 'permissions',
+          tightening: true,
+          cwd: worktreeRoot,
+          scope: 'workspace',
+        }),
+      ).rejects.toThrow(
+        'The permission rules could not be reloaded for a workspace change.',
+      );
+
+      expect(vi.mocked(loadSettings)).toHaveBeenLastCalledWith(
+        worktreeRoot,
+        expect.objectContaining({
+          preserveInvalidWorkspaceSettings: true,
+        }),
+      );
+      expect(readFileSync(worktreeSettingsFile, 'utf-8')).toBe(
+        malformedContent,
+      );
+      expect(worktreeManager.removePersistentRule).not.toHaveBeenCalled();
+
+      // Step 3: Even if a LoadedSettings instance surfaces corruptedPath, it
+      // must also be rejected before syncing empty rules to live sessions.
+      const corruptedSettings = makeCoreSettings();
+      (
+        corruptedSettings as unknown as { corruptedPath?: string }
+      ).corruptedPath = `${worktreeSettingsFile}.orig`;
+      vi.mocked(loadSettings).mockReturnValueOnce(corruptedSettings);
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+          v: 1,
+          revision: 3,
+          kind: 'permissions',
+          tightening: true,
+          cwd: worktreeRoot,
+          scope: 'workspace',
+        }),
+      ).rejects.toThrow(
+        'The permission rules could not be reloaded for a workspace change.',
+      );
+      expect(worktreeManager.removePersistentRule).not.toHaveBeenCalled();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it('fans out a workspace-scoped grant across a different path spelling of the same directory', async () => {
     // The admission root and the request's cwd can name one directory through
     // a symlink (macOS /tmp vs /private/tmp) or case; a string compare would

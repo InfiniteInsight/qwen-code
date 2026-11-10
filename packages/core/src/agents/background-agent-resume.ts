@@ -740,10 +740,17 @@ export class BackgroundAgentResumeService {
       return this.resumeBackgroundAgent(agentId, initialInput);
     }
     const registry = this.config.getBackgroundTaskRegistry();
-    const entry = registry.get(agentId);
+    let entry =
+      registry.get(agentId) ??
+      registry.getAll().find((candidate) => candidate.toolUseId === agentId);
+    if (!entry) {
+      entry = await this.hydrateCompletedDiskAgentForRevive(agentId);
+    }
+    if (entry && this.resumeOperations.has(entry.agentId)) {
+      return this.resumeBackgroundAgent(entry.agentId, initialInput);
+    }
     if (
       !entry ||
-      !entry.isBackgrounded ||
       entry.status !== 'completed' ||
       !entry.metaPath ||
       !entry.outputFile ||
@@ -758,6 +765,7 @@ export class BackgroundAgentResumeService {
       );
       return undefined;
     }
+    const resolvedAgentId = entry.agentId;
     // Honor the background-agent concurrency cap before flipping the finished
     // entry back to paused, so an at-capacity revive fails cleanly instead of
     // stranding the entry as paused.
@@ -828,10 +836,15 @@ export class BackgroundAgentResumeService {
       recentActivities: [...(entry.recentActivities ?? [])],
       pendingApprovals: [...(entry.pendingApprovals ?? [])],
     };
-    this.restorePausedEntry(agentId, { suppressRegisterCallback: true });
-    const revived = await this.resumeBackgroundAgent(agentId, initialInput);
+    this.restorePausedEntry(resolvedAgentId, {
+      suppressRegisterCallback: true,
+    });
+    const revived = await this.resumeBackgroundAgent(
+      resolvedAgentId,
+      initialInput,
+    );
     if (!revived) {
-      const failedEntry = registry.get(agentId);
+      const failedEntry = registry.get(resolvedAgentId);
       // `??` only falls back on null/undefined, so a failed revive that left
       // the entry with an *empty* array would clobber the pre-revive snapshot
       // (e.g. the UI Progress section would render empty instead of the
@@ -861,6 +874,185 @@ export class BackgroundAgentResumeService {
       });
     }
     return revived;
+  }
+
+  private async hydrateCompletedDiskAgentForRevive(
+    agentOrToolUseId: string,
+  ): Promise<AgentTask | undefined> {
+    const projectDir =
+      this.config.storage?.getProjectDir?.() ??
+      (
+        this.config as { getProjectTempDir?: () => string }
+      ).getProjectTempDir?.();
+    const sessionId = this.config.getSessionId?.();
+    if (!projectDir || !sessionId) {
+      return undefined;
+    }
+
+    const dir = getSubagentSessionDir(projectDir, sessionId);
+    const directMetaPath = getAgentMetaPath(
+      projectDir,
+      sessionId,
+      agentOrToolUseId,
+    );
+    let matchedMetaPath: string | undefined;
+    let matchedMeta: AgentMeta | undefined;
+
+    const directMeta = readAgentMeta(directMetaPath);
+    if (
+      directMeta &&
+      typeof directMeta.agentId === 'string' &&
+      directMeta.agentId.length > 0 &&
+      (directMeta.agentId === agentOrToolUseId ||
+        directMeta.toolUseId === agentOrToolUseId) &&
+      (!directMeta.parentSessionId || directMeta.parentSessionId === sessionId)
+    ) {
+      matchedMetaPath = directMetaPath;
+      matchedMeta = directMeta;
+    } else {
+      let files: string[];
+      try {
+        files = await fs.readdir(dir);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          return undefined;
+        }
+        throw error;
+      }
+      for (const fileName of files) {
+        if (
+          !fileName.startsWith('agent-') ||
+          !fileName.endsWith(META_FILE_SUFFIX)
+        ) {
+          continue;
+        }
+        const candidatePath = path.join(dir, fileName);
+        try {
+          const candidateMeta = readAgentMeta(candidatePath);
+          if (
+            !candidateMeta ||
+            typeof candidateMeta.agentId !== 'string' ||
+            candidateMeta.agentId.length === 0 ||
+            (candidateMeta.parentSessionId &&
+              candidateMeta.parentSessionId !== sessionId) ||
+            path.basename(
+              getAgentMetaPath(projectDir, sessionId, candidateMeta.agentId),
+            ) !== fileName ||
+            (candidateMeta.agentId !== agentOrToolUseId &&
+              candidateMeta.toolUseId !== agentOrToolUseId)
+          ) {
+            continue;
+          }
+          matchedMetaPath = candidatePath;
+          matchedMeta = candidateMeta;
+          break;
+        } catch {
+          continue;
+        }
+      }
+    }
+
+    if (
+      !matchedMetaPath ||
+      !matchedMeta ||
+      matchedMeta.status !== 'completed'
+    ) {
+      return undefined;
+    }
+
+    const registry = this.config.getBackgroundTaskRegistry();
+    const existing = registry.get(matchedMeta.agentId);
+    if (existing) {
+      return existing;
+    }
+
+    const outputFile = getAgentJsonlPath(
+      projectDir,
+      matchedMeta.parentSessionId || sessionId,
+      matchedMeta.agentId,
+    );
+    if (!jsonl.exists(outputFile)) {
+      return undefined;
+    }
+
+    let records: ChatRecord[];
+    try {
+      records = await jsonl.read<ChatRecord>(outputFile, {
+        throwOnNonEnoentError: true,
+      });
+      if (records.length === 0) {
+        return undefined;
+      }
+    } catch {
+      return undefined;
+    }
+
+    const model = matchedMeta.model ?? matchedMeta.persistedCliFlags?.model;
+    try {
+      registry.assertCanStartBackgroundAgent(model);
+    } catch {
+      return undefined;
+    }
+
+    const recovery = recoverTranscript(records);
+    const parsedStartTime = Date.parse(matchedMeta.createdAt);
+    const parsedEndTime = Date.parse(
+      matchedMeta.lastUpdatedAt ?? matchedMeta.createdAt,
+    );
+    const subagentName =
+      matchedMeta.subagentName ?? matchedMeta.agentType ?? 'general-purpose';
+    const persistedSummary = matchedMeta.sessionWorkflow
+      ? getAgentMetaTerminalSummary(
+          matchedMeta.stats,
+          matchedMeta.recentActivities,
+        )
+      : {};
+    const transcriptMessages = extractMessagesFromTranscriptRecords(records);
+    let latestText: string | undefined;
+    let latestThought: string | undefined;
+    for (let i = transcriptMessages.length - 1; i >= 0; i--) {
+      const msg = transcriptMessages[i]!;
+      if (msg.role === 'assistant' && msg.content.trim()) {
+        if (msg.thought) {
+          latestThought ??= msg.content;
+        } else {
+          latestText ??= msg.content;
+          if (latestThought) break;
+        }
+      }
+    }
+
+    const registration: AgentTaskRegistration = {
+      agentId: matchedMeta.agentId,
+      description: matchedMeta.description || subagentName,
+      subagentType: subagentName,
+      isBackgrounded: matchedMeta.isBackgrounded ?? true,
+      status: 'completed',
+      startTime: Number.isFinite(parsedStartTime)
+        ? parsedStartTime
+        : Date.now(),
+      endTime: Number.isFinite(parsedEndTime) ? parsedEndTime : Date.now(),
+      abortController: new AbortController(),
+      prompt: recovery.initialPrompt,
+      toolUseId: matchedMeta.toolUseId,
+      outputFile,
+      metaPath: matchedMetaPath,
+      parentAgentId: matchedMeta.parentAgentId,
+      depth: matchedMeta.depth,
+      model,
+      ...(transcriptMessages.length > 0
+        ? { messages: transcriptMessages }
+        : {}),
+      ...(latestText ? { latestText, result: latestText } : {}),
+      ...(latestThought ? { latestThought } : {}),
+      ...persistedSummary,
+    };
+    (registration as AgentTask).notified = true;
+    (registration as AgentTask).outputOffset = 0;
+    return registry.register(registration, {
+      suppressRegisterCallback: true,
+      preserveNotificationState: true,
+    });
   }
 
   private async resumeBackgroundAgentInternal(
@@ -1164,6 +1356,7 @@ export class BackgroundAgentResumeService {
       const nextResumeCount = (meta.resumeCount ?? 0) + 1;
       patchAgentMeta(metaPath, {
         status: 'running',
+        isBackgrounded: true,
         lastUpdatedAt: new Date().toISOString(),
         resolvedApprovalMode,
         subagentName: target.agentName,

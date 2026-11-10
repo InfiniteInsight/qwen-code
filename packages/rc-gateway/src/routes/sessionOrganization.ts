@@ -17,6 +17,7 @@ import {
 import type { AuditRecorder } from '../auditLog.js';
 import { asDaemonHttpError, daemonErrorBody } from '../daemonHttpError.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
+import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 /**
  * Issue #110: filing a conversation, the write half of what the session
@@ -89,7 +90,7 @@ function sendOrganizationError(
   if (http?.status === 404) {
     if (code === 'group_not_found') {
       res.status(404).json({
-        error: 'No such group in this conversation\'s folder',
+        error: "No such group in this conversation's folder",
         code,
       });
       return 'rejected';
@@ -118,6 +119,9 @@ function sendOrganizationError(
       .status(409)
       .json({ error: 'A group with that name already exists', code });
     return 'rejected';
+  }
+  if (relayDaemonAuthFailure(res, err, 'session_organization')) {
+    return 'daemon_unavailable';
   }
   if (http !== undefined && http.status >= 400 && http.status < 500) {
     res.status(http.status).json({
@@ -278,9 +282,7 @@ export function createSessionGroupCreateRoute(
       return invalid(
         res,
         'invalid_group_color',
-        'A group colour is one of ' +
-          PRESET_COLORS.join(', ') +
-          ', or #RRGGBB',
+        'A group colour is one of ' + PRESET_COLORS.join(', ') + ', or #RRGGBB',
       );
     }
     let group;

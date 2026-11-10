@@ -10,18 +10,71 @@ import {
   canSeeDaemonDetail,
   daemonFailureDetail,
   daemonUnavailableBody,
+  isSessionLevelGone,
 } from './daemonHttpError.js';
 
-describe('who sees the daemon\'s words (#211)', () => {
+describe('isSessionLevelGone (#474)', () => {
+  it('returns true only when session_not_found has neither subagentRef nor toolCallId', () => {
+    expect(
+      isSessionLevelGone(
+        new DaemonHttpError(
+          404,
+          { code: 'session_not_found', sessionId: 's1' },
+          'r',
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      isSessionLevelGone(
+        new DaemonHttpError(
+          404,
+          {
+            code: 'session_not_found',
+            sessionId: 's1',
+            subagentRef: null,
+            toolCallId: null,
+          },
+          'r',
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      isSessionLevelGone(
+        new DaemonHttpError(
+          404,
+          { code: 'session_not_found', sessionId: 's1', subagentRef: 'tc-1' },
+          'r',
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      isSessionLevelGone(
+        new DaemonHttpError(
+          404,
+          { code: 'session_not_found', sessionId: 's1', toolCallId: 'tc-1' },
+          'r',
+        ),
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("who sees the daemon's words (#211)", () => {
   it('write and owner do; a share guest, a reader and a request with no client do not', () => {
     expect(canSeeDaemonDetail({ rcClient: { scopes: ['owner'] } })).toBe(true);
     expect(canSeeDaemonDetail({ rcClient: { scopes: ['write'] } })).toBe(true);
-    expect(canSeeDaemonDetail({ rcClient: { scopes: ['session:read'] } })).toBe(false);
-    expect(canSeeDaemonDetail({ rcClient: { scopes: ['approve'] } })).toBe(false);
+    expect(canSeeDaemonDetail({ rcClient: { scopes: ['session:read'] } })).toBe(
+      false,
+    );
+    expect(canSeeDaemonDetail({ rcClient: { scopes: ['approve'] } })).toBe(
+      false,
+    );
     expect(canSeeDaemonDetail({})).toBe(false);
     // Even a share that somehow carries write.
     expect(
-      canSeeDaemonDetail({ rcClient: { scopes: ['write', 'share'], shareId: 's1' } }),
+      canSeeDaemonDetail({
+        rcClient: { scopes: ['write', 'share'], shareId: 's1' },
+      }),
     ).toBe(false);
   });
 });
@@ -29,17 +82,29 @@ describe('who sees the daemon\'s words (#211)', () => {
 describe('daemonFailureDetail (#211)', () => {
   it('reads status, code and message from the daemon body, flat or in the validation envelope', () => {
     expect(
-      daemonFailureDetail(new DaemonHttpError(412, { error: 'gone', code: 'x' }, 'r')),
+      daemonFailureDetail(
+        new DaemonHttpError(412, { error: 'gone', code: 'x' }, 'r'),
+      ),
     ).toEqual({ status: 412, code: 'x', message: 'gone' });
     expect(
       daemonFailureDetail(
         new DaemonHttpError(
           400,
-          { error: { code: 'VALIDATION_FAILED', message: 'title is empty', field: 'title' } },
+          {
+            error: {
+              code: 'VALIDATION_FAILED',
+              message: 'title is empty',
+              field: 'title',
+            },
+          },
           'r',
         ),
       ),
-    ).toEqual({ status: 400, code: 'VALIDATION_FAILED', message: 'title is empty' });
+    ).toEqual({
+      status: 400,
+      code: 'VALIDATION_FAILED',
+      message: 'title is empty',
+    });
   });
 
   it('names a thrown error that is not an HTTP answer', () => {
@@ -51,16 +116,24 @@ describe('daemonFailureDetail (#211)', () => {
 });
 
 describe('daemonUnavailableBody (#211)', () => {
-  const err = new DaemonHttpError(500, { error: 'boom', code: 'load_failed' }, 'r');
+  const err = new DaemonHttpError(
+    500,
+    { error: 'boom', code: 'load_failed' },
+    'r',
+  );
   it('adds `daemon` for write and leaves the sentence and code alone', () => {
-    expect(daemonUnavailableBody({ rcClient: { scopes: ['write'] } }, err)).toEqual({
+    expect(
+      daemonUnavailableBody({ rcClient: { scopes: ['write'] } }, err),
+    ).toEqual({
       error: 'Daemon unavailable',
       code: 'daemon_unavailable',
       daemon: { status: 500, code: 'load_failed', message: 'boom' },
     });
   });
   it('is the old body for a reader', () => {
-    expect(daemonUnavailableBody({ rcClient: { scopes: ['session:read'] } }, err)).toEqual({
+    expect(
+      daemonUnavailableBody({ rcClient: { scopes: ['session:read'] } }, err),
+    ).toEqual({
       error: 'Daemon unavailable',
       code: 'daemon_unavailable',
     });

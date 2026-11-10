@@ -5,6 +5,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createServer as createHttpServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import {
   mkdtempSync,
   readdirSync,
@@ -34,6 +36,7 @@ const {
   resolveWalRetention,
   sweepWalDir,
   formatHostTabsLine,
+  runServe,
 } = await import('./cli.js');
 
 /**
@@ -373,6 +376,53 @@ describe('boot daemon ownership', () => {
     expect(await stopBootOwnedDaemon(50)).toBe(true);
     expect(calls()).toBe(1);
     expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('rejects runServe before releaseBootDaemon when gateway port fails to bind with EADDRINUSE (#479)', async () => {
+    const blocker = createHttpServer((req, res) => {
+      if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok' }));
+        return;
+      }
+      if (req.url === '/capabilities') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ v: 1, workspaceCwd: '/tmp' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify([]));
+    });
+    await new Promise<void>((resolve) =>
+      blocker.listen(0, '127.0.0.1', () => resolve()),
+    );
+    const occupiedPort = (blocker.address() as AddressInfo).port;
+    const priorHome = process.env['HOME'];
+    const priorLoopGuard = process.env['QWEN_RC_LOOP_GUARD_MS'];
+    process.env['HOME'] = mkdtempSync(join(tmpdir(), 'rc-boot-479-'));
+    process.env['QWEN_RC_LOOP_GUARD_MS'] = '0';
+    try {
+      await expect(
+        runServe({
+          host: '127.0.0.1',
+          gatewayPort: occupiedPort,
+          attachDaemonUrl: `http://127.0.0.1:${occupiedPort}`,
+          attachDaemonToken: 'tok',
+          noWal: true,
+          noMdns: true,
+          qwenBin: process.execPath,
+        }),
+      ).rejects.toThrow(/EADDRINUSE/);
+      // Boot daemon is still claimed because releaseBootDaemon was not reached.
+      expect(await stopBootOwnedDaemon(1000)).toBe(true);
+    } finally {
+      if (priorHome === undefined) delete process.env['HOME'];
+      else process.env['HOME'] = priorHome;
+      if (priorLoopGuard === undefined)
+        delete process.env['QWEN_RC_LOOP_GUARD_MS'];
+      else process.env['QWEN_RC_LOOP_GUARD_MS'] = priorLoopGuard;
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
   });
 });
 

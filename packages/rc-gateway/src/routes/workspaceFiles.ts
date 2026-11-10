@@ -138,6 +138,25 @@ function parsePositiveInt(
   return null;
 }
 
+function parseNonNegativeInt(
+  res: Response,
+  raw: unknown,
+  name: string,
+): number | null | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw === 'string' && /^\d+$/.test(raw)) {
+    const n = Number(raw);
+    if (n >= 0 && Number.isSafeInteger(n)) return n;
+  }
+  if (!res.headersSent) {
+    res.status(400).json({
+      error: `\`${name}\` must be a non-negative integer`,
+      code: 'invalid_query',
+    });
+  }
+  return null;
+}
+
 /** The daemon's fs refusal envelope, as `sendFsError` builds it. */
 interface FsErrorBody {
   errorKind?: unknown;
@@ -311,7 +330,7 @@ export function createWorkspaceFileBytesRoute(
     }
     const path = requireQuery(res, req.query['path'], 'path');
     if (path === null) return;
-    const offset = parsePositiveInt(res, req.query['offset'], 'offset');
+    const offset = parseNonNegativeInt(res, req.query['offset'], 'offset');
     if (offset === null) return;
     const maxBytes = parsePositiveInt(res, req.query['maxBytes'], 'maxBytes');
     if (maxBytes === null) return;

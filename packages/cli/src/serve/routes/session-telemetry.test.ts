@@ -32,6 +32,10 @@ vi.mock('../server/session-archive.js', async (importOriginal) => ({
 }));
 
 import { registerSessionRoutes } from './session.js';
+import {
+  createVirtualSubagentSessionId,
+  type VirtualSubagentSessions,
+} from '../virtual-subagent-sessions.js';
 
 function bridgeWithSessions(sessionIds: string[] = []): AcpSessionBridge {
   return {
@@ -63,7 +67,10 @@ function runtime(opts: {
   } as WorkspaceRuntime;
 }
 
-function makeApp(runtimes: WorkspaceRuntime[]) {
+function makeApp(
+  runtimes: WorkspaceRuntime[],
+  virtualSubagentSessions?: VirtualSubagentSessions,
+) {
   const app = express();
   app.use(express.json());
   const registry = createWorkspaceRegistry(runtimes);
@@ -81,6 +88,7 @@ function makeApp(runtimes: WorkspaceRuntime[]) {
     },
     sessionShellCommandEnabled: true,
     languageCodes: ['en'],
+    virtualSubagentSessions,
   });
   return app;
 }
@@ -331,5 +339,103 @@ describe('special session resolver telemetry publication', () => {
 
     expect(res.status).toBe(400);
     expect(telemetryMocks.setDaemonTelemetryWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('unwraps virtual parent session ids for nested subagent inspect, cancel, and message routes and re-resolves on message delivery', async () => {
+    const rootSessionId = 'secondary-root';
+    const parentAgentId = 'parent-agent-1';
+    const nestedAgentId = 'nested-agent-1';
+    const virtualParentId = createVirtualSubagentSessionId(
+      rootSessionId,
+      parentAgentId,
+    );
+    const virtualNestedId = createVirtualSubagentSessionId(
+      rootSessionId,
+      nestedAgentId,
+    );
+
+    const cancelSessionTask = vi
+      .fn()
+      .mockResolvedValue({ cancelled: true, status: 'cancelled' });
+    const messageSessionTask = vi.fn().mockResolvedValue({
+      delivered: true,
+      action: 'continued',
+      status: 'running',
+    });
+
+    const primary = runtime({
+      workspaceId: 'primary',
+      workspaceCwd: primaryCwd,
+      primary: true,
+      bridge: bridgeWithSessions(),
+    });
+    const secondaryBridge = {
+      ...bridgeWithSessions([rootSessionId]),
+      cancelSessionTask,
+      messageSessionTask,
+    } as unknown as AcpSessionBridge;
+    const secondary = runtime({
+      workspaceId: 'secondary',
+      workspaceCwd: secondaryCwd,
+      primary: false,
+      bridge: secondaryBridge,
+    });
+
+    const resolve = vi.fn().mockResolvedValue({
+      sessionId: virtualNestedId,
+      taskId: nestedAgentId,
+      title: 'nested agent',
+      status: 'running',
+    });
+    const subagentSessions = {
+      resolve,
+    } as unknown as VirtualSubagentSessions;
+
+    const app = makeApp([primary, secondary], subagentSessions);
+
+    const inspectRes = await request(app).get(
+      `/session/${encodeURIComponent(virtualParentId)}/subagents/nested-call-1`,
+    );
+    expect(inspectRes.status).toBe(200);
+    expect(inspectRes.body).toMatchObject({
+      sessionId: virtualNestedId,
+      taskId: nestedAgentId,
+    });
+    expect(resolve).toHaveBeenCalledWith(
+      secondary,
+      virtualParentId,
+      'nested-call-1',
+    );
+
+    const cancelRes = await request(app).post(
+      `/session/${encodeURIComponent(virtualParentId)}/subagents/nested-call-1/cancel`,
+    );
+    expect(cancelRes.status).toBe(200);
+    expect(cancelSessionTask).toHaveBeenCalledWith(
+      rootSessionId,
+      nestedAgentId,
+      'agent',
+    );
+
+    resolve.mockClear();
+    const messageRes = await request(app)
+      .post(
+        `/session/${encodeURIComponent(virtualParentId)}/subagents/nested-call-1/message`,
+      )
+      .send({ message: 'Follow up with nested agent' });
+    expect(messageRes.status).toBe(200);
+    expect(messageSessionTask).toHaveBeenCalledWith(
+      rootSessionId,
+      nestedAgentId,
+      'Follow up with nested agent',
+    );
+    // Called once before messageSessionTask and once after delivered=true
+    expect(resolve).toHaveBeenCalledTimes(2);
+    expect(resolve).toHaveBeenNthCalledWith(
+      2,
+      secondary,
+      virtualParentId,
+      'nested-call-1',
+    );
   });
 });

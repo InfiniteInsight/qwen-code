@@ -2360,10 +2360,13 @@ export function registerSessionRoutes(
     route,
     parentSessionId,
   ) => {
-    const owner = workspaceRegistry.resolveLiveSessionOwner(parentSessionId);
+    const rootSessionId =
+      parseVirtualSubagentSessionId(parentSessionId)?.parentSessionId ??
+      parentSessionId;
+    const owner = workspaceRegistry.resolveLiveSessionOwner(rootSessionId);
     if (owner.kind !== 'not_found') {
       return requireSessionRuntime({
-        sessionId: parentSessionId,
+        sessionId: rootSessionId,
         route,
         res,
         workspaceRegistry,
@@ -2374,7 +2377,7 @@ export function registerSessionRoutes(
       return await resolveTranscriptSessionRuntime(
         res,
         route,
-        parentSessionId,
+        rootSessionId,
         false,
       );
     } catch (error) {
@@ -2385,7 +2388,7 @@ export function registerSessionRoutes(
           !workspaceRegistry.primaryEntry.current)
       ) {
         logSessionRoutingFailure(route, 'workspace_runtime_unavailable', {
-          sessionId: parentSessionId,
+          sessionId: rootSessionId,
         });
         return requirePrimarySessionRuntime(workspaceRegistry, res);
       }
@@ -5470,11 +5473,13 @@ export function registerSessionRoutes(
       });
       return;
     }
+    const virtualParent = parseVirtualSubagentSessionId(sessionId);
+    const rootSessionId = virtualParent?.parentSessionId ?? sessionId;
     try {
       const runtime = await resolveSubagentSessionRuntime(
         res,
         route,
-        sessionId,
+        rootSessionId,
       );
       if (!runtime) return;
       await runOwnerRuntimeActivity(runtime, async () => {
@@ -5525,8 +5530,10 @@ export function registerSessionRoutes(
         });
         return;
       }
+      const virtualParent = parseVirtualSubagentSessionId(sessionId);
+      const rootSessionId = virtualParent?.parentSessionId ?? sessionId;
       const runtime = requireSessionRuntime({
-        sessionId,
+        sessionId: rootSessionId,
         route,
         res,
         workspaceRegistry,
@@ -5553,7 +5560,7 @@ export function registerSessionRoutes(
             .status(200)
             .json(
               await runtime.bridge.cancelSessionTask(
-                sessionId,
+                rootSessionId,
                 resolved.taskId,
                 'agent',
               ),
@@ -5604,8 +5611,10 @@ export function registerSessionRoutes(
         });
         return;
       }
+      const virtualParent = parseVirtualSubagentSessionId(sessionId);
+      const rootSessionId = virtualParent?.parentSessionId ?? sessionId;
       const runtime = requireSessionRuntime({
-        sessionId,
+        sessionId: rootSessionId,
         route,
         res,
         workspaceRegistry,
@@ -5641,7 +5650,7 @@ export function registerSessionRoutes(
           }
           const taskId = resolved?.taskId ?? subagentRef;
           const result = await runtime.bridge.messageSessionTask(
-            sessionId,
+            rootSessionId,
             taskId,
             message,
           );
@@ -5653,6 +5662,9 @@ export function registerSessionRoutes(
               subagentRef,
             });
             return;
+          }
+          if (result.delivered) {
+            await subagents.resolve(runtime, sessionId, subagentRef);
           }
           res.status(200).json({
             sessionId,

@@ -109,6 +109,10 @@ interface ProbeHandle {
 interface Harness {
   cancel: ReturnType<typeof vi.fn>;
   resume: ReturnType<typeof vi.fn>;
+  revive: ReturnType<typeof vi.fn>;
+  isFinishing: ReturnType<typeof vi.fn>;
+  waitForFinishing: ReturnType<typeof vi.fn>;
+  continueResidentAgent: ReturnType<typeof vi.fn>;
   abandon: ReturnType<typeof vi.fn>;
   monitorCancel: ReturnType<typeof vi.fn>;
   dreamCancelTask: ReturnType<typeof vi.fn>;
@@ -141,6 +145,10 @@ function setup(
 
   const cancel = vi.fn();
   const resume = vi.fn();
+  const revive = vi.fn();
+  const isFinishing = vi.fn().mockReturnValue(false);
+  const waitForFinishing = vi.fn().mockResolvedValue(undefined);
+  const continueResidentAgent = vi.fn().mockReturnValue('fallback');
   const abandon = vi.fn();
   const monitorCancel = vi.fn();
   const dreamCancelTask = vi.fn();
@@ -156,6 +164,9 @@ function setup(
   const config = {
     getBackgroundTaskRegistry: () => ({
       cancel,
+      isFinishing,
+      waitForFinishing,
+      continueResidentAgent,
       resolvePendingApproval: backgroundResolvePendingApproval,
       setActivityChangeCallback: vi.fn(),
       get: (id: string) => {
@@ -192,6 +203,7 @@ function setup(
     getIdeMode: () => false,
     isTrustedFolder: () => true,
     resumeBackgroundAgent: resume,
+    reviveCompletedBackgroundAgent: revive,
     abandonBackgroundAgent: abandon,
   } as unknown as Config;
 
@@ -239,6 +251,10 @@ function setup(
   return {
     cancel,
     resume,
+    revive,
+    isFinishing,
+    waitForFinishing,
+    continueResidentAgent,
     abandon,
     monitorCancel,
     dreamCancelTask,
@@ -2170,6 +2186,56 @@ describe('BackgroundTasksDialog', () => {
 
       h.pressKey({ name: 'return' });
       expect(h.resume).toHaveBeenCalledWith('a-msg', 'hi');
+    });
+
+    it('passes an AbortSignal to waitForFinishing and handles undefined or defined revive/resume results', async () => {
+      const running = entry({
+        agentId: 'a-finish',
+        status: 'running',
+      });
+      const completed = entry({
+        agentId: 'a-finish',
+        status: 'completed',
+      });
+      const h = setup([running]);
+
+      h.isFinishing.mockReturnValue(true);
+      h.waitForFinishing.mockImplementation(
+        async (_id: string, signal: AbortSignal) => {
+          expect(signal).toBeInstanceOf(AbortSignal);
+          expect(signal.aborted).toBe(false);
+          h.setEntries([completed]);
+        },
+      );
+
+      // 1. Revive returns undefined -> sendMessageToSelected resolves to false without throwing.
+      h.revive.mockResolvedValueOnce(undefined);
+      await expect(
+        h.probe.current!.actions.sendMessageToSelected('follow up 1'),
+      ).resolves.toBe(false);
+      expect(h.waitForFinishing).toHaveBeenCalledWith(
+        'a-finish',
+        expect.any(AbortSignal),
+      );
+      expect(h.revive).toHaveBeenCalledWith('a-finish', 'follow up 1');
+
+      // 2. Revive returns a revived AgentTask -> sendMessageToSelected resolves to true.
+      h.revive.mockResolvedValueOnce(running);
+      await expect(
+        h.probe.current!.actions.sendMessageToSelected('follow up 2'),
+      ).resolves.toBe(true);
+      expect(h.revive).toHaveBeenCalledWith('a-finish', 'follow up 2');
+
+      // 3. Paused resume returns undefined vs defined task -> resolves to false vs true.
+      h.setEntries([entry({ agentId: 'a-finish', status: 'paused' })]);
+      h.resume.mockResolvedValueOnce(undefined);
+      await expect(
+        h.probe.current!.actions.sendMessageToSelected('resume 1'),
+      ).resolves.toBe(false);
+      h.resume.mockResolvedValueOnce(running);
+      await expect(
+        h.probe.current!.actions.sendMessageToSelected('resume 2'),
+      ).resolves.toBe(true);
     });
   });
 });

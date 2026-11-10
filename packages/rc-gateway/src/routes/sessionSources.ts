@@ -10,6 +10,7 @@ import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { asDaemonHttpError, daemonErrorBody } from '../daemonHttpError.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
+import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 /**
  * Issue #110: a conversation's sources, its reference list.
@@ -152,6 +153,9 @@ function sendSourcesError(res: Response, err: unknown): Outcome {
     });
     return 'unsupported';
   }
+  if (relayDaemonAuthFailure(res, err, 'session_sources')) {
+    return 'daemon_unavailable';
+  }
   if (status !== undefined && status >= 400 && status < 500) {
     res.status(status).json({
       error: 'The daemon refused this request',
@@ -166,7 +170,9 @@ function sendSourcesError(res: Response, err: unknown): Outcome {
 }
 
 function refuseMalformedSession(res: Response): void {
-  res.status(404).json({ error: 'Session not found', code: 'session_not_found' });
+  res
+    .status(404)
+    .json({ error: 'Session not found', code: 'session_not_found' });
 }
 
 /** GET /session/:id/sources: the reference list, verbatim (but see guests). */
@@ -183,7 +189,10 @@ export function createSessionSourcesRoute(
       sendSourcesError(res, err);
       return;
     }
-    if (req.rcClient?.sessionLockId !== undefined && Array.isArray(result?.sources)) {
+    if (
+      req.rcClient?.sessionLockId !== undefined &&
+      Array.isArray(result?.sources)
+    ) {
       res.status(200).json({
         ...result,
         sources: result.sources.map((s) => {
@@ -207,15 +216,24 @@ export function createSessionSourcesRoute(
 function parseSourceInput(
   body: unknown,
 ): { ok: true; input: SessionSourceInput } | { ok: false; error: string } {
-  if (!isPlainObject(body)) return { ok: false, error: 'Body must be an object' };
-  if (Object.keys(body).some((k) => !['title', 'description', 'locator'].includes(k))) {
+  if (!isPlainObject(body))
+    return { ok: false, error: 'Body must be an object' };
+  if (
+    Object.keys(body).some(
+      (k) => !['title', 'description', 'locator'].includes(k),
+    )
+  ) {
     return {
       ok: false,
       error: 'Only `title`, `description` and `locator` can be sent',
     };
   }
   const title = body['title'];
-  if (typeof title !== 'string' || title.trim() === '' || title.length > MAX_TITLE) {
+  if (
+    typeof title !== 'string' ||
+    title.trim() === '' ||
+    title.length > MAX_TITLE
+  ) {
     return { ok: false, error: 'A title is 1 to 200 characters' };
   }
   const description = body['description'];
@@ -234,12 +252,18 @@ function parseSourceInput(
   let locator: SessionSourceInput['locator'];
   if (loc['type'] === 'workspace_file') {
     if (Object.keys(loc).some((k) => k !== 'type' && k !== 'workspacePath')) {
-      return { ok: false, error: 'A workspace file locator takes `workspacePath`' };
+      return {
+        ok: false,
+        error: 'A workspace file locator takes `workspacePath`',
+      };
     }
     if (!str(loc['workspacePath'], MAX_WORKSPACE_PATH)) {
       return { ok: false, error: 'A workspace path is 1 to 500 characters' };
     }
-    locator = { type: 'workspace_file', workspacePath: loc['workspacePath'] as string };
+    locator = {
+      type: 'workspace_file',
+      workspacePath: loc['workspacePath'] as string,
+    };
   } else if (loc['type'] === 'url') {
     if (Object.keys(loc).some((k) => k !== 'type' && k !== 'url')) {
       return { ok: false, error: 'A link locator takes `url`' };
@@ -255,7 +279,10 @@ function parseSourceInput(
     if (!str(loc['attachmentId'], MAX_ATTACHMENT_ID)) {
       return { ok: false, error: 'An attachment id is 1 to 200 characters' };
     }
-    locator = { type: 'attachment', attachmentId: loc['attachmentId'] as string };
+    locator = {
+      type: 'attachment',
+      attachmentId: loc['attachmentId'] as string,
+    };
   } else {
     return {
       ok: false,
@@ -267,7 +294,9 @@ function parseSourceInput(
     input: {
       title,
       locator,
-      ...(description !== undefined ? { description: description as string } : {}),
+      ...(description !== undefined
+        ? { description: description as string }
+        : {}),
     },
   };
 }

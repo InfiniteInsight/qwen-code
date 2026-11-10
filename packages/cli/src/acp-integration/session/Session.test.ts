@@ -1396,6 +1396,42 @@ describe('Session', () => {
         mockChatRecordingService.recordExternalAgentRecordStrict,
       ).not.toHaveBeenCalled();
     });
+
+    it('does not throw a TDZ ReferenceError when the deferred drain interval fires while closing', async () => {
+      vi.useFakeTimers();
+      const unhandled: unknown[] = [];
+      const onUnhandledRejection = (reason: unknown) => {
+        unhandled.push(reason);
+      };
+      process.on('unhandledRejection', onUnhandledRejection);
+      try {
+        const idle = vi.spyOn(session, 'isTurnIdle').mockReturnValue(false);
+        await expect(session.appendExternalRecord(request)).resolves.toEqual({
+          recordId: '',
+          created: true,
+          deferred: true,
+        });
+
+        // Turn settles and session begins closing before the 500ms interval
+        // fires, so the drain loop exits synchronously on its first iteration.
+        idle.mockReturnValue(true);
+        session.beginClose();
+
+        await vi.advanceTimersByTimeAsync(500);
+        expect(unhandled).toEqual([]);
+
+        await session.flushDeferredExternalRecords();
+        expect(
+          mockChatRecordingService.recordExternalAgentRecordStrict,
+        ).toHaveBeenCalledOnce();
+        expect(
+          mockChatRecordingService.recordExternalAgentRecordStrict,
+        ).toHaveBeenCalledWith(request);
+      } finally {
+        process.off('unhandledRejection', onUnhandledRejection);
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe('MCP App tools', () => {

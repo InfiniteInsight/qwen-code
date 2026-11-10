@@ -29,6 +29,8 @@ interface SubagentResolution {
   sessionId: string;
   status: string;
   durationMs?: number;
+  toolCalls?: number;
+  totalTokens?: number;
   inputTokens?: number;
   outputTokens?: number;
   cachedTokens?: number;
@@ -37,9 +39,21 @@ interface SubagentResolution {
 interface SubagentMetrics {
   status: string;
   durationMs?: number;
+  toolCalls?: number;
+  totalTokens?: number;
   inputTokens?: number;
   outputTokens?: number;
   cachedTokens?: number;
+}
+
+function preferLargerMetric(
+  first: number | undefined,
+  second: number | undefined,
+): number | undefined {
+  if (first !== undefined && second !== undefined) {
+    return Math.max(first, second);
+  }
+  return first ?? second;
 }
 
 function getSubagentMetrics(
@@ -55,25 +69,52 @@ function getSubagentMetrics(
     raw['executionSummary'] !== null
       ? (raw['executionSummary'] as Record<string, unknown>)
       : undefined;
-  const summaryDuration = summary?.['totalDurationMs'];
-  const inputTokens = summary?.['inputTokens'];
-  const outputTokens = summary?.['outputTokens'];
-  const cachedTokens = summary?.['cachedTokens'];
+  const summaryDuration =
+    typeof summary?.['totalDurationMs'] === 'number'
+      ? summary['totalDurationMs']
+      : rootTool.endTime && rootTool.startTime
+        ? Math.max(0, rootTool.endTime - rootTool.startTime)
+        : undefined;
+  const toolCalls =
+    typeof summary?.['totalToolCalls'] === 'number'
+      ? summary['totalToolCalls']
+      : undefined;
+  const totalTokens =
+    typeof summary?.['totalTokens'] === 'number'
+      ? summary['totalTokens']
+      : typeof raw?.['tokenCount'] === 'number'
+        ? raw['tokenCount']
+        : undefined;
+  const inputTokens =
+    typeof summary?.['inputTokens'] === 'number'
+      ? summary['inputTokens']
+      : undefined;
+  const outputTokens =
+    typeof summary?.['outputTokens'] === 'number'
+      ? summary['outputTokens']
+      : undefined;
+  const cachedTokens =
+    typeof summary?.['cachedTokens'] === 'number'
+      ? summary['cachedTokens']
+      : undefined;
+  const resolvedToolCalls = preferLargerMetric(toolCalls, resolution.toolCalls);
+  const resolvedTotalTokens = preferLargerMetric(
+    totalTokens,
+    resolution.totalTokens,
+  );
 
   return {
     status: resolution.status,
-    durationMs:
-      typeof summaryDuration === 'number'
-        ? summaryDuration
-        : rootTool.endTime && rootTool.startTime
-          ? Math.max(0, rootTool.endTime - rootTool.startTime)
-          : resolution.durationMs,
-    inputTokens:
-      typeof inputTokens === 'number' ? inputTokens : resolution.inputTokens,
-    outputTokens:
-      typeof outputTokens === 'number' ? outputTokens : resolution.outputTokens,
-    cachedTokens:
-      typeof cachedTokens === 'number' ? cachedTokens : resolution.cachedTokens,
+    durationMs: preferLargerMetric(summaryDuration, resolution.durationMs),
+    ...(resolvedToolCalls !== undefined
+      ? { toolCalls: resolvedToolCalls }
+      : {}),
+    ...(resolvedTotalTokens !== undefined
+      ? { totalTokens: resolvedTotalTokens }
+      : {}),
+    inputTokens: preferLargerMetric(inputTokens, resolution.inputTokens),
+    outputTokens: preferLargerMetric(outputTokens, resolution.outputTokens),
+    cachedTokens: preferLargerMetric(cachedTokens, resolution.cachedTokens),
   };
 }
 
@@ -580,6 +621,8 @@ export function SubagentDetail({
                         : prev,
                     );
                     setPollTrigger((current) => current + 1);
+                    await refreshRef.current?.();
+                    ensurePollingRef.current?.();
                   }
                   return res;
                 }

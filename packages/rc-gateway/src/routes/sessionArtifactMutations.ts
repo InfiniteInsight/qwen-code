@@ -18,6 +18,7 @@ import {
   daemonFailureDetail,
 } from '../daemonHttpError.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
+import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 /**
  * Issue #128: the artifact mutation pair, the relays #127 left out.
@@ -135,7 +136,8 @@ function parseArtifactInput(
 ):
   | { ok: true; input: DaemonSessionArtifactInput }
   | { ok: false; error: string } {
-  if (!isPlainObject(body)) return { ok: false, error: 'Body must be an object' };
+  if (!isPlainObject(body))
+    return { ok: false, error: 'Body must be an object' };
   const stray = Object.keys(body).find((k) => !INPUT_FIELDS.includes(k));
   if (stray !== undefined) {
     return {
@@ -183,7 +185,8 @@ function parseArtifactInput(
     ) {
       return {
         ok: false,
-        error: '`metadata` must be an object of strings, numbers, true, false or null',
+        error:
+          '`metadata` must be an object of strings, numbers, true, false or null',
       };
     }
     input['metadata'] = { ...metadata };
@@ -254,6 +257,9 @@ function sendArtifactError(
       code: 'artifact_mutations_unsupported',
     });
     return 'unsupported';
+  }
+  if (relayDaemonAuthFailure(res, err, 'session_artifacts')) {
+    return 'daemon_unavailable';
   }
   if (status !== undefined && status >= 400 && status < 500) {
     res.status(status).json({

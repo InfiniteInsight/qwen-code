@@ -197,6 +197,21 @@ describe('workspace file browser (read-only, #107)', () => {
     expect(stub.lastFileBytesQuery?.['path']).toBe('docs/img.png');
   });
 
+  it('accepts offset=0 on /rc/workspace/file/bytes and forwards it to the daemon (#475)', async () => {
+    stub = await startStubDaemon();
+    const client = new DaemonClient({ baseUrl: stub.baseUrl });
+    const base = await mountGateway(client);
+    const { status, body } = await getJson(
+      base,
+      '/rc/workspace/file/bytes?path=docs%2Fimg.png&offset=0&maxBytes=8',
+    );
+    expect(status).toBe(200);
+    expect(body['kind']).toBe('file_bytes');
+    expect(stub.lastFileBytesQuery?.['path']).toBe('docs/img.png');
+    expect(stub.lastFileBytesQuery?.['offset']).toBe('0');
+    expect(stub.lastFileBytesQuery?.['maxBytes']).toBe('8');
+  });
+
   it('refuses a missing path before asking the daemon anything', async () => {
     const { daemon, calls } = fakeDaemon();
     const base = await mountGateway(daemon);

@@ -14,6 +14,7 @@ import {
 import type { AuditRecorder } from '../auditLog.js';
 import { asDaemonHttpError, daemonErrorBody } from '../daemonHttpError.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
+import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 /**
  * Issue #135: the session goal, the one slice of that issue the user chose to
@@ -86,7 +87,8 @@ function sendGoalError(res: Response, err: unknown): Outcome {
   const status = http?.status;
   if (status === 403 && code === 'untrusted_workspace') {
     res.status(403).json({
-      error: 'This conversation\'s folder is not trusted, so it cannot take a goal',
+      error:
+        "This conversation's folder is not trusted, so it cannot take a goal",
       code,
     });
     return 'untrusted';
@@ -123,6 +125,9 @@ function sendGoalError(res: Response, err: unknown): Outcome {
       code: 'goal_unsupported',
     });
     return 'unsupported';
+  }
+  if (relayDaemonAuthFailure(res, err, 'session_goal')) {
+    return 'daemon_unavailable';
   }
   if (status !== undefined && status >= 400 && status < 500) {
     res.status(status).json({

@@ -3626,6 +3626,104 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
+  it('preserves session artifacts across a subsequent changeSessionCwd and commitManagedConversationBinding after pendingArtifactRestore is consumed', async () => {
+    const sessionId = '44444444-4444-4444-8444-444444444444';
+    const target1 = path.join(WS_A, 'conversation-standalone-1');
+    const target2 = path.join(WS_A, 'conversation-standalone-2');
+    const expectation1 = {
+      canonicalSessionId: sessionId,
+      root: { canonicalPath: WS_A, device: 1, inode: 2 },
+      child: {
+        name: 'conversation-standalone-1',
+        canonicalPath: target1,
+        device: 1,
+        inode: 3,
+      },
+    };
+    const expectation2 = {
+      canonicalSessionId: sessionId,
+      root: { canonicalPath: WS_A, device: 1, inode: 2 },
+      child: {
+        name: 'conversation-standalone-2',
+        canonicalPath: target2,
+        device: 1,
+        inode: 4,
+      },
+    };
+    let currentCwd = WS_A;
+    const handle = makeChannel({
+      resumeSessionImpl: () => ({}),
+      extMethodImpl: async (method, params) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionCd) {
+          const nextCwd =
+            typeof (params as { path?: unknown })?.path === 'string'
+              ? ((params as { path: string }).path as string)
+              : target1;
+          const previousCwd = currentCwd;
+          currentCwd = nextCwd;
+          return { previousCwd, newCwd: nextCwd, warnings: [] };
+        }
+        if (
+          method ===
+          SERVE_CONTROL_EXT_METHODS.sessionManagedConversationBindingCommit
+        ) {
+          return { committed: true };
+        }
+        if (
+          method ===
+          SERVE_CONTROL_EXT_METHODS.sessionManagedConversationBindingRelease
+        ) {
+          return { released: true };
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      await bridge.restoreStandaloneSession('resume', {
+        sessionId,
+        workspaceCwd: WS_A,
+      });
+      await bridge.changeSessionCwd(sessionId, {
+        path: target1,
+        allowedRoots: [WS_A],
+        managedRelocation: 'live-conversation',
+        conversationDirectoryExpectation: expectation1,
+      });
+      await bridge.commitManagedConversationBinding(sessionId, expectation1);
+      await bridge.releaseManagedConversationBinding(sessionId, expectation1);
+
+      // Trigger prepareStandaloneArtifactWorkspace (which deletes pendingArtifactRestore)
+      // and add a live artifact to the session.
+      await bridge.addSessionArtifact(sessionId, {
+        title: 'Preserved Artifact',
+        url: 'https://example.com/preserved-artifact',
+      });
+      const before = await bridge.getSessionArtifacts(sessionId);
+      expect(before.artifacts).toHaveLength(1);
+      expect(before.artifacts[0]?.title).toBe('Preserved Artifact');
+
+      // Relocate the session to a second managed child directory.
+      await bridge.changeSessionCwd(sessionId, {
+        path: target2,
+        allowedRoots: [WS_A],
+        managedRelocation: 'live-conversation',
+        conversationDirectoryExpectation: expectation2,
+      });
+      await bridge.commitManagedConversationBinding(sessionId, expectation2);
+      await bridge.releaseManagedConversationBinding(sessionId, expectation2);
+
+      const after = await bridge.getSessionArtifacts(sessionId);
+      expect(after.artifacts).toHaveLength(1);
+      expect(after.artifacts[0]?.title).toBe('Preserved Artifact');
+      expect(after.artifacts[0]?.url).toBe(
+        'https://example.com/preserved-artifact',
+      );
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it('rejects a standalone managed relocation when the child reports another cwd', async () => {
     const sessionId = '33333333-3333-4333-8333-333333333333';
     const target = path.join(WS_A, 'conversation-standalone');

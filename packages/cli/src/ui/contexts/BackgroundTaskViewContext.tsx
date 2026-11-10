@@ -320,7 +320,10 @@ export function BackgroundTaskViewProvider({
           registry.isFinishing(target.agentId) &&
           typeof registry.waitForFinishing === 'function'
         ) {
-          await registry.waitForFinishing(target.agentId);
+          await registry.waitForFinishing(
+            target.agentId,
+            AbortSignal.timeout(5000),
+          );
           live = registry.get(target.agentId) ?? live;
         } else if (typeof registry.queueMessage === 'function') {
           return registry.queueMessage(target.agentId, trimmed);
@@ -329,8 +332,11 @@ export function BackgroundTaskViewProvider({
         }
       }
       if (live.status === 'paused') {
-        await config.resumeBackgroundAgent(target.agentId, trimmed);
-        return true;
+        const resumed = await config.resumeBackgroundAgent(
+          target.agentId,
+          trimmed,
+        );
+        return Boolean(resumed);
       }
       if (live.status === 'completed' && live.isBackgrounded !== false) {
         if (typeof registry.continueResidentAgent === 'function') {
@@ -347,7 +353,7 @@ export function BackgroundTaskViewProvider({
             target.agentId,
             trimmed,
           );
-          return !revived.blocked;
+          return Boolean(revived);
         }
       }
       return false;

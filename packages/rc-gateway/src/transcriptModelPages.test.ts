@@ -424,4 +424,65 @@ describe('a subagent whose parent call is on an older page (#202)', () => {
     );
     expect(m.items[0].sub?.tools).toHaveLength(1);
   });
+
+  it('settles sub.done when backfilling older subagent frames into an already-terminal parent tool row (#477)', () => {
+    const m = api.createTranscriptModel();
+    // Newer page only had the terminal tool_call_update for p5, so p5 has status='failed' and no sub yet.
+    m.prependItems(
+      api.replayStoredPage([
+        flat('tool_call_update', { toolCallId: 'p5', status: 'failed' }),
+      ]),
+    );
+    expect(m.items[0].status).toBe('failed');
+    expect(m.items[0].sub).toBeNull();
+
+    // Older page brings the parent tool_call and its subagent chunks (fillTool path).
+    m.prependItems(
+      api.replayStoredPage([
+        flat('tool_call', {
+          toolCallId: 'p5',
+          title: 'Agent',
+          status: 'in_progress',
+        }),
+        child('p5', 'agent_message_chunk', text('working before failure')),
+      ]),
+    );
+    expect(m.items[0].sub?.text).toBe('working before failure');
+    expect(m.items[0].sub?.done).toBe(true);
+    expect(m.items[0].sub?.failed).toBe(true);
+
+    // Also verify takeOrphans when a completed parent tool row is already on screen
+    // and an older page brings only orphan child frames.
+    m.upsertTool({ toolCallId: 'p6', title: 'Agent', status: 'completed' });
+    m.prependItems(
+      api.replayStoredPage([
+        child('p6', 'agent_message_chunk', text('orphan for completed parent')),
+      ]),
+    );
+    const p6 = m.items.find((i) => i.toolCallId === 'p6');
+    expect(p6?.sub?.text).toBe('orphan for completed parent');
+    expect(p6?.sub?.done).toBe(true);
+    expect(p6?.sub?.failed).toBe(false);
+  });
+
+  it('clears pendingOrphans on clear() (#477)', () => {
+    const m = api.createTranscriptModel();
+    m.prependItems(
+      api.replayStoredPage([
+        child('p7', 'agent_message_chunk', text('held orphan')),
+        flat('agent_message_chunk', text('after')),
+      ]),
+    );
+    m.clear();
+    m.prependItems(
+      api.replayStoredPage([
+        flat('tool_call', {
+          toolCallId: 'p7',
+          title: 'Agent',
+          status: 'completed',
+        }),
+      ]),
+    );
+    expect(m.items[0].sub).toBeNull();
+  });
 });

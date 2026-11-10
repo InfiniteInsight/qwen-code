@@ -644,11 +644,6 @@ it('resumes polling after a completed subagent is continued with a follow-up mes
     'agent-1',
     'Follow up on the edge case',
   );
-  expect(container.querySelector('[data-status="running"]')?.textContent).toBe(
-    'running',
-  );
-
-  await act(async () => vi.advanceTimersByTimeAsync(3_000));
   expect(workspaceClient.resolveSubagentSession).toHaveBeenCalledTimes(2);
   expect(container.querySelector('[data-status="running"]')?.textContent).toBe(
     'running',
@@ -659,4 +654,62 @@ it('resumes polling after a completed subagent is continued with a follow-up mes
   expect(
     container.querySelector('[data-status="completed"]')?.textContent,
   ).toBe('completed');
+});
+
+it('prefers larger updated resolution metrics over stale initial executionSummary metrics and preserves paused status', async () => {
+  workspaceClient.resolveSubagentSession.mockResolvedValue({
+    sessionId: 'subagent-session',
+    status: 'paused',
+    durationMs: 9_500,
+    toolCalls: 7,
+    totalTokens: 2_400,
+    inputTokens: 1_800,
+    outputTokens: 600,
+    cachedTokens: 900,
+  });
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  await act(async () => {
+    root!.render(
+      <I18nProvider language="en">
+        <SubagentDetail
+          sessionId="parent-session"
+          rootToolCallId="agent-1"
+          initialRootTool={{
+            callId: 'agent-1',
+            toolName: 'agent',
+            status: 'completed',
+            rawOutput: {
+              type: 'task_execution',
+              status: 'background',
+              executionSummary: {
+                totalDurationMs: 1_200,
+                totalToolCalls: 2,
+                totalTokens: 500,
+                inputTokens: 400,
+                outputTokens: 100,
+                cachedTokens: 200,
+              },
+            },
+          }}
+        />
+      </I18nProvider>,
+    );
+    await Promise.resolve();
+  });
+
+  expect(container.querySelector('[data-status="paused"]')?.textContent).toBe(
+    'paused',
+  );
+  expect(latestMessageListProps.current?.['firstTurnMetrics']).toEqual({
+    status: 'paused',
+    durationMs: 9_500,
+    toolCalls: 7,
+    totalTokens: 2_400,
+    inputTokens: 1_800,
+    outputTokens: 600,
+    cachedTokens: 900,
+  });
 });

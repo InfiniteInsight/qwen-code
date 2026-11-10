@@ -2876,6 +2876,61 @@ describe('BackgroundAgentResumeService', () => {
       expect(registry.get(id)).toBeUndefined();
     }
   });
+
+  it('revives a completed disk-backed foreground subagent by agentId or toolUseId', async () => {
+    const sessionId = 'session-1';
+    const fgByAgentId = 'fg-disk-agent-1';
+    const fgByToolUseId = 'fg-disk-agent-2';
+    const toolUseId = 'call-fg-tool-use-2';
+
+    for (const [agentId, callId] of [
+      [fgByAgentId, 'call-fg-tool-use-1'],
+      [fgByToolUseId, toolUseId],
+    ] as const) {
+      seedMeta(sessionId, agentId, `Foreground task ${agentId}`, {
+        status: 'completed',
+        isBackgrounded: false,
+        toolUseId: callId,
+        resolvedApprovalMode: 'default',
+      });
+      writeJsonl(
+        getAgentJsonlPath(tempDir, sessionId, agentId),
+        userRec(sessionId, `Initial prompt for ${agentId}`),
+        rec(`a-${agentId}`, 'u1', sessionId, at('01.000'), 'assistant', {
+          message: modelText(`Finished ${agentId}`),
+        }),
+      );
+    }
+
+    // Neither foreground subagent is in BackgroundTaskRegistry initially
+    // (unregistered on foreground completion).
+    expect(registry.get(fgByAgentId)).toBeUndefined();
+    expect(registry.get(fgByToolUseId)).toBeUndefined();
+
+    const { service } = createService({
+      subagent: stubSubagent({ getFinalText: () => 'revived output' }),
+    });
+
+    const revived1 = await service.reviveCompletedBackgroundAgent(
+      fgByAgentId,
+      'continue by agentId',
+    );
+    expect(revived1?.agentId).toBe(fgByAgentId);
+    await waitForStatus(fgByAgentId, 'completed');
+    expect(registry.get(fgByAgentId)?.result).toBe('revived output');
+    expect(
+      readAgentMeta(getAgentMetaPath(tempDir, sessionId, fgByAgentId))
+        ?.isBackgrounded,
+    ).toBe(true);
+
+    const revived2 = await service.reviveCompletedBackgroundAgent(
+      toolUseId,
+      'continue by toolUseId',
+    );
+    expect(revived2?.agentId).toBe(fgByToolUseId);
+    await waitForStatus(fgByToolUseId, 'completed');
+    expect(registry.get(fgByToolUseId)?.result).toBe('revived output');
+  });
 });
 
 function readMetaStatus(metaPath: string): string | undefined {

@@ -56,7 +56,7 @@ export function daemonErrorBody(
 /**
  * The session-level 404: the daemon could not find the parent session itself,
  * so the body carries `code: 'session_not_found'` with no identifying
- * `toolCallId` (an explicit `null` counts as absent).
+ * `subagentRef` or `toolCallId` (an explicit `null` counts as absent).
  *
  * This is the contract the SDK's `isSessionLevelNotFound` tests, read without
  * that guard. The guard opens with `error instanceof DaemonHttpError` against
@@ -73,8 +73,12 @@ export function isSessionLevelGone(err: unknown): boolean {
   if (http === undefined || http.status !== 404) return false;
   const body = daemonErrorBody(err);
   if (body?.['code'] !== 'session_not_found') return false;
+  const subagentRef = body['subagentRef'];
   const toolCallId = body['toolCallId'];
-  return toolCallId === undefined || toolCallId === null;
+  return (
+    (subagentRef === undefined || subagentRef === null) &&
+    (toolCallId === undefined || toolCallId === null)
+  );
 }
 
 /**

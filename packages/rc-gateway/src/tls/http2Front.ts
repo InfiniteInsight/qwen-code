@@ -178,7 +178,12 @@ export interface Http2FrontOptions {
  * `https.Server` had so the call site does not change shape.
  */
 export interface FrontListener {
-  listen(port: number, host: string, onListening: () => void): void;
+  listen(
+    port: number,
+    host: string,
+    onListening: () => void,
+    onError?: (err: Error) => void,
+  ): void;
   close(): Promise<void>;
   address(): AddressInfo | string | null;
 }
@@ -256,9 +261,17 @@ export function createHttp2Front(
   };
 
   return {
-    listen(port, host, onListening) {
+    listen(port, host, onListening, onError) {
       inner = createHttpServer(app);
+      const fail = onError
+        ? (err: Error): void => {
+            void this.close();
+            onError(err);
+          }
+        : undefined;
+      if (fail) inner.once('error', fail);
       inner.listen(0, '127.0.0.1', () => {
+        if (fail) inner?.removeListener('error', fail);
         const secureOptions = {
           ...(tls.key !== undefined ? { key: tls.key } : {}),
           ...(tls.cert !== undefined ? { cert: tls.cert } : {}),
@@ -276,7 +289,11 @@ export function createHttp2Front(
         const startPrimary = (): void => {
           if (primaryStarted) return;
           primaryStarted = true;
-          front!.listen(port, host, onListening);
+          if (fail) front!.once('error', fail);
+          front!.listen(port, host, () => {
+            if (fail) front?.removeListener('error', fail);
+            onListening();
+          });
         };
 
         const extra = options.loopbackBindHost;

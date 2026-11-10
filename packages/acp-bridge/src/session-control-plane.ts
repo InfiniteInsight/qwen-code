@@ -12897,6 +12897,7 @@ export function createSessionControlPlane(
         throw standaloneWorkingDirectoryMissingError();
       }
       if (entry.artifactWorkspaceCwd !== expectation.child.canonicalPath) {
+        const previousArtifacts = entry.artifacts;
         const artifacts = new SessionArtifactStore({
           sessionId,
           workspaceCwd: expectation.child.canonicalPath,
@@ -12921,6 +12922,34 @@ export function createSessionControlPlane(
                 )}`,
               );
             }
+          }
+        } else if (entry.artifactWorkspaceCwd !== undefined) {
+          const previousStore = previousArtifacts as unknown as {
+            cloneState?: () => {
+              artifacts?: Map<string, { lastStatAt?: number }>;
+            };
+            snapshot?: () => unknown;
+          };
+          const existingState = previousStore.cloneState?.();
+          if (existingState !== undefined) {
+            for (const artifact of existingState.artifacts?.values() ?? []) {
+              artifact.lastStatAt = undefined;
+            }
+            (
+              artifacts as unknown as {
+                restoreState?: (state: unknown) => void;
+              }
+            ).restoreState?.(existingState);
+          } else if (typeof previousStore.snapshot === 'function') {
+            const existingSnapshot = previousStore.snapshot();
+            await (
+              artifacts as unknown as {
+                restore: (
+                  snapshot: unknown,
+                  second?: unknown,
+                ) => Promise<unknown>;
+              }
+            ).restore(existingSnapshot, []);
           }
         }
         entry.artifacts = artifacts;

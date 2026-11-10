@@ -171,22 +171,24 @@ describe('GET /session/:id/artifacts', () => {
     expect(stub.lastArtifactListSessionId).toBeUndefined();
   });
 
-  it('relays a daemon 404 as a missing conversation, not a missing capability', async () => {
-    // `session_artifacts` is advertised since v1
-    // (packages/cli/src/serve/capabilities.ts:91), so there is no daemon
-    // version without these routes. The recap read's `*_unsupported` mapping
-    // must NOT be copied here.
-    stub = await startStubDaemon({ artifactListStatus: 404 });
-    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
-    const url = await mountGateway(
-      createSessionArtifactListRoute(daemon),
-      '/session/:id/artifacts',
+  it('says session_not_loaded on a session-level 404 from the daemon (#478)', async () => {
+    const out = await callRoute(
+      createSessionArtifactListRoute(
+        fakeDaemon('listSessionArtifacts', {
+          thrown: new DaemonHttpError(
+            404,
+            { error: 'Session not found', code: 'session_not_found' },
+            'gone',
+          ),
+        }),
+      ),
+      { id: SID },
     );
-
-    const res = await fetch(`${url}/session/${SID}/artifacts`);
-    expect(res.status).toBe(404);
-    const body = (await res.json()) as { code: string };
-    expect(body.code).toBe('session_not_found');
+    expect(out.status).toBe(409);
+    expect(out.body).toEqual({
+      error: 'Open this conversation before reading its artifacts',
+      code: 'session_not_loaded',
+    });
   });
 
   it('says session_not_loaded when the pool no longer holds the session', async () => {
@@ -202,6 +204,22 @@ describe('GET /session/:id/artifacts', () => {
     expect(out.body).toEqual({
       error: 'Open this conversation before reading its artifacts',
       code: 'session_not_loaded',
+    });
+  });
+
+  it('falls through to 502 on a non-session 404 from the daemon (#478)', async () => {
+    stub = await startStubDaemon({ artifactListStatus: 404 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const url = await mountGateway(
+      createSessionArtifactListRoute(daemon),
+      '/session/:id/artifacts',
+    );
+
+    const res = await fetch(`${url}/session/${SID}/artifacts`);
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({
+      error: 'Daemon unavailable',
+      code: 'daemon_unavailable',
     });
   });
 

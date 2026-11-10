@@ -1407,5 +1407,19 @@ describe('TranscriptModel', () => {
       );
       expect(m.items[0].sub?.tools[0]?.status).toBe('cancelled');
     });
+
+    it('clears orphanSubs on clear() and cutAtUserTurn() (#477)', () => {
+      const m = api.createTranscriptModel({ keepOrphans: true });
+      m.appendSubagentText('p_orphan', 'stale orphan text');
+      expect(m.heldSubagents()).toHaveLength(1);
+      m.clear();
+      expect(m.heldSubagents()).toHaveLength(0);
+      m.upsertTool({
+        toolCallId: 'p_orphan',
+        title: 'Agent',
+        status: 'in_progress',
+      });
+      expect(m.items[0].sub).toBeNull();
+    });
   });
 });

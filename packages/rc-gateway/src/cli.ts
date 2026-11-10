@@ -77,7 +77,7 @@ import { isSessionRelayLive } from './routes/sessionEvents.js';
 import { buildAcmeManager } from './tls/acme/buildAcmeStack.js';
 import type { AcmeManager } from './tls/acme/acmeManager.js';
 import { createLiveTlsContext, type LiveTlsContext } from './tls/acmeHttps.js';
-import { createHttp2Front } from './tls/http2Front.js';
+import { createHttp2Front, type FrontListener } from './tls/http2Front.js';
 import { TokenStore } from './tokenStore.js';
 import { PairingService } from './pairing.js';
 import { VapidStore } from './webpush/vapid.js';
@@ -1692,6 +1692,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     opts.loopbackBindHost && !isLoopbackHost(bind.host)
       ? opts.loopbackBindHost
       : undefined;
+  const isHttp2Front = Boolean((acmeTls || tlsMaterial) && !http2Disabled);
   const listener =
     acmeTls && !http2Disabled
       ? createHttp2Front(
@@ -1721,7 +1722,58 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     noMdnsFlag: opts.noMdns,
     envDisabled: process.env.QWEN_RC_NO_MDNS === '1',
   });
-  listener.listen(port, bind.host, () => {
+  let closeGatewayListener: () => Promise<void> = async () => {};
+  try {
+    await new Promise<void>((resolve, reject) => {
+      if (isHttp2Front) {
+        const frontListener = listener as FrontListener;
+        frontListener.listen(
+          port,
+          bind.host,
+          () => {
+            closeGatewayListener = () => frontListener.close();
+            resolve();
+          },
+          reject,
+        );
+        return;
+      }
+      const srv = (
+        listener as {
+          listen: (
+            port: number,
+            host: string,
+            cb: () => void,
+          ) => {
+            once: (ev: 'error', fn: (err: Error) => void) => void;
+            removeListener: (ev: 'error', fn: (err: Error) => void) => void;
+            close: (cb: () => void) => void;
+          };
+        }
+      ).listen(port, bind.host, () => {
+        srv.removeListener('error', onError);
+        closeGatewayListener = () =>
+          new Promise<void>((r) => srv.close(() => r()));
+        resolve();
+      });
+      const onError = (err: Error): void => {
+        reject(err);
+      };
+      srv.once('error', onError);
+    });
+  } catch (err) {
+    for (const w of watchers) w.close();
+    reloader?.stop();
+    routingReloader?.stop();
+    rateReloader?.stop();
+    clearInterval(bridgeReaper);
+    stopWalRetention();
+    stopLoopGuard();
+    acmeManager?.stop();
+    await daemonPool.stopAll();
+    throw err;
+  }
+  {
     const { code, expiresAt } = pairing.mint([
       OWNER,
       SESSION_READ,
@@ -1729,7 +1781,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       WRITE,
     ]);
     // Write the bootstrap code to the secrets dir (0700) as a 0600 file; print
-    // only the path to stdout — never the code (pairing-auth spec invariant).
+    // only the path to stdout - never the code (pairing-auth spec invariant).
     const rcDir = join(homedir(), '.qwen', 'rc');
     const { path: bootstrapPath } = writeBootstrapCode(rcDir, code);
     // The file mirrors a single-use, time-bounded code: drop it the moment the
@@ -1835,7 +1887,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
           );
         });
     }
-  });
+  }
 
   // Idle suggestions (proposal `add-idle-suggestions`): build the gateway-own
   // handler that fires on a session's active-prompt true→false edge WHENEVER a
@@ -2100,6 +2152,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     if (mdnsAdvertiser) await mdnsAdvertiser.stop(500);
     if (pump) await pump.stop();
     acmeManager?.stop();
+    await closeGatewayListener();
     // Stop every workspace daemon the pool spawned (add-multi-workspace
     // -daemon-pool) alongside the boot daemon below — otherwise a POST
     // /session { cwd } that spawned a pooled `qwen serve` leaves it running

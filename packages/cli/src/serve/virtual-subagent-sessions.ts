@@ -14,6 +14,7 @@ import {
   parseLineTolerant,
   read as readJsonl,
   readAgentMeta,
+  sanitizeFilenameComponent,
   Storage,
   type ChatRecord,
   type SessionTranscriptCursorState,
@@ -56,6 +57,7 @@ interface ResolvedAgentTask {
   status: string;
   startTime: number;
   durationMs?: number;
+  toolCalls?: number;
   totalTokens?: number;
   inputTokens?: number;
   outputTokens?: number;
@@ -82,6 +84,7 @@ export interface ResolvedVirtualSubagentSession {
   title: string;
   status: string;
   durationMs?: number;
+  toolCalls?: number;
   totalTokens?: number;
   inputTokens?: number;
   outputTokens?: number;
@@ -91,6 +94,7 @@ export interface ResolvedVirtualSubagentSession {
 interface ToolCallMetrics {
   status?: string;
   durationMs?: number;
+  toolCalls?: number;
   totalTokens?: number;
   inputTokens?: number;
   outputTokens?: number;
@@ -146,7 +150,7 @@ function normalizeTaskStatus(status: unknown): string | undefined {
   return status;
 }
 
-function isTerminalTaskStatus(status: string | undefined): boolean {
+function isTerminalTaskStatus(status: string | undefined): status is string {
   return (
     status === 'completed' ||
     status === 'failed' ||
@@ -159,10 +163,20 @@ export function preferTerminalTaskStatus(
   metricsStatus: string | undefined,
   selectedStatus: string,
 ): string {
-  return !isTerminalTaskStatus(metricsStatus) &&
-    isTerminalTaskStatus(selectedStatus)
-    ? selectedStatus
-    : (metricsStatus ?? selectedStatus);
+  if (selectedStatus === 'paused') return selectedStatus;
+  return selectedStatus === 'running' && isTerminalTaskStatus(metricsStatus)
+    ? metricsStatus
+    : selectedStatus;
+}
+
+function preferLargerMetric(
+  first: number | undefined,
+  second: number | undefined,
+): number | undefined {
+  if (first !== undefined && second !== undefined) {
+    return Math.max(first, second);
+  }
+  return first ?? second;
 }
 
 function durationBetween(start: string, end?: string): number | undefined {
@@ -188,6 +202,7 @@ function findToolCallMetrics(
       normalizeTaskStatus(display?.['status']) ??
       normalizeTaskStatus(toolResult?.status),
     durationMs: finiteNonNegative(summary?.['totalDurationMs']),
+    toolCalls: finiteNonNegative(summary?.['totalToolCalls']),
     totalTokens:
       finiteNonNegative(summary?.['totalTokens']) ??
       finiteNonNegative(display?.['tokenCount']),
@@ -336,7 +351,7 @@ class VirtualSubagentTarget {
         }, POLL_INTERVAL_MS);
         this.pollTimer.unref();
       }
-      if (!wasRunning) {
+      if (!wasRunning || this.subscribers > 0) {
         void this.refreshLive().catch(() => undefined);
       }
       return;
@@ -345,7 +360,7 @@ class VirtualSubagentTarget {
       clearInterval(this.pollTimer);
       this.pollTimer = undefined;
     }
-    if (wasRunning && status !== 'running') {
+    if (wasRunning || this.subscribers > 0) {
       void this.refreshLive().catch(() => undefined);
     }
   }
@@ -796,8 +811,10 @@ export class VirtualSubagentSessions {
       toolUseId?: string;
     }) => boolean,
   ): Promise<ResolvedAgentTask | undefined> {
+    const virtualParent = parseVirtualSubagentSessionId(parentSessionId);
+    const rootSessionId = virtualParent?.parentSessionId ?? parentSessionId;
     const status = await runtime.bridge
-      .getSessionTasksStatus(parentSessionId)
+      .getSessionTasksStatus(rootSessionId)
       .catch((error: unknown) => {
         if (
           error instanceof SessionNotFoundError &&
@@ -824,6 +841,7 @@ export class VirtualSubagentSessions {
           (task.endTime === undefined
             ? undefined
             : Math.max(0, task.endTime - task.startTime)),
+        toolCalls: task.stats?.toolUses,
         totalTokens: task.stats?.totalTokens,
       };
     }
@@ -832,7 +850,7 @@ export class VirtualSubagentSessions {
       runtime.sessionRuntimeBaseDir,
       () => new Storage(runtime.workspaceCwd).getProjectDir(),
     );
-    const sessionDir = getSubagentSessionDir(projectDir, parentSessionId);
+    const sessionDir = getSubagentSessionDir(projectDir, rootSessionId);
     let names: string[];
     try {
       names = await fs.readdir(sessionDir);
@@ -846,6 +864,10 @@ export class VirtualSubagentSessions {
       const meta = readAgentMeta(metaPath);
       if (
         !meta ||
+        (meta.parentSessionId && meta.parentSessionId !== rootSessionId) ||
+        (virtualParent &&
+          meta.parentAgentId &&
+          meta.parentAgentId !== virtualParent.agentId) ||
         !predicate({
           kind: 'agent',
           id: meta.agentId,
@@ -882,13 +904,35 @@ export class VirtualSubagentSessions {
   ): Promise<ResolvedAgentTask | undefined> {
     // Pre-toolUseId transcripts cannot be linked exactly. This score is only a
     // best-effort compatibility path and identical parallel launches may tie.
+    const virtualParent = parseVirtualSubagentSessionId(parentSessionId);
+    const rootSessionId = virtualParent?.parentSessionId ?? parentSessionId;
     const projectDir = Storage.runWithResolvedRuntimeBaseDir(
       runtime.sessionRuntimeBaseDir,
       () => new Storage(runtime.workspaceCwd).getProjectDir(),
     );
-    const parentRecords = await readJsonl<ChatRecord>(
-      `${projectDir}/chats/${parentSessionId}.jsonl`,
-    );
+    const findRootInRecords = (records: readonly ChatRecord[]) => {
+      for (const record of records) {
+        for (const part of record.message?.parts ?? []) {
+          const call = part.functionCall;
+          if (call?.id !== toolCallId || call.name !== 'agent') continue;
+          const args = call.args;
+          return {
+            timestamp: Date.parse(record.timestamp),
+            ...(typeof args?.['description'] === 'string'
+              ? { description: args['description'] }
+              : {}),
+            ...(typeof args?.['prompt'] === 'string'
+              ? { prompt: args['prompt'] }
+              : {}),
+            ...(typeof args?.['subagent_type'] === 'string'
+              ? { agentType: args['subagent_type'] }
+              : {}),
+          };
+        }
+      }
+      return undefined;
+    };
+    let parentRecords: ChatRecord[] = [];
     let root:
       | {
           timestamp: number;
@@ -897,30 +941,21 @@ export class VirtualSubagentSessions {
           agentType?: string;
         }
       | undefined;
-    for (const record of parentRecords) {
-      for (const part of record.message?.parts ?? []) {
-        const call = part.functionCall;
-        if (call?.id !== toolCallId || call.name !== 'agent') continue;
-        const args = call.args;
-        root = {
-          timestamp: Date.parse(record.timestamp),
-          ...(typeof args?.['description'] === 'string'
-            ? { description: args['description'] }
-            : {}),
-          ...(typeof args?.['prompt'] === 'string'
-            ? { prompt: args['prompt'] }
-            : {}),
-          ...(typeof args?.['subagent_type'] === 'string'
-            ? { agentType: args['subagent_type'] }
-            : {}),
-        };
-        break;
-      }
-      if (root) break;
+    if (virtualParent) {
+      parentRecords = await readJsonl<ChatRecord>(
+        `${getSubagentSessionDir(projectDir, rootSessionId)}/agent-${sanitizeFilenameComponent(virtualParent.agentId)}.jsonl`,
+      );
+      root = findRootInRecords(parentRecords);
+    }
+    if (!root) {
+      parentRecords = await readJsonl<ChatRecord>(
+        `${projectDir}/chats/${sanitizeFilenameComponent(rootSessionId)}.jsonl`,
+      );
+      root = findRootInRecords(parentRecords);
     }
     if (!root) return undefined;
 
-    const sessionDir = getSubagentSessionDir(projectDir, parentSessionId);
+    const sessionDir = getSubagentSessionDir(projectDir, rootSessionId);
     let names: string[];
     try {
       names = await fs.readdir(sessionDir);
@@ -935,7 +970,16 @@ export class VirtualSubagentSessions {
       if (!name.endsWith('.meta.json')) continue;
       const metaPath = `${sessionDir}/${name}`;
       const meta = readAgentMeta(metaPath);
-      if (!meta) continue;
+      if (
+        !meta ||
+        (meta.parentSessionId && meta.parentSessionId !== rootSessionId) ||
+        (virtualParent && meta.agentId === virtualParent.agentId) ||
+        (virtualParent &&
+          meta.parentAgentId &&
+          meta.parentAgentId !== virtualParent.agentId)
+      ) {
+        continue;
+      }
       const outputFile = metaPath.slice(0, -'.meta.json'.length) + '.jsonl';
       const launchPrompt = await readFirstUserText(outputFile);
       let score = 0;
@@ -964,11 +1008,24 @@ export class VirtualSubagentSessions {
     return {
       ...selected,
       status: preferTerminalTaskStatus(metrics.status, selected.status),
-      durationMs: metrics.durationMs ?? selected.durationMs,
-      totalTokens: metrics.totalTokens ?? selected.totalTokens,
-      inputTokens: metrics.inputTokens ?? selected.inputTokens,
-      outputTokens: metrics.outputTokens ?? selected.outputTokens,
-      cachedTokens: metrics.cachedTokens ?? selected.cachedTokens,
+      durationMs: preferLargerMetric(metrics.durationMs, selected.durationMs),
+      toolCalls: preferLargerMetric(metrics.toolCalls, selected.toolCalls),
+      totalTokens: preferLargerMetric(
+        metrics.totalTokens,
+        selected.totalTokens,
+      ),
+      inputTokens: preferLargerMetric(
+        metrics.inputTokens,
+        selected.inputTokens,
+      ),
+      outputTokens: preferLargerMetric(
+        metrics.outputTokens,
+        selected.outputTokens,
+      ),
+      cachedTokens: preferLargerMetric(
+        metrics.cachedTokens,
+        selected.cachedTokens,
+      ),
     };
   }
 
@@ -977,12 +1034,26 @@ export class VirtualSubagentSessions {
     parentSessionId: string,
     toolCallId: string,
   ): Promise<ToolCallMetrics> {
+    const virtualParent = parseVirtualSubagentSessionId(parentSessionId);
+    const rootSessionId = virtualParent?.parentSessionId ?? parentSessionId;
     const projectDir = Storage.runWithResolvedRuntimeBaseDir(
       runtime.sessionRuntimeBaseDir,
       () => new Storage(runtime.workspaceCwd).getProjectDir(),
     );
+    if (virtualParent) {
+      const subagentRecords = await readJsonl<ChatRecord>(
+        `${getSubagentSessionDir(projectDir, rootSessionId)}/agent-${sanitizeFilenameComponent(virtualParent.agentId)}.jsonl`,
+      );
+      if (
+        subagentRecords.some(
+          (record) => record.toolCallResult?.callId === toolCallId,
+        )
+      ) {
+        return findToolCallMetrics(subagentRecords, toolCallId);
+      }
+    }
     const records = await readJsonl<ChatRecord>(
-      `${projectDir}/chats/${parentSessionId}.jsonl`,
+      `${projectDir}/chats/${sanitizeFilenameComponent(rootSessionId)}.jsonl`,
     );
     return findToolCallMetrics(records, toolCallId);
   }
@@ -992,6 +1063,8 @@ export class VirtualSubagentSessions {
     parentSessionId: string,
     toolCallId: string,
   ): Promise<ResolvedVirtualSubagentSession | undefined> {
+    const virtualParent = parseVirtualSubagentSessionId(parentSessionId);
+    const rootSessionId = virtualParent?.parentSessionId ?? parentSessionId;
     let task = await this.findTask(
       runtime,
       parentSessionId,
@@ -1016,21 +1089,29 @@ export class VirtualSubagentSessions {
       toolCallId,
     );
     if (!task) return undefined;
-    const sessionId = createVirtualSubagentSessionId(parentSessionId, task.id);
+    const sessionId = createVirtualSubagentSessionId(rootSessionId, task.id);
     const status = preferTerminalTaskStatus(metrics?.status, task.status);
     this.targets
       .get(`${runtime.workspaceId}:${sessionId}`)
       ?.updateStatus(status);
+    const toolCalls = preferLargerMetric(metrics?.toolCalls, task.toolCalls);
     return {
       sessionId,
       taskId: task.id,
       title: task.title,
       status,
-      durationMs: metrics?.durationMs ?? task.durationMs,
-      totalTokens: metrics?.totalTokens ?? task.totalTokens,
-      inputTokens: metrics?.inputTokens ?? task.inputTokens,
-      outputTokens: metrics?.outputTokens ?? task.outputTokens,
-      cachedTokens: metrics?.cachedTokens ?? task.cachedTokens,
+      durationMs: preferLargerMetric(metrics?.durationMs, task.durationMs),
+      ...(toolCalls !== undefined ? { toolCalls } : {}),
+      totalTokens: preferLargerMetric(metrics?.totalTokens, task.totalTokens),
+      inputTokens: preferLargerMetric(metrics?.inputTokens, task.inputTokens),
+      outputTokens: preferLargerMetric(
+        metrics?.outputTokens,
+        task.outputTokens,
+      ),
+      cachedTokens: preferLargerMetric(
+        metrics?.cachedTokens,
+        task.cachedTokens,
+      ),
     };
   }
 

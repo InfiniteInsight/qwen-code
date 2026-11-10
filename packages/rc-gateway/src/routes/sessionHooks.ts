@@ -17,6 +17,7 @@ import {
 } from '../daemonPool.js';
 import { asDaemonHttpError, daemonErrorBody } from '../daemonHttpError.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
+import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 /**
  * Issue #135: the session hooks read, the one slice of that issue's hooks
@@ -151,9 +152,9 @@ function projectHook(entry: DaemonHookEntry): SessionHookView | undefined {
   if (!isPlainObject(entry) || typeof entry.eventName !== 'string') {
     return undefined;
   }
-  const config = (
-    isPlainObject(entry.config) ? entry.config : {}
-  ) as unknown as Record<string, unknown>;
+  const config = (isPlainObject(entry.config)
+    ? entry.config
+    : {}) as unknown as Record<string, unknown>;
   const type = typeof config['type'] === 'string' ? config['type'] : 'unknown';
   const skillRoot = clip(entry.skillRoot, 400);
   const skill = skillRoot
@@ -270,6 +271,9 @@ function sendHooksError(res: Response, err: unknown): void {
       error: 'The daemon has no hook runtime for this conversation',
       code: code ?? 'hooks_unavailable',
     });
+    return;
+  }
+  if (relayDaemonAuthFailure(res, err, 'session_hooks')) {
     return;
   }
   if (http !== undefined && http.status >= 400 && http.status < 500) {

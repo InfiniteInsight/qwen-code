@@ -12180,7 +12180,7 @@ export class Session implements SessionContext {
       this.#deferredExternalRecordTimer = undefined;
       const pending = this.#deferredExternalRecords.splice(0);
       this.#drainingDeferredExternalRecords = true;
-      const drainPromise = (async () => {
+      const drainPromise: Promise<void> = (async () => {
         try {
           for (let i = 0; i < pending.length; i++) {
             const item = pending[i]!;
@@ -12220,11 +12220,12 @@ export class Session implements SessionContext {
           }
         } finally {
           this.#drainingDeferredExternalRecords = false;
-          if (this.#deferredExternalRecordDrainPromise === drainPromise) {
-            this.#deferredExternalRecordDrainPromise = null;
-          }
         }
-      })();
+      })().finally(() => {
+        if (this.#deferredExternalRecordDrainPromise === drainPromise) {
+          this.#deferredExternalRecordDrainPromise = null;
+        }
+      });
       this.#deferredExternalRecordDrainPromise = drainPromise;
     }, 500);
     this.#deferredExternalRecordTimer.unref?.();
