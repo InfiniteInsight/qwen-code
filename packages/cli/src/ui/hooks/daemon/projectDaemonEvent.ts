@@ -46,9 +46,9 @@
  *   commits an error line). `stream_error` and `session_died` are left to the
  *   hook: the stream closing finalizes the turn there, and `session_died`
  *   ends an attached tab.
- * - **Thoughts are ephemeral** (shown live, never committed), and assistant
- *   text commits as `gemini` (not `gemini_content`); both are deliberate
- *   simplifications to revisit against the in-process path at integration.
+ * - **Thoughts stream live and commit as collapsible `gemini_thought` blocks**
+ *   when the reasoning sub-turn finishes (on assistant prose, tool activity,
+ *   or turn end), and assistant text commits as `gemini`.
  */
 import { basename } from 'node:path';
 import * as Diff from 'diff';
@@ -111,7 +111,7 @@ export interface DaemonProjectionState {
   streamingState: StreamingState;
   /** In-flight assistant text for the current turn (the pending `gemini` item). */
   pendingText: string;
-  /** In-flight reasoning text for the current turn (shown live, not committed). */
+  /** In-flight reasoning text for the current sub-turn (streamed live, then committed as `gemini_thought`). */
   pendingThought: string;
   /** Usage from the most recent terminal `agent_message_chunk`, if any. */
   lastUsage?: DaemonTurnUsage;
@@ -597,11 +597,11 @@ function setToolStatus(
 }
 
 /**
- * Commit the in-flight turn (tool group, then assistant message) and clear the
- * pending buffers. Shared by `turn_complete`, `turn_error` and the replay
- * turn-segmentation in `user_message_chunk` (history replay sends no
- * `turn_complete` between turns, so a new user message marks the previous
- * assistant turn done). Reasoning stays ephemeral.
+ * Commit the in-flight turn (tool group or standalone thought, then assistant
+ * message) and clear the pending buffers. Shared by `turn_complete`,
+ * `turn_error` and the replay turn-segmentation in `user_message_chunk`
+ * (history replay sends no `turn_complete` between turns, so a new user message
+ * marks the previous assistant turn done).
  */
 function flushPendingTurn(state: DaemonProjectionState): {
   committed: HistoryItemWithoutId[];
@@ -610,6 +610,8 @@ function flushPendingTurn(state: DaemonProjectionState): {
   const committed: HistoryItemWithoutId[] = [];
   if (state.tools.length > 0) {
     committed.push({ type: 'tool_group', tools: state.tools });
+  } else if (state.pendingThought.trim().length > 0) {
+    committed.push({ type: 'gemini_thought', text: state.pendingThought });
   }
   if (state.pendingText.trim().length > 0) {
     committed.push({ type: 'gemini', text: state.pendingText });
@@ -621,16 +623,20 @@ function flushPendingTurn(state: DaemonProjectionState): {
 }
 
 /**
- * Commit any pre-tool assistant text (and any already-terminal tool group that
- * preceded it) when a tool call or approval gate starts, so each sub-turn's
- * prose commits above its tool group instead of accumulating in `pending[1]`
- * below a growing `tool_group` (`InfiniteInsight/Qwen-Code-Remote#247`).
+ * Commit any pre-tool reasoning (`gemini_thought`), pre-tool assistant text
+ * (`gemini`), and any already-terminal tool group that preceded them when a
+ * tool call or approval gate starts, so each sub-turn's thought and prose
+ * commit above its tool group (`InfiniteInsight/Qwen-Code-Remote#247`, `#527`).
  */
 function flushBeforeToolActivity(state: DaemonProjectionState): {
   committed: HistoryItemWithoutId[];
   state: DaemonProjectionState;
 } {
-  if (state.pendingText.trim().length === 0) {
+  const canFlushThought =
+    state.tools.length === 0 || areAllToolsTerminal(state.tools);
+  const hasThought = canFlushThought && state.pendingThought.trim().length > 0;
+  const hasText = state.pendingText.trim().length > 0;
+  if (!hasThought && !hasText) {
     if (state.pendingText === '' && state.pendingThought === '') {
       return { committed: [], state };
     }
@@ -649,7 +655,12 @@ function flushBeforeToolActivity(state: DaemonProjectionState): {
     committed.push({ type: 'tool_group', tools });
     tools = [];
   }
-  committed.push({ type: 'gemini', text: state.pendingText });
+  if (hasThought) {
+    committed.push({ type: 'gemini_thought', text: state.pendingThought });
+  }
+  if (hasText) {
+    committed.push({ type: 'gemini', text: state.pendingText });
+  }
   return {
     committed,
     state: {
@@ -831,10 +842,15 @@ function projectSessionUpdate(
       }
 
       const effectiveText = suppressChunkText ? '' : text;
-      if (effectiveText.trim().length > 0 && areAllToolsTerminal(tools)) {
-        committed.push({ type: 'tool_group', tools });
-        tools = [];
-        pendingThought = '';
+      if (effectiveText.trim().length > 0) {
+        if (areAllToolsTerminal(tools)) {
+          committed.push({ type: 'tool_group', tools });
+          tools = [];
+          pendingThought = '';
+        } else if (tools.length === 0 && pendingThought.trim().length > 0) {
+          committed.push({ type: 'gemini_thought', text: pendingThought });
+          pendingThought = '';
+        }
       }
       // A chunk with nothing to show is not evidence that a turn is
       // running. The daemon sends such chunks for usage and for model
@@ -1391,14 +1407,22 @@ export function activePermissionOf(
  * pending-section the same way `useGeminiStream.pendingHistoryItems` is.
  */
 export function pendingHistoryItemsOf(
-  state: Pick<DaemonProjectionState, 'tools' | 'pendingText'>,
+  state: Pick<DaemonProjectionState, 'tools' | 'pendingText'> & {
+    pendingThought?: string;
+  },
 ): HistoryItemWithoutId[] {
-  // Mirror the `turn_complete` commit order (`[tool_group, gemini]`) so the live
-  // view matches the committed history exactly: tools render above the streaming
-  // assistant text, both updating in place as frames arrive.
+  // Mirror the sub-turn commit order (`[gemini_thought, tool_group, gemini]`)
+  // so the live view matches committed history: active reasoning renders while
+  // thinking, then commits above the tool group or streaming assistant text.
   const items: HistoryItemWithoutId[] = [];
   if (state.tools.length > 0) {
     items.push({ type: 'tool_group', tools: state.tools });
+  } else if (
+    state.pendingThought &&
+    state.pendingThought.trim().length > 0 &&
+    state.pendingText.trim().length === 0
+  ) {
+    items.push({ type: 'gemini_thought', text: state.pendingThought });
   }
   if (state.pendingText.trim().length > 0) {
     items.push({ type: 'gemini', text: state.pendingText });

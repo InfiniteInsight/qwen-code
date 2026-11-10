@@ -726,10 +726,15 @@ export function useDaemonStream(
     [driver],
   );
 
+  const activePendingThought =
+    snapshot.tools.length === 0 && snapshot.pendingText.trim().length === 0
+      ? snapshot.pendingThought
+      : '';
   const pendingHistoryItems = useMemo(() => {
     const items = pendingHistoryItemsOf({
       tools: snapshot.tools,
       pendingText: snapshot.pendingText,
+      pendingThought: activePendingThought,
     });
     // Bind the approval prompt: attach a `confirmationDetails` (with an
     // outcome→optionId-mapping `onConfirm`) to the gated tool so
@@ -753,6 +758,7 @@ export function useDaemonStream(
   }, [
     snapshot.tools,
     snapshot.pendingText,
+    activePendingThought,
     snapshot.pendingPermission,
     respondToPermission,
   ]);

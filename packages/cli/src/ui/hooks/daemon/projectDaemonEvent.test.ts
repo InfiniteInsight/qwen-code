@@ -155,9 +155,12 @@ describe('projectDaemonEvent', () => {
   it('projects our OWN captured turn into assistant history only (self-echo dropped)', () => {
     // ownClientId === SELF, frames originated by SELF → the user echo is the
     // submitter's own input (already rendered locally), so only the assistant
-    // message is committed.
+    // thought and message are committed.
     const { state, committed } = runAll(CAPTURED_TURN, SELF);
-    expect(committed).toEqual([{ type: 'gemini', text: 'PONG' }]);
+    expect(committed).toEqual([
+      { type: 'gemini_thought', text: 'The user wants "PONG"' },
+      { type: 'gemini', text: 'PONG' },
+    ]);
     // Turn finished: back to Idle, nothing left pending.
     expect(state.streamingState).toBe(StreamingState.Idle);
     expect(pendingHistoryItemsOf(state)).toEqual([]);
@@ -187,6 +190,7 @@ describe('projectDaemonEvent', () => {
         type: 'user',
         text: 'Reply with exactly the word PONG and nothing else.',
       },
+      { type: 'gemini_thought', text: 'The user wants "PONG"' },
       { type: 'gemini', text: 'PONG' },
     ]);
   });
@@ -200,17 +204,29 @@ describe('projectDaemonEvent', () => {
   });
 
   it('accumulates streamed text/thought live before the turn completes', () => {
-    // Feed everything EXCEPT the final turn_complete (our own turn).
+    // 1. Mid-thinking (before the first agent_message_chunk): reasoning is in
+    //    both `pendingHistoryItemsOf` (as a live `gemini_thought`) and `thoughtOf`.
+    const midThought = runAll(CAPTURED_TURN.slice(0, 10), SELF);
+    expect(midThought.state.streamingState).toBe(StreamingState.Responding);
+    expect(pendingHistoryItemsOf(midThought.state)).toEqual([
+      { type: 'gemini_thought', text: 'The user wants "PONG"' },
+    ]);
+    expect(thoughtOf(midThought.state)?.description).toContain(
+      'The user wants',
+    );
+    expect(midThought.committed).toEqual([]);
+
+    // 2. Mid-reply (everything except the final turn_complete): the thought has
+    //    committed as a collapsible `gemini_thought` block above the live reply.
     const { state, committed } = runAll(CAPTURED_TURN.slice(0, -1), SELF);
     expect(state.streamingState).toBe(StreamingState.Responding);
-    // Mid-turn, the assistant text is live in the pending section…
     expect(pendingHistoryItemsOf(state)).toEqual([
       { type: 'gemini', text: 'PONG' },
     ]);
-    // …reasoning is exposed for the loading indicator…
-    expect(thoughtOf(state)?.description).toContain('The user wants');
-    // …and nothing is committed yet (self-echo dropped, assistant not final).
-    expect(committed).toEqual([]);
+    expect(thoughtOf(state)).toBeNull();
+    expect(committed).toEqual([
+      { type: 'gemini_thought', text: 'The user wants "PONG"' },
+    ]);
   });
 
   it('parses a **bold** thought subject into the summary', () => {
@@ -783,6 +799,7 @@ describe('projectReplaySnapshot', () => {
     );
     expect(committed.map((i) => i.type)).toEqual([
       'user',
+      'gemini_thought',
       'tool_group',
       'gemini',
       'user',
@@ -791,13 +808,14 @@ describe('projectReplaySnapshot', () => {
       'gemini',
     ]);
     expect(committed[0]).toEqual({ type: 'user', text: 'first question' });
-    expect(committed[2]).toEqual({ type: 'gemini', text: 'first answer' });
-    expect(committed[3]).toEqual({ type: 'user', text: 'second question' });
-    expect(committed[4]).toEqual({ type: 'gemini', text: 'second answer' });
-    expect(committed[5]).toEqual({ type: 'user', text: 'third question' });
+    expect(committed[1]).toEqual({ type: 'gemini_thought', text: 'thinking' });
+    expect(committed[3]).toEqual({ type: 'gemini', text: 'first answer' });
+    expect(committed[4]).toEqual({ type: 'user', text: 'second question' });
+    expect(committed[5]).toEqual({ type: 'gemini', text: 'second answer' });
+    expect(committed[6]).toEqual({ type: 'user', text: 'third question' });
     // No prompt in flight: the trailing journal turn is committed and the
     // projection returns to Idle instead of a stuck spinner.
-    expect(committed[6]).toEqual({
+    expect(committed[7]).toEqual({
       type: 'gemini',
       text: 'third answer so far',
     });
@@ -1051,6 +1069,7 @@ describe('turn end with another client attached (#195)', () => {
     expect(state.streamingState).toBe(StreamingState.Idle);
     expect(committed).toEqual([
       { type: 'user', text: PROMPT_TEXT },
+      { type: 'gemini_thought', text: 'The user asked for pong.' },
       { type: 'gemini', text: `pong${HOOK_TEXT}` },
     ]);
     expect(pendingHistoryItemsOf(state)).toEqual([]);
@@ -1064,8 +1083,11 @@ describe('turn end with another client attached (#195)', () => {
       ...afterTurn(2 + turn.length),
     ]);
     expect(state.streamingState).toBe(StreamingState.Idle);
-    // The tab echoed its own input locally; only the reply commits here.
-    expect(committed).toEqual([{ type: 'gemini', text: `pong${HOOK_TEXT}` }]);
+    // The tab echoed its own input locally; only the thought and reply commit here.
+    expect(committed).toEqual([
+      { type: 'gemini_thought', text: 'The user asked for pong.' },
+      { type: 'gemini', text: `pong${HOOK_TEXT}` },
+    ]);
   });
 
   it('goes back and forth between phone and tab without a stuck turn', () => {
@@ -1110,6 +1132,7 @@ describe('turn end with another client attached (#195)', () => {
     );
     expect(seeded.committed).toEqual([
       { type: 'user', text: PROMPT_TEXT },
+      { type: 'gemini_thought', text: 'The user asked for pong.' },
       { type: 'gemini', text: `pong${HOOK_TEXT}` },
     ]);
     expect(seeded.state.streamingState).toBe(StreamingState.Idle);
@@ -1125,7 +1148,10 @@ describe('turn end with another client attached (#195)', () => {
       state = r.state;
       committed.push(...r.committed);
     }
-    expect(committed).toEqual([{ type: 'gemini', text: `pong${HOOK_TEXT}` }]);
+    expect(committed).toEqual([
+      { type: 'gemini_thought', text: 'The user asked for pong.' },
+      { type: 'gemini', text: `pong${HOOK_TEXT}` },
+    ]);
     state = fold(state, afterTurn(loaded.lastEventId + 1 + live.length)).state;
     expect(state.streamingState).toBe(StreamingState.Idle);
 
@@ -1161,9 +1187,18 @@ describe('turn_error ends the turn', () => {
       [...partialTurn(), turnError(11, PHONE, PROMPT_ID), ...afterTurn(12)],
       SELF,
     );
-    expect(committed.map((i) => i.type)).toEqual(['user', 'gemini', 'error']);
-    expect(committed[1]).toEqual({ type: 'gemini', text: 'pong' });
-    expect((committed[2] as { text: string }).text).toContain('terminated');
+    expect(committed.map((i) => i.type)).toEqual([
+      'user',
+      'gemini_thought',
+      'gemini',
+      'error',
+    ]);
+    expect(committed[1]).toEqual({
+      type: 'gemini_thought',
+      text: 'The user asked for pong.',
+    });
+    expect(committed[2]).toEqual({ type: 'gemini', text: 'pong' });
+    expect((committed[3] as { text: string }).text).toContain('terminated');
     expect(state.streamingState).toBe(StreamingState.Idle);
     expect(pendingHistoryItemsOf(state)).toEqual([]);
     expect(thoughtOf(state)).toBeNull();
@@ -1175,7 +1210,11 @@ describe('turn_error ends the turn', () => {
       [...own, turnError(11, SELF, 'prompt-tab')],
       SELF,
     );
-    expect(committed.map((i) => i.type)).toEqual(['gemini', 'error']);
+    expect(committed.map((i) => i.type)).toEqual([
+      'gemini_thought',
+      'gemini',
+      'error',
+    ]);
     expect(state.streamingState).toBe(StreamingState.Idle);
   });
 
@@ -1230,12 +1269,14 @@ describe('turn_error ends the turn', () => {
     );
     expect(committed.map((i) => i.type)).toEqual([
       'user',
+      'gemini_thought',
       'gemini',
       'error',
       'user',
+      'gemini_thought',
       'gemini',
     ]);
-    expect(committed[1]).toEqual({ type: 'gemini', text: 'pong' });
+    expect(committed[2]).toEqual({ type: 'gemini', text: 'pong' });
     expect(state.streamingState).toBe(StreamingState.Idle);
   });
 });
@@ -1260,13 +1301,18 @@ describe('multi-step tool turns commit sub-turns as they complete (#247)', () =>
         content: { type: 'text', text: '**Step 1** inspect repo' },
       }),
     );
+    expect(pendingHistoryItemsOf(s)).toEqual([
+      { type: 'gemini_thought', text: '**Step 1** inspect repo' },
+    ]);
     apply(
       sessionUpdate({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'Checking files first.' },
       }),
     );
-    expect(committed).toEqual([]);
+    expect(committed).toEqual([
+      { type: 'gemini_thought', text: '**Step 1** inspect repo' },
+    ]);
     expect(pendingHistoryItemsOf(s)).toEqual([
       { type: 'gemini', text: 'Checking files first.' },
     ]);
@@ -1385,8 +1431,11 @@ describe('multi-step tool turns commit sub-turns as they complete (#247)', () =>
       description: 'summarize result',
     });
     expect(pendingToolCallsOf(s)).toEqual([]);
+    expect(pendingHistoryItemsOf(s)).toEqual([
+      { type: 'gemini_thought', text: '**Step 2** summarize result' },
+    ]);
 
-    // Sub-turn 2 streams assistant prose -> only sub-turn 2's prose is in pendingHistoryItems (no completed tools above it)
+    // Sub-turn 2 streams assistant prose -> commits sub-turn 2's thought and leaves only sub-turn 2's prose in pendingHistoryItems
     apply(
       sessionUpdate({
         sessionUpdate: 'agent_message_chunk',
@@ -1400,6 +1449,7 @@ describe('multi-step tool turns commit sub-turns as they complete (#247)', () =>
     // Turn completes -> commits final sub-turn prose
     apply({ type: 'turn_complete', data: {} });
     expect(committed).toEqual([
+      { type: 'gemini_thought', text: '**Step 1** inspect repo' },
       { type: 'gemini', text: 'Checking files first.' },
       {
         type: 'tool_group',
@@ -1411,6 +1461,7 @@ describe('multi-step tool turns commit sub-turns as they complete (#247)', () =>
           }),
         ],
       },
+      { type: 'gemini_thought', text: '**Step 2** summarize result' },
       { type: 'gemini', text: 'The working tree is clean.' },
     ]);
   });
@@ -1857,6 +1908,58 @@ describe('multi-step tool turns commit sub-turns as they complete (#247)', () =>
     });
     expect(pendingPromptRes.committed).toEqual([
       { type: 'user', text: 'follow-up queued prompt' },
+    ]);
+  });
+
+  it('commits gemini_thought blocks on thinking-only turns and direct thought-to-tool transitions (#527)', () => {
+    // 1. Thinking-only turn (e.g. cancelled or completed before prose/tool)
+    let s1 = initialDaemonProjectionState(SELF);
+    s1 = projectDaemonEvent(
+      s1,
+      sessionUpdate({
+        sessionUpdate: 'agent_thought_chunk',
+        content: { type: 'text', text: '**Reasoning only** analyzing options' },
+      }),
+    ).state;
+    expect(pendingHistoryItemsOf(s1)).toEqual([
+      { type: 'gemini_thought', text: '**Reasoning only** analyzing options' },
+    ]);
+    const end1 = projectDaemonEvent(s1, {
+      type: 'prompt_cancelled',
+      data: {},
+    });
+    expect(end1.committed).toEqual([
+      { type: 'gemini_thought', text: '**Reasoning only** analyzing options' },
+    ]);
+    expect(pendingHistoryItemsOf(end1.state)).toEqual([]);
+
+    // 2. Direct thought -> tool_call (no intermediate assistant prose)
+    let s2 = initialDaemonProjectionState(SELF);
+    s2 = projectDaemonEvent(
+      s2,
+      sessionUpdate({
+        sessionUpdate: 'agent_thought_chunk',
+        content: { type: 'text', text: '**Plan** read package.json' },
+      }),
+    ).state;
+    const onTool = projectDaemonEvent(
+      s2,
+      sessionUpdate({
+        sessionUpdate: 'tool_call',
+        toolCallId: 'read_1',
+        title: 'ReadFile: package.json',
+        status: 'in_progress',
+        _meta: { toolName: 'read_file' },
+      }),
+    );
+    expect(onTool.committed).toEqual([
+      { type: 'gemini_thought', text: '**Plan** read package.json' },
+    ]);
+    expect(pendingHistoryItemsOf(onTool.state)).toEqual([
+      {
+        type: 'tool_group',
+        tools: [expect.objectContaining({ callId: 'read_1' })],
+      },
     ]);
   });
 });

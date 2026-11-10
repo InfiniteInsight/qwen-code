@@ -979,13 +979,13 @@ describe('useDaemonStream', () => {
       const { added, addItem } = recording();
       const { result } = renderHook(() => useDaemonStream(driver, addItem));
       await waitFor(() => expect(driver.stats().eventsCalls).toBe(1));
-      expect(added).toHaveLength(2);
+      expect(added).toHaveLength(3);
 
       const next = capturedTurn(loaded.lastEventId + 1, 'phone', 'prompt-2');
       act(() => {
         for (const f of next) driver.push(f);
       });
-      await waitFor(() => expect(added).toHaveLength(4));
+      await waitFor(() => expect(added).toHaveLength(6));
       act(() => {
         for (const f of afterTurn(loaded.lastEventId + 1 + next.length)) {
           driver.push(f);
@@ -996,8 +996,9 @@ describe('useDaemonStream', () => {
         expect(result.current.daemonModelId).toBe('after-live'),
       );
 
-      expect(added.slice(2)).toEqual([
+      expect(added.slice(3)).toEqual([
         { type: 'user', text: PROMPT_TEXT },
+        { type: 'gemini_thought', text: 'The user asked for pong.' },
         { type: 'gemini', text: `pong${HOOK_TEXT}` },
       ]);
       expect(result.current.streamingState).toBe(StreamingState.Idle);
@@ -1049,8 +1050,13 @@ describe('useDaemonStream', () => {
 
     expect(result.current.streamingState).toBe(StreamingState.Idle);
     expect(result.current.pendingHistoryItems).toEqual([]);
-    expect(added.map((i) => i.type)).toEqual(['user', 'gemini', 'error']);
-    expect(added[1]).toEqual({ type: 'gemini', text: 'pong' });
+    expect(added.map((i) => i.type)).toEqual([
+      'user',
+      'gemini_thought',
+      'gemini',
+      'error',
+    ]);
+    expect(added[2]).toEqual({ type: 'gemini', text: 'pong' });
   });
 
   it('aborts the subscription on unmount', async () => {
@@ -1062,7 +1068,7 @@ describe('useDaemonStream', () => {
     await waitFor(() => expect(driver.stats().aborted).toBe(true));
   });
 
-  it('commits completed sub-turns mid-turn and keeps pendingHistoryItems referentially stable across thought tokens (#247)', async () => {
+  it('commits completed sub-turns mid-turn, shows live gemini_thought, and keeps pendingHistoryItems referentially stable during tool execution (#247, #527)', async () => {
     const driver = makeFakeDriver({ clientId: 'me' });
     const added: HistoryItemWithoutId[] = [];
     const addItem = vi.fn((item: HistoryItemWithoutId) => {
@@ -1090,7 +1096,7 @@ describe('useDaemonStream', () => {
     );
     const pendingBeforeThought = result.current.pendingHistoryItems;
 
-    // Streaming thought tokens must not rebuild pendingHistoryItems.
+    // Streaming thought tokens commit pre-thought text and render live as `gemini_thought`.
     act(() => {
       driver.push(
         su(
@@ -1107,8 +1113,11 @@ describe('useDaemonStream', () => {
       expect(result.current.thought?.subject).toBe('Thinking'),
     );
     expect(added).toEqual([{ type: 'gemini', text: 'First step.' }]);
+    expect(result.current.pendingHistoryItems).toEqual([
+      { type: 'gemini_thought', text: '**Thinking** token 1' },
+    ]);
 
-    // Now with an active tool in pendingHistoryItems, further thought tokens keep pendingHistoryItems referentially identical:
+    // Now when a tool starts, the thought commits and with an active tool in pendingHistoryItems, further thought tokens keep pendingHistoryItems referentially identical:
     act(() => {
       driver.push(
         su(
@@ -1124,8 +1133,14 @@ describe('useDaemonStream', () => {
       );
     });
     await waitFor(() =>
-      expect(result.current.pendingHistoryItems).toHaveLength(1),
+      expect(result.current.pendingHistoryItems).toEqual([
+        expect.objectContaining({ type: 'tool_group' }),
+      ]),
     );
+    expect(added).toEqual([
+      { type: 'gemini', text: 'First step.' },
+      { type: 'gemini_thought', text: '**Thinking** token 1' },
+    ]);
     const pendingDuringTool = result.current.pendingHistoryItems;
     expect(pendingDuringTool).not.toBe(pendingBeforeThought);
 

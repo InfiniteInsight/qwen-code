@@ -412,6 +412,9 @@ export function useDaemonSubagentSync(
         }
 
         if (task.status !== entry.status) {
+          if (!task.messages?.length) {
+            flushStreamingBuffersToMessages(entry, Date.now());
+          }
           if (task.status === 'completed') {
             registry.complete(task.id, task.latestText ?? '');
           } else if (task.status === 'failed') {
@@ -559,6 +562,9 @@ export function useDaemonSubagentSync(
         if (kind === 'agent_thought_chunk') {
           const delta = extractChunkText(update.content);
           if (delta) {
+            if (entry.liveText?.trim()) {
+              flushStreamingBuffersToMessages(entry, Date.now());
+            }
             entry.liveThought = (entry.liveThought ?? '') + delta;
             entry.latestThought =
               entry.liveThought.trim() || entry.latestThought;
@@ -570,6 +576,20 @@ export function useDaemonSubagentSync(
         if (kind === 'agent_message_chunk') {
           const delta = extractChunkText(update.content);
           if (delta) {
+            const thought = entry.liveThought?.trim();
+            if (thought) {
+              entry.messages = [
+                ...(entry.messages ?? []),
+                {
+                  role: 'assistant',
+                  content: thought,
+                  timestamp: Date.now(),
+                  thought: true,
+                },
+              ];
+              entry.latestThought = thought;
+              entry.liveThought = undefined;
+            }
             entry.liveText = (entry.liveText ?? '') + delta;
             entry.latestText = entry.liveText.trim() || entry.latestText;
             entry.activityPhase = 'responding';
@@ -691,6 +711,9 @@ export function useDaemonSubagentSync(
           update.status === 'failed' ||
           update.status === 'cancelled'
         ) {
+          if (target) {
+            flushStreamingBuffersToMessages(target, Date.now());
+          }
           if (
             target &&
             target.id.startsWith(PROVISIONAL_PREFIX) &&
