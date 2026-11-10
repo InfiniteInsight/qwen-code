@@ -8496,6 +8496,41 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  resolveSubagentSession(
+    sessionId: string,
+    subagentRef: string,
+    clientId?: string,
+  ): Promise<DaemonSubagentSessionResolution> {
+    return this.client.resolveSubagentSession(sessionId, subagentRef, clientId);
+  }
+
+  cancelSubagentSession(
+    sessionId: string,
+    subagentRef: string,
+    clientId?: string,
+  ): Promise<{ cancelled: boolean }> {
+    return this.client.cancelSubagentSession(sessionId, subagentRef, clientId);
+  }
+
+  messageSubagentSession(
+    sessionId: string,
+    subagentRef: string,
+    message: string,
+    clientId?: string,
+  ): Promise<{
+    delivered: boolean;
+    action?: 'queued' | 'resumed' | 'continued' | 'revived';
+    status?: string;
+    reason?: string;
+  }> {
+    return this.client.messageSubagentSession(
+      sessionId,
+      subagentRef,
+      message,
+      clientId,
+    );
+  }
+
   /** Export an active persisted session from this registered workspace. */
   exportSession(
     sessionId: string,
