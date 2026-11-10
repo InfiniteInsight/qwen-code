@@ -4370,7 +4370,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     }
   });
 
-  it('degrades a attachmentId reused across drained messages after its first use', async () => {
+  it('deduplicates an attachmentId reused across drained messages without degrading after its first use', async () => {
     const publish = vi.fn().mockReturnValue(true);
     const media = new SessionAttachmentStore();
     const read = vi.spyOn(fsp, 'readFile');
@@ -4407,33 +4407,19 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
             ],
           },
           {
-            content: [
-              {
-                type: 'text',
-                text: 'b\n[Attachment is no longer available]',
-              },
-            ],
+            content: [{ type: 'text', text: 'b' }],
           },
           {
-            content: [
-              {
-                type: 'text',
-                text: 'c\n[Attachment is no longer available]',
-              },
-            ],
+            content: [{ type: 'text', text: 'c' }],
           },
           {
-            content: [
-              {
-                type: 'text',
-                text: 'd\n[Attachment is no longer available]',
-              },
-            ],
+            content: [{ type: 'text', text: 'd' }],
           },
         ],
       });
-      // Cross-message reuse is unsupported: only the first occurrence is
-      // serialized, so one stored blob cannot amplify the drain response.
+      // Cross-message reuse is deduplicated without adding a false degradation
+      // marker: only the first occurrence is serialized, so one stored blob
+      // cannot amplify the drain response.
       expect(read).toHaveBeenCalledTimes(1);
     } finally {
       read.mockRestore();

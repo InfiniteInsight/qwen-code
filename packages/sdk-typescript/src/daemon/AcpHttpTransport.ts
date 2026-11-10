@@ -637,13 +637,14 @@ export class AcpHttpTransport implements DaemonTransport {
               continue;
             }
 
-            // (3) Notification → DaemonEvent, stamped with the real bus cursor.
+            // (3) Notification -> DaemonEvent, stamped with the real bus cursor.
             if (typeof method === 'string' && !hasId) {
               const ev = denormalizeAcpNotification(
                 msg as unknown as JsonRpcNotification,
+                busId,
               );
               if (ev) {
-                ev.id = busId; // authoritative cursor (or undefined → ignored)
+                ev.id = busId; // authoritative cursor (or undefined -> ignored)
                 yield ev;
               }
               continue;

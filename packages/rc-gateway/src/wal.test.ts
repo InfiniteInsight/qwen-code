@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   mkdtempSync,
+  mkdirSync,
   writeFileSync,
   readFileSync,
   existsSync,
@@ -454,6 +455,46 @@ describe('SessionWal', () => {
       expect(
         readdirSync(join(dir, 'wal')).filter((n) => n.endsWith('.compact')),
       ).toEqual([]);
+      wal.close();
+    });
+
+    it('compacts dead head bytes in the active segment even when rotated segments (.log.1) exist (#519)', () => {
+      // Seed rotated segment (.log.1) with 5 frames.
+      const log1Path = join(dir, 'wal', 'sess-1.log.1');
+      mkdirSync(join(dir, 'wal'), { recursive: true });
+      const log1Frames: Buffer[] = [];
+      for (let id = 1; id <= 5; id++) {
+        log1Frames.push(encodeFrame(makeFrame(id)));
+      }
+      writeFileSync(log1Path, Buffer.concat(log1Frames));
+
+      // Seed active segment (.log) with 10 frames (ids 6..15).
+      const logFrames: Buffer[] = [];
+      for (let id = 6; id <= 15; id++) {
+        logFrames.push(encodeFrame(makeFrame(id)));
+      }
+      writeFileSync(activePath(), Buffer.concat(logFrames));
+
+      // Open with maxEvents: 8 and compactAfterBytes: 50.
+      // Reopening recovers the frames: .log.1 has 5, .log has 10 (total 15).
+      // applyBound() with maxEvents 8 drops 7 frames (all 5 from .log.1 + 2 from .log: ids 6 and 7).
+      // deadBytes charges the 2 dropped frames from .log (~132 B >= 50 B).
+      // activeFrameCount becomes 8 (ids 8..15).
+      const wal = new SessionWal({
+        dir,
+        sessionId: 'sess-1',
+        maxEvents: 8,
+        compactAfterBytes: 50,
+      });
+
+      // Append one frame (id 16) to trigger enforceBounds() and reclaimDeadHead().
+      wal.append(makeFrame(16));
+
+      // Active segment on disk should now only have the retained active frames [9..16].
+      // Without the fix, Math.min(this.frames.length, decoded.length) prevented
+      // compaction whenever this.frames.length >= decoded.length.
+      const onDisk = [...decodeSegment(activePath())].map((f) => f.id);
+      expect(onDisk).toEqual([9, 10, 11, 12, 13, 14, 15, 16]);
       wal.close();
     });
   });

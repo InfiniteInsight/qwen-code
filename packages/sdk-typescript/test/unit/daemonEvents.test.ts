@@ -2361,6 +2361,39 @@ describe('PR 21 — auth device-flow events', () => {
       expect(next.lastApprovalModeChange?.originatorClientId).toBe('client-A');
     });
 
+    it('approval_mode_changed: ignores foreign sessionId for session approvalMode and planExecutionMode (#513)', () => {
+      let state = createDaemonSessionViewState({ sessionId: 'sess-b' });
+      state = reduceDaemonSessionEvent(state, {
+        id: 1,
+        v: 1,
+        type: 'approval_mode_changed',
+        data: {
+          sessionId: 'sess-b',
+          previous: 'default',
+          next: 'plan',
+          planExecutionMode: 'yolo',
+          persisted: false,
+        },
+      });
+      expect(state.approvalMode).toBe('plan');
+      expect(state.planExecutionMode).toBe('yolo');
+
+      state = reduceDaemonSessionEvent(state, {
+        id: 2,
+        v: 1,
+        type: 'approval_mode_changed',
+        data: {
+          sessionId: 'sess-a',
+          previous: 'default',
+          next: 'auto-edit',
+          persisted: true,
+        },
+      });
+      expect(state.approvalMode).toBe('plan');
+      expect(state.planExecutionMode).toBe('yolo');
+      expect(state.approvalModeChangedCount).toBe(2);
+    });
+
     it('approval_mode_changed: malformed payload routes to unrecognized counter', () => {
       const malformed: DaemonEvent = {
         id: 6,

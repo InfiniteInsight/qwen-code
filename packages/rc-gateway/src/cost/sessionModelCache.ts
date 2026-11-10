@@ -87,6 +87,7 @@ export class SessionModelCache {
   private readonly deps: SessionModelCacheDeps;
   private readonly known = new Map<string, string>();
   private readonly inFlight = new Map<string, Promise<string | null>>();
+  private readonly activeSeeds = new Map<string, number>();
   private readonly failedAt = new Map<string, number>();
   /** Bumped by set/forget so a seed that lost the race does not overwrite. */
   private readonly generation = new Map<string, number>();
@@ -112,10 +113,9 @@ export class SessionModelCache {
     this.bump(sessionId);
     this.known.delete(sessionId);
     this.failedAt.delete(sessionId);
-    if (!this.inFlight.has(sessionId)) {
+    this.inFlight.delete(sessionId);
+    if (!this.activeSeeds.has(sessionId)) {
       this.generation.delete(sessionId);
-    } else {
-      this.inFlight.delete(sessionId);
     }
   }
 
@@ -134,6 +134,7 @@ export class SessionModelCache {
       return Promise.resolve(null);
     }
     const startedGen = this.generation.get(sessionId) ?? 0;
+    this.activeSeeds.set(sessionId, (this.activeSeeds.get(sessionId) ?? 0) + 1);
     const p = this.seed(sessionId)
       .then((id) => {
         if ((this.generation.get(sessionId) ?? 0) !== startedGen) {
@@ -153,8 +154,14 @@ export class SessionModelCache {
         if (this.inFlight.get(sessionId) === p) {
           this.inFlight.delete(sessionId);
         }
-        if (!this.known.has(sessionId) && !this.inFlight.has(sessionId)) {
-          this.generation.delete(sessionId);
+        const remaining = (this.activeSeeds.get(sessionId) ?? 1) - 1;
+        if (remaining <= 0) {
+          this.activeSeeds.delete(sessionId);
+          if (!this.known.has(sessionId) && !this.inFlight.has(sessionId)) {
+            this.generation.delete(sessionId);
+          }
+        } else {
+          this.activeSeeds.set(sessionId, remaining);
         }
       });
     this.inFlight.set(sessionId, p);

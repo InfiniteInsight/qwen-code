@@ -976,4 +976,87 @@ describe('autoReopenEligible', () => {
       ),
     ).toBe(false);
   });
+
+  it('prevents duplicate terminal windows when sweep() and POST /reopen race on the same tabId (#505)', async () => {
+    let releaseEndpoint: (() => void) | undefined;
+    const endpointGate = new Promise<void>((resolve) => {
+      releaseEndpoint = resolve;
+    });
+    const g = await boot({
+      autoReopen: true,
+      endpointFor: async () => {
+        await endpointGate;
+        return {
+          ok: true,
+          endpoint: {
+            url: 'http://127.0.0.1:4199',
+            token: 'daemon-secret',
+            workspaceCwd: '/srv/w',
+          },
+        };
+      },
+    });
+    const { crashed } = await seed(g);
+    await g.poll();
+
+    // Start manual POST /reopen and hold it at endpointFor
+    const manualPromise = send(g.url, `/rc/host/tabs/${crashed.tabId}/reopen`, {
+      token: g.owner,
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // A second concurrent POST /reopen for the same tabId is refused 409 reopen_in_progress
+    const duplicateManual = await send(
+      g.url,
+      `/rc/host/tabs/${crashed.tabId}/reopen`,
+      { token: g.owner },
+    );
+    expect([duplicateManual.status, duplicateManual.body.code]).toEqual([
+      409,
+      'reopen_in_progress',
+    ]);
+
+    // And a concurrent sweep() skips the in-flight tab without enqueuing a second window
+    await g.sweep!();
+
+    releaseEndpoint!();
+    const manualRes = await manualPromise;
+    expect(manualRes.status).toBe(202);
+    expect(await g.requests.readAll()).toHaveLength(1);
+  });
+
+  it('maps WorkspacePoolFullError in sessionEndpointResolver to 503 workspace_pool_full (#505)', async () => {
+    const resolverFromLookup = sessionEndpointResolver({
+      daemonEndpointForSession: () => {
+        throw new WorkspacePoolFullError(4);
+      },
+      resumeSession: async () => ({
+        sessionId: S1,
+        workspaceCwd: '/srv/w',
+        attached: true,
+        state: {},
+      }),
+    });
+    const out1 = await resolverFromLookup(S1, '/srv/w');
+    expect(out1).toMatchObject({
+      ok: false,
+      status: 503,
+      code: 'workspace_pool_full',
+    });
+
+    const resolverFromResume = sessionEndpointResolver({
+      daemonEndpointForSession: () => {
+        throw new UnknownSessionError(S1);
+      },
+      resumeSession: async () => {
+        throw new WorkspacePoolFullError(4);
+      },
+    });
+    const out2 = await resolverFromResume(S1, '/srv/w');
+    expect(out2).toMatchObject({
+      ok: false,
+      status: 503,
+      code: 'workspace_pool_full',
+    });
+  });
 });

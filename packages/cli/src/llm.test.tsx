@@ -3047,6 +3047,39 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
       true,
     );
   });
+
+  it('bypasses OpenTUI and routes --attach-daemon to startInteractiveUI (#509)', async () => {
+    await interactiveMainSetup();
+    const { parseArguments } = await import('./config/config.js');
+    const baseArgs = await parseArguments();
+    vi.mocked(parseArguments).mockResolvedValueOnce({
+      ...baseArgs,
+      attachDaemon: 'http://127.0.0.1:7777',
+      daemonToken: 'secret-token',
+      attachSession: 'sess-123',
+    });
+    selectOpentui(true);
+    const startInteractiveUiModule = await import('./ui/startInteractiveUI.js');
+    const startInteractiveSpy = vi
+      .spyOn(startInteractiveUiModule, 'startInteractiveUI')
+      .mockResolvedValueOnce(undefined);
+
+    await main();
+
+    expect(mockStartOpenTuiUI).not.toHaveBeenCalled();
+    expect(startInteractiveSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.any(String),
+      expect.anything(),
+      expect.objectContaining({
+        attachDaemonUrl: 'http://127.0.0.1:7777',
+        attachDaemonToken: 'secret-token',
+        attachDaemonSession: 'sess-123',
+      }),
+    );
+  });
 });
 
 describe('llm.tsx main function kitty protocol', () => {

@@ -468,13 +468,25 @@ export function updateConnectionFromDaemonEvent(
     case 'approval_mode_changed': {
       const data = getRecord(event.data);
       const mode = getString(data, 'next') ?? getString(data, 'mode');
+      const eventSessionId = getString(data, 'sessionId');
       if (mode) {
-        setConnection((current) => ({
-          ...current,
-          currentMode: mode,
-          planExecutionMode:
-            mode === 'plan' ? getString(data, 'planExecutionMode') : undefined,
-        }));
+        setConnection((current) => {
+          if (
+            eventSessionId &&
+            current.sessionId &&
+            eventSessionId !== current.sessionId
+          ) {
+            return current;
+          }
+          return {
+            ...current,
+            currentMode: mode,
+            planExecutionMode:
+              mode === 'plan'
+                ? getString(data, 'planExecutionMode')
+                : undefined,
+          };
+        });
       }
       break;
     }

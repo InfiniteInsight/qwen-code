@@ -1554,6 +1554,39 @@ describe('Plan connection state', () => {
     },
   );
 
+  it('ignores approval_mode_changed from a peer session (#513)', () => {
+    const initial = applyEvent(
+      { status: 'connected', sessionId: 'sess-b' },
+      {
+        id: 1,
+        v: 1,
+        type: 'approval_mode_changed',
+        data: {
+          sessionId: 'sess-b',
+          next: 'plan',
+          planExecutionMode: 'yolo',
+        },
+      },
+    );
+    expect(initial).toMatchObject({
+      sessionId: 'sess-b',
+      currentMode: 'plan',
+      planExecutionMode: 'yolo',
+    });
+
+    const afterForeignBroadcast = applyEvent(initial, {
+      id: 2,
+      v: 1,
+      type: 'approval_mode_changed',
+      data: {
+        sessionId: 'sess-a',
+        next: 'auto-edit',
+        persisted: true,
+      },
+    });
+    expect(afterForeignBroadcast).toBe(initial);
+  });
+
   it('reads execution permission only while the context is in Plan', () => {
     const context = {
       v: 1 as const,

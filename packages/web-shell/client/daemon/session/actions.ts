@@ -1361,6 +1361,7 @@ export function createDaemonSessionActions({
           promptRequest['retry'] = true;
         }
         let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
+        const previousClientId = session.clientId;
         try {
           accepted = await session.submitPrompt(
             promptRequest as Parameters<typeof session.submitPrompt>[0],
@@ -1392,8 +1393,11 @@ export function createDaemonSessionActions({
           }
           throw error;
         } finally {
+          const clientId = session.clientId;
+          if (clientId && clientId !== previousClientId) {
+            persistStableClientId(clientId, session.sessionId);
+          }
           setConnection((current) => {
-            const clientId = session.clientId;
             if (
               sessionRef.current !== session ||
               current.sessionId !== session.sessionId ||
@@ -1549,7 +1553,29 @@ export function createDaemonSessionActions({
           : current,
       );
       try {
-        const accepted = await session.continueSession(ctrl.signal, options);
+        const previousClientId = session.clientId;
+        let accepted: Awaited<
+          ReturnType<DaemonSessionClient['continueSession']>
+        >;
+        try {
+          accepted = await session.continueSession(ctrl.signal, options);
+        } finally {
+          const clientId = session.clientId;
+          if (clientId && clientId !== previousClientId) {
+            persistStableClientId(clientId, session.sessionId);
+          }
+          setConnection((current) => {
+            if (
+              sessionRef.current !== session ||
+              current.sessionId !== session.sessionId ||
+              !clientId ||
+              current.clientId === clientId
+            ) {
+              return current;
+            }
+            return { ...current, clientId };
+          });
+        }
         admitted = accepted.accepted;
         refreshRecovery = !admitted;
         if (!accepted.accepted || !isCurrentConversation()) return;
@@ -1721,6 +1747,7 @@ export function createDaemonSessionActions({
       }
       options?.onAdmissionStarted?.();
       let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
+      const previousClientId = session.clientId;
       try {
         const request = promptRequest as Parameters<
           typeof session.submitPrompt
@@ -1749,6 +1776,22 @@ export function createDaemonSessionActions({
           );
         }
         throw error;
+      } finally {
+        const clientId = session.clientId;
+        if (clientId && clientId !== previousClientId) {
+          persistStableClientId(clientId, session.sessionId);
+        }
+        setConnection((current) => {
+          if (
+            sessionRef.current !== session ||
+            current.sessionId !== session.sessionId ||
+            !clientId ||
+            current.clientId === clientId
+          ) {
+            return current;
+          }
+          return { ...current, clientId };
+        });
       }
       if (
         sessionRef.current === session &&
@@ -1770,6 +1813,9 @@ export function createDaemonSessionActions({
         label: text,
         ...(optimisticBlockId ? { blockId: optimisticBlockId } : {}),
       });
+      if (!options?.signal?.aborted) {
+        restartEventStream(session.sessionId);
+      }
       if (options?.signal?.aborted) {
         try {
           const removal = await session.removePendingPrompt(accepted.promptId);

@@ -3900,6 +3900,10 @@ export const AppContainer = (props: AppContainerProps) => {
     settings.merged.ui?.enableFollowupSuggestions !== false;
 
   useEffect(() => {
+    // Under `--attach-daemon` the local Config has no initialized LLM client;
+    // follow-up suggestions and speculation are daemon-side concerns.
+    if (daemonDriver) return;
+
     // Clear suggestion when feature is disabled at runtime
     if (!followupSuggestionsEnabled) {
       suggestionAbortRef.current?.abort();
@@ -4016,6 +4020,7 @@ export const AppContainer = (props: AppContainerProps) => {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- guards may change independently
   }, [
+    daemonDriver,
     streamingState,
     followupSuggestionsEnabled,
     shellConfirmationRequest,

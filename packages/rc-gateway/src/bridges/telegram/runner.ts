@@ -191,6 +191,7 @@ export class TelegramBridge {
       const res = await this.cfg.botApi.getUpdates(offset, timeout, signal);
       if (!res.ok) {
         if (signal.aborted) break; // the poll was cut short by shutdown
+        this.reconcileSubscriptions(signal);
         // A revoked token (401), a second poller or webhook (409), a 429 or a
         // network outage answers at once, so without a wait this loop spun
         // hot (#168). Wait out a 429's retry_after when it is longer.
@@ -236,11 +237,33 @@ export class TelegramBridge {
     for (const sessionId of bound) {
       if (this.subscribed.has(sessionId)) continue;
       this.subscribed.add(sessionId);
-      const stream = this.cursors.signalFor(sessionId, signal);
-      void this.cfg.client
-        .subscribeEvents(
+      void this.subscriptionLoop(sessionId, signal);
+    }
+  }
+
+  private async subscriptionLoop(
+    sessionId: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const sleep = this.cfg.sleep ?? defaultSleep;
+    let backoff = POLL_BACKOFF_INITIAL_MS;
+    const stream = this.cursors.signalFor(sessionId, signal);
+    try {
+      do {
+        await this.cfg.client.subscribeEvents(
           sessionId,
           (ev) => {
+            if (ev.type === 'replay_truncated') {
+              const earliest = (
+                ev.data as { earliestAvailableId?: unknown } | undefined
+              )?.earliestAvailableId;
+              this.cursors.resetOnTruncation(
+                sessionId,
+                typeof earliest === 'number' ? earliest : undefined,
+                stream,
+              );
+              return;
+            }
             if (typeof ev.id === 'number') {
               // Persist the cursor so restarts resume from here (not for a
               // stream whose session was unbound meanwhile).
@@ -250,8 +273,33 @@ export class TelegramBridge {
           },
           stream,
           this.cursors.lastEventId.get(sessionId),
-        )
-        .finally(() => this.subscribed.delete(sessionId));
+          (earliestAvailableId) => {
+            this.cursors.resetOnTruncation(
+              sessionId,
+              earliestAvailableId,
+              stream,
+            );
+          },
+        );
+        if (stream.aborted) break;
+        await sleep(jitter(backoff), stream);
+        backoff = Math.min(backoff * 2, POLL_BACKOFF_MAX_MS);
+        if (stream.aborted) break;
+        await new Promise<void>((resolve) => {
+          const t = setTimeout(resolve, 0);
+          t.unref?.();
+          stream.addEventListener(
+            'abort',
+            () => {
+              clearTimeout(t);
+              resolve();
+            },
+            { once: true },
+          );
+        });
+      } while (!stream.aborted);
+    } finally {
+      this.subscribed.delete(sessionId);
     }
   }
 

@@ -5247,6 +5247,24 @@ describe('daemon UI reducer state machine (PR-E)', () => {
       { now: 3 },
     );
     expect(selectApprovalMode(state)).toBe('yolo');
+
+    // Foreign session broadcast must not overwrite this session's approvalMode (#513).
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 3,
+        v: 1,
+        type: 'approval_mode_changed',
+        data: {
+          sessionId: 'other-session',
+          previous: 'default',
+          next: 'auto-edit',
+          persisted: true,
+        },
+      } as never),
+      { now: 4 },
+    );
+    expect(selectApprovalMode(state)).toBe('yolo');
   });
 
   it('propagates cancellation to in-flight tool blocks on assistant.done with reason=cancelled', () => {

@@ -485,6 +485,17 @@ export class MatrixBridge {
         await this.cfg.client.subscribeEvents(
           sessionId,
           (ev) => {
+            if (ev.type === 'replay_truncated') {
+              const earliest = (
+                ev.data as { earliestAvailableId?: unknown } | undefined
+              )?.earliestAvailableId;
+              this.cursors.resetOnTruncation(
+                sessionId,
+                typeof earliest === 'number' ? earliest : undefined,
+                stream,
+              );
+              return;
+            }
             if (typeof ev.id === 'number') {
               // Persist the cursor so restarts resume from here (not for a
               // stream whose session was unbound meanwhile).
@@ -494,6 +505,13 @@ export class MatrixBridge {
           },
           stream,
           this.cursors.lastEventId.get(sessionId),
+          (earliestAvailableId) => {
+            this.cursors.resetOnTruncation(
+              sessionId,
+              earliestAvailableId,
+              stream,
+            );
+          },
         );
         if (stream.aborted) break;
         await this.backoff(stream, backoff);

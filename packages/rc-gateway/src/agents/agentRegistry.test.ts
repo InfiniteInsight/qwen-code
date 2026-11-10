@@ -142,4 +142,29 @@ describe('AgentRegistry', () => {
     });
     expect(reg.findBySessionId('s1')?.agentId).toBe(fresh.agentId);
   });
+
+  it('serializes concurrent register and setStatus writes atomically without tearing or losing records (#506)', async () => {
+    const path = await tmpStorePath();
+    const reg = await AgentRegistry.open(path);
+    const created = await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        reg.register({
+          sessionId: `s-${i}`,
+          parentSessionId: null,
+          agentType: 'general',
+          task: `task-${i}-${'x'.repeat(200)}`,
+          spawnedByTokenId: 'tkn1',
+        }),
+      ),
+    );
+    await Promise.all(
+      created.map((rec, i) =>
+        reg.setStatus(rec.agentId, i % 2 === 0 ? 'completed' : 'failed'),
+      ),
+    );
+    const reopened = await AgentRegistry.open(path);
+    expect(reopened.list()).toHaveLength(20);
+    expect(reopened.list({ status: 'completed' })).toHaveLength(10);
+    expect(reopened.list({ status: 'failed' })).toHaveLength(10);
+  });
 });

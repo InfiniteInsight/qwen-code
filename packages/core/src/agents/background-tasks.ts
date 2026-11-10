@@ -483,6 +483,7 @@ export interface BackgroundTaskRegisterOptions {
   suppressRegisterCallback?: boolean;
   preserveNotificationState?: boolean;
   slotReservation?: BackgroundSlotReservation;
+  bypassConcurrencyCheck?: boolean;
 }
 
 export interface NotificationMeta {
@@ -899,7 +900,11 @@ export class BackgroundTaskRegistry {
     const existing = this.agents.get(registration.agentId);
     const wasRunningBackground =
       existing?.isBackgrounded === true && existing.status === 'running';
-    if (registration.status === 'running' && registration.isBackgrounded) {
+    if (
+      registration.status === 'running' &&
+      registration.isBackgrounded &&
+      !options.bypassConcurrencyCheck
+    ) {
       const isReplacingRunning = existing?.status === 'running';
       if (!isReplacingRunning) {
         if (options.slotReservation) {
@@ -1133,6 +1138,29 @@ export class BackgroundTaskRegistry {
     this.emitStatusChange(entry);
     debugLogger.info(`Unregistered foreground agent: ${agentId}`);
     this.drainQueues();
+  }
+
+  /**
+   * Remove an entry by id and notify status-change subscribers. Used when
+   * reconciling a remote daemon snapshot where a provisional or evicted task
+   * should be dropped from the local mirror.
+   */
+  removeEntry(agentId: string): void {
+    const entry = this.agents.get(agentId);
+    if (!entry) return;
+    this.deleteAgent(agentId);
+    this.emitStatusChange(entry);
+    this.drainQueues();
+  }
+
+  /**
+   * Notify activity-change subscribers after updating an entry's live stream
+   * fields (`liveText`, `liveThought`, `activeTool`, `messages`) in place.
+   */
+  notifyActivityChange(agentId: string): void {
+    const entry = this.agents.get(agentId);
+    if (!entry) return;
+    this.emitActivityChange(entry);
   }
 
   // See complete() for the cancelled → terminal path rationale.

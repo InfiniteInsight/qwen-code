@@ -17530,6 +17530,96 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('rejects sessionForkAgent and sessionShellHistory with session_busy when a turn is active, and records injected history turns when idle (#512)', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const recordInjectedHistoryTurn = vi.fn().mockResolvedValue(undefined);
+    let observedSessionIdInExecute: string | undefined;
+    const execute = vi.fn().mockImplementation(async () => {
+      observedSessionIdInExecute = sessionIdContext.getStore();
+      return { llmContent: 'ok' };
+    });
+    const build = vi.fn().mockReturnValue({ execute });
+    const addHistory = vi.fn();
+    Object.assign(innerConfig, {
+      getLlmClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        initialize: vi.fn().mockResolvedValue(undefined),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+        getHistoryShallow: vi
+          .fn()
+          .mockReturnValue([{ role: 'user', parts: [{ text: 'before' }] }]),
+        addHistory,
+      }),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getTool: vi.fn(() => ({ build })),
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      extMethod: vi.fn(),
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    } as unknown as AgentSideConnectionLike) as AgentLike;
+    await agent.initialize({ clientCapabilities: {} });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    Object.assign(lastSessionMock!, {
+      recordInjectedHistoryTurn,
+    });
+    lastSessionMock!.isTurnIdle.mockReturnValue(false);
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionForkAgent, {
+        sessionId,
+        directive: 'fork while busy',
+      }),
+    ).rejects.toMatchObject({
+      code: -32602,
+      data: { errorKind: 'session_busy' },
+    });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionShellHistory, {
+        sessionId,
+        command: 'ls',
+        output: 'file.txt',
+      }),
+    ).rejects.toMatchObject({
+      code: -32602,
+      data: { errorKind: 'session_busy' },
+    });
+    expect(addHistory).not.toHaveBeenCalled();
+
+    lastSessionMock!.isTurnIdle.mockReturnValue(true);
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionForkAgent, {
+        sessionId,
+        directive: 'fork when idle',
+      }),
+    ).resolves.toMatchObject({ launched: true });
+    expect(observedSessionIdInExecute).toBe(sessionId);
+    expect(recordInjectedHistoryTurn).toHaveBeenCalledTimes(1);
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionShellHistory, {
+        sessionId,
+        command: 'echo hi',
+        output: 'hi',
+      }),
+    ).resolves.toMatchObject({ injected: true });
+    expect(recordInjectedHistoryTurn).toHaveBeenCalledTimes(2);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('allows cancelling paused agent tasks', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);

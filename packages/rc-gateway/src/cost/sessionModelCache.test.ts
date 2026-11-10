@@ -174,4 +174,30 @@ describe('SessionModelCache', () => {
     expect(cache.get('b')).toBe('ctx-model');
     expect(cache.get('c')).toBe('ctx-model');
   });
+
+  it('cleans up generation map entries on forget both when idle and after in-flight seeds settle (#507)', async () => {
+    let release!: (v: string | null) => void;
+    const { cache } = make({
+      ctx: () => new Promise<string | null>((r) => (release = r)),
+      tr: async () => null,
+    });
+    const generationMap = (
+      cache as unknown as { generation: Map<string, number> }
+    ).generation;
+
+    // 1. Idle forget deletes generation immediately
+    cache.set('idle-s', 'm1');
+    expect(generationMap.has('idle-s')).toBe(true);
+    cache.forget('idle-s');
+    expect(generationMap.has('idle-s')).toBe(false);
+
+    // 2. Forget while ensure() is in-flight keeps generation until seed settles, then deletes it
+    const p = cache.ensure('inflight-s');
+    cache.forget('inflight-s');
+    expect(generationMap.has('inflight-s')).toBe(true);
+    release('stale-model');
+    expect(await p).toBeNull();
+    expect(cache.get('inflight-s')).toBeUndefined();
+    expect(generationMap.has('inflight-s')).toBe(false);
+  });
 });

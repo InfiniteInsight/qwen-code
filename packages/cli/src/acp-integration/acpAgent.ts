@@ -13413,70 +13413,135 @@ class QwenAgent implements Agent {
         }
 
         const session = this.sessionOrThrow(sessionId);
-        const config = session.getConfig();
-        if (!config.getModel()) {
-          throw RequestError.invalidParams(undefined, 'No model configured.');
-        }
-
-        let hasHistory = false;
-        try {
-          hasHistory =
-            (config.getLlmClient().getHistoryShallow() ?? []).length > 0;
-        } catch (error) {
-          debugLogger.debug('Failed to read history before /fork:', error);
-        }
-        if (!hasHistory) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Cannot fork before the first conversation turn.',
+        if (typeof session.isTurnIdle === 'function' && !session.isTurnIdle()) {
+          throw new RequestError(
+            -32602,
+            'Cannot fork while a prompt is running.',
+            { errorKind: 'session_busy' },
           );
         }
+        return await this.runExclusiveHistoryMutation(sessionId, async () => {
+          if (
+            typeof session.isTurnIdle === 'function' &&
+            !session.isTurnIdle()
+          ) {
+            throw new RequestError(
+              -32602,
+              'Cannot fork while a prompt is running.',
+              { errorKind: 'session_busy' },
+            );
+          }
+          await session.assertCanStartTurn?.();
+          const releaseHistoryMutation =
+            session.beginHistoryMutation?.() ?? (() => {});
+          try {
+            const config = session.getConfig();
+            if (!config.getModel()) {
+              throw RequestError.invalidParams(
+                undefined,
+                'No model configured.',
+              );
+            }
 
-        const agentTool = config.getToolRegistry().getTool(ToolNames.AGENT);
-        if (!agentTool) {
-          throw RequestError.invalidParams(
-            undefined,
-            'The agent tool is unavailable; cannot fork.',
-          );
-        }
+            let hasHistory = false;
+            try {
+              hasHistory =
+                (config.getLlmClient().getHistoryShallow() ?? []).length > 0;
+            } catch (error) {
+              debugLogger.debug('Failed to read history before /fork:', error);
+            }
+            if (!hasHistory) {
+              throw RequestError.invalidParams(
+                undefined,
+                'Cannot fork before the first conversation turn.',
+              );
+            }
 
-        const description = deriveForkDescription(trimmed);
-        const agentParams: AgentParams = {
-          description,
-          prompt: trimmed,
-          subagent_type: FORK_SUBAGENT_TYPE,
-          run_in_background: true,
-        };
-        const result = await agentTool
-          .build(agentParams)
-          .execute(new AbortController().signal);
-        if (hasFailedDisplayStatus(result?.returnDisplay)) {
-          const reason =
-            typeof result.llmContent === 'string' && result.llmContent.trim()
-              ? result.llmContent.trim()
-              : 'the background agent could not be started.';
-          throw RequestError.invalidParams(
-            undefined,
-            `Failed to launch fork: ${reason}`,
-          );
-        }
+            const agentTool = config.getToolRegistry().getTool(ToolNames.AGENT);
+            if (!agentTool) {
+              throw RequestError.invalidParams(
+                undefined,
+                'The agent tool is unavailable; cannot fork.',
+              );
+            }
 
-        try {
-          config.getLlmClient().addHistory({
-            role: 'user',
-            parts: [
-              {
-                text: `User launched a background fork via /fork. Directive (truncated): ${truncateForkDirectiveForHistory(
-                  trimmed,
-                )}`,
-              },
-            ],
-          });
-        } catch (error) {
-          debugLogger.debug('Failed to record fork event in history:', error);
-        }
+            const description = deriveForkDescription(trimmed);
+            const agentParams: AgentParams = {
+              description,
+              prompt: trimmed,
+              subagent_type: FORK_SUBAGENT_TYPE,
+              run_in_background: true,
+            };
+            const runtimeBaseDir =
+              (
+                config as {
+                  getSessionRuntimeBaseDir?: () => string | undefined;
+                }
+              ).getSessionRuntimeBaseDir?.() ??
+              config.storage?.getRuntimeBaseDir?.() ??
+              this.settings.merged.advanced?.runtimeOutputDir;
+            const workingDir =
+              config.getWorkingDir?.() ??
+              config.getTargetDir?.() ??
+              config.getProjectRoot?.() ??
+              process.cwd();
+            const canonicalSessionId = config.getSessionId?.() ?? sessionId;
+            const result = await Storage.runWithRuntimeBaseDir(
+              runtimeBaseDir,
+              workingDir,
+              () =>
+                sessionIdContext.run(canonicalSessionId, () =>
+                  agentTool
+                    .build(agentParams)
+                    .execute(new AbortController().signal),
+                ),
+            );
+            if (hasFailedDisplayStatus(result?.returnDisplay)) {
+              const reason =
+                typeof result.llmContent === 'string' &&
+                result.llmContent.trim()
+                  ? result.llmContent.trim()
+                  : 'the background agent could not be started.';
+              throw RequestError.invalidParams(
+                undefined,
+                `Failed to launch fork: ${reason}`,
+              );
+            }
 
-        return { sessionId, description, launched: true };
+            const historyText = `User launched a background fork via /fork. Directive (truncated): ${truncateForkDirectiveForHistory(
+              trimmed,
+            )}`;
+            try {
+              config.getLlmClient().addHistory({
+                role: 'user',
+                parts: [{ text: historyText }],
+              });
+              if (typeof session.recordInjectedHistoryTurn === 'function') {
+                await session.recordInjectedHistoryTurn(historyText);
+              } else {
+                const promptId = `${canonicalSessionId}########fork`;
+                config
+                  .getChatRecordingService?.()
+                  ?.recordUserMessage(
+                    historyText,
+                    undefined,
+                    undefined,
+                    promptId,
+                  );
+                await config.getFileHistoryService?.()?.makeSnapshot(promptId);
+              }
+            } catch (error) {
+              debugLogger.debug(
+                'Failed to record fork event in history:',
+                error,
+              );
+            }
+
+            return { sessionId, description, launched: true };
+          } finally {
+            releaseHistoryMutation();
+          }
+        });
       }
       case SERVE_CONTROL_EXT_METHODS.sessionShellHistory: {
         const sessionId = params['sessionId'];
@@ -13494,19 +13559,57 @@ class QwenAgent implements Agent {
           );
         }
         const session = this.sessionOrThrow(sessionId);
-        const config = session.getConfig();
-        const llmClient = config.getLlmClient()!;
-        const outputText =
-          typeof params['output'] === 'string' ? params['output'] : '';
-        llmClient.addHistory({
-          role: 'user',
-          parts: [
-            {
-              text: `I ran the following shell command:\n\`\`\`sh\n${command}\n\`\`\`\n\nThis produced the following result:\n\`\`\`\n${outputText}\n\`\`\``,
-            },
-          ],
+        if (typeof session.isTurnIdle === 'function' && !session.isTurnIdle()) {
+          throw new RequestError(
+            -32602,
+            'Cannot inject shell history while a prompt is running.',
+            { errorKind: 'session_busy' },
+          );
+        }
+        return await this.runExclusiveHistoryMutation(sessionId, async () => {
+          if (
+            typeof session.isTurnIdle === 'function' &&
+            !session.isTurnIdle()
+          ) {
+            throw new RequestError(
+              -32602,
+              'Cannot inject shell history while a prompt is running.',
+              { errorKind: 'session_busy' },
+            );
+          }
+          await session.assertCanStartTurn?.();
+          const releaseHistoryMutation =
+            session.beginHistoryMutation?.() ?? (() => {});
+          try {
+            const config = session.getConfig();
+            const llmClient = config.getLlmClient()!;
+            const outputText =
+              typeof params['output'] === 'string' ? params['output'] : '';
+            const historyText = `I ran the following shell command:\n\`\`\`sh\n${command}\n\`\`\`\n\nThis produced the following result:\n\`\`\`\n${outputText}\n\`\`\``;
+            llmClient.addHistory({
+              role: 'user',
+              parts: [{ text: historyText }],
+            });
+            if (typeof session.recordInjectedHistoryTurn === 'function') {
+              await session.recordInjectedHistoryTurn(historyText);
+            } else {
+              const canonicalSessionId = config.getSessionId?.() ?? sessionId;
+              const promptId = `${canonicalSessionId}########shell`;
+              config
+                .getChatRecordingService?.()
+                ?.recordUserMessage(
+                  historyText,
+                  undefined,
+                  undefined,
+                  promptId,
+                );
+              await config.getFileHistoryService?.()?.makeSnapshot(promptId);
+            }
+            return { sessionId, injected: true };
+          } finally {
+            releaseHistoryMutation();
+          }
         });
-        return { sessionId, injected: true };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionTaskCancel: {
         const sessionId = params['sessionId'];

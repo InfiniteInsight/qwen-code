@@ -190,4 +190,37 @@ describe('BridgeClient (loopback contract)', () => {
     await client().subscribeEvents('s1', () => {}, undefined, 42);
     expect(lastEventIdHeader).toBe('42'); // reconnect: resume from id 42
   });
+
+  it('invokes onReplayTruncated with earliestAvailableId on HTTP 412 replay_truncated (#504)', async () => {
+    const truncatedClient = new BridgeClient({
+      baseUrl: base,
+      token: 'qwk_test',
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            type: 'replay_truncated',
+            data: {
+              reason: 'older_than_wal_horizon',
+              earliestAvailableId: 500,
+              recovery: 'reload',
+              lastEventId: 742,
+            },
+          }),
+          { status: 412, headers: { 'Content-Type': 'application/json' } },
+        ),
+    });
+    const truncated: Array<number | undefined> = [];
+    const events: unknown[] = [];
+    await truncatedClient.subscribeEvents(
+      's1',
+      (ev) => events.push(ev),
+      undefined,
+      10,
+      (earliest) => {
+        truncated.push(earliest);
+      },
+    );
+    expect(truncated).toEqual([500]);
+    expect(events).toEqual([]);
+  });
 });

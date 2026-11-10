@@ -2778,6 +2778,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       repairingEpisode !== undefined && isNewRepairEvent,
                     suppressLog:
                       repairingEpisode !== undefined && !isNewRepairEvent,
+                    sessionId: activeSession.sessionId,
                   },
                 );
                 const transcriptEvents = filterDaemonUiEventsForTranscript(
@@ -3637,6 +3638,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   if (sessionRef.current !== activeSession) return;
                   setConnectionSynchronous(update);
                 },
+                { sessionId: activeSession.sessionId },
               );
               const uiEvents = filterDaemonUiEventsForTranscript(
                 event,
@@ -5669,19 +5671,37 @@ function normalizeAndFilterEvent(
   clientId: string | undefined,
   opts: { suppressOwnUserEcho: boolean; includeRawEvent: boolean },
   setConnection: Dispatch<SetStateAction<DaemonConnectionState>>,
-  behavior: { updateConnection?: boolean; suppressLog?: boolean } = {},
+  behavior: {
+    updateConnection?: boolean;
+    suppressLog?: boolean;
+    sessionId?: string;
+  } = {},
 ): DaemonUiEvent[] {
   if (!behavior.suppressLog) {
     logSettingsReloadEvent(event);
   }
-  if (behavior.updateConnection !== false) {
+  const eventSessionId =
+    event.type === 'approval_mode_changed' && isRecord(event.data)
+      ? getString(event.data, 'sessionId')
+      : undefined;
+  const isForeignApprovalModeEvent =
+    event.type === 'approval_mode_changed' &&
+    behavior.sessionId !== undefined &&
+    eventSessionId !== undefined &&
+    eventSessionId !== behavior.sessionId;
+  if (behavior.updateConnection !== false && !isForeignApprovalModeEvent) {
     updateConnectionFromDaemonEvent(event, setConnection);
   }
   const normalized = normalizeDaemonEvent(event, {
     clientId,
     suppressOwnUserEcho: opts.suppressOwnUserEcho,
     includeRawEvent: opts.includeRawEvent,
-  });
+  }).filter(
+    (item) =>
+      item.type !== 'session.approval_mode.changed' ||
+      behavior.sessionId === undefined ||
+      item.sessionId === behavior.sessionId,
+  );
   const goalStatusEvent = normalizeGoalStatusEvent(event);
   if (isPromptLifecycleTurnEvent(event)) {
     const cancellation = normalized.filter(

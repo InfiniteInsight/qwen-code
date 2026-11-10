@@ -627,6 +627,101 @@ describe('fork route', () => {
       const res = await postFork(url, {});
       expect(res.status).toBe(200);
     });
+
+    it('seeds in-band replay frames from resumeSession into childWal before child_forked and stamps _rc (#503)', async () => {
+      await writeParent();
+      const { daemon } = fakeDaemon(async () => ({}), {
+        resume: async (id, workspaceCwd) => ({
+          sessionId: id,
+          workspaceCwd: workspaceCwd ?? CWD,
+          attached: true,
+          state: {},
+          compactedReplay: [
+            {
+              id: 1,
+              v: 1,
+              type: 'session_update',
+              data: { text: 'compacted-1' },
+            },
+          ],
+          liveJournal: [
+            {
+              id: 2,
+              v: 1,
+              type: 'session_update',
+              data: { text: 'live-2' },
+            },
+          ],
+          lastEventId: 2,
+          eventEpoch: 'fork-ep-1',
+        }),
+      });
+      const audit = fakeAudit();
+      const bus = new OwnerEventBus();
+      const received: OwnerEvent[] = [];
+      bus.subscribe((e) => received.push(e));
+      const walDir = join(runtimeBase, 'wal-inband-replay');
+      const url = await mount({
+        daemon,
+        audit,
+        randomId: () => NEW_ID,
+        bus,
+        walDir,
+      });
+      const res = await postFork(url, {});
+      expect(res.status).toBe(200);
+
+      const childWalFrames = [
+        ...decodeSegment(join(walDir, 'wal', `${NEW_ID}.log`)),
+      ];
+      expect(childWalFrames.map((f) => ({ id: f.id, type: f.type }))).toEqual([
+        { id: 1, type: 'session_update' },
+        { id: 2, type: 'session_update' },
+        { id: 3, type: 'child_forked' },
+      ]);
+      expect(childWalFrames[0]?._rc).toEqual({
+        raw: 1,
+        epoch: 'fork-ep-1',
+      });
+      expect(childWalFrames[1]?._rc).toEqual({
+        raw: 2,
+        epoch: 'fork-ep-1',
+      });
+      expect(childWalFrames[2]?._rc).toEqual({
+        raw: 2,
+        epoch: 'fork-ep-1',
+      });
+
+      const childEvent = received.find(
+        (e) => e.type === 'session_event' && e.sessionId === NEW_ID,
+      );
+      expect(
+        childEvent?.type === 'session_event' ? childEvent.event.id : undefined,
+      ).toBe(3);
+    });
+
+    it('stamps _rc: { raw: 0 } on child_forked for an empty fork so Last-Event-ID: 1 maps to daemon cursor 0 (#503)', async () => {
+      await writeParent();
+      const { daemon } = fakeDaemon(async () => ({}));
+      const audit = fakeAudit();
+      const walDir = join(runtimeBase, 'wal-empty-fork-stamp');
+      const url = await mount({
+        daemon,
+        audit,
+        randomId: () => NEW_ID,
+        walDir,
+      });
+      const res = await postFork(url, { transcript: 'empty' });
+      expect(res.status).toBe(200);
+
+      const childWalFrames = [
+        ...decodeSegment(join(walDir, 'wal', `${NEW_ID}.log`)),
+      ];
+      expect(childWalFrames).toHaveLength(1);
+      expect(childWalFrames[0]?.id).toBe(1);
+      expect(childWalFrames[0]?.type).toBe('child_forked');
+      expect(childWalFrames[0]?._rc).toEqual({ raw: 0 });
+    });
   });
 
   describe('cross-workspace parent lookup', () => {

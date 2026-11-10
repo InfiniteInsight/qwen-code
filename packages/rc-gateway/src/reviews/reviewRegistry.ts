@@ -5,8 +5,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { writeFileAtomic } from '../atomicWrite.js';
 
 export type ReviewStatus =
   | 'running'
@@ -81,6 +81,8 @@ interface PersistShape {
  * every mutation awaits `persist()` (0600 file inside an ensured dir).
  */
 export class ReviewRegistry {
+  private writeChain: Promise<void> = Promise.resolve();
+
   private constructor(
     private readonly filePath: string,
     private records: ReviewRecord[],
@@ -202,11 +204,18 @@ export class ReviewRegistry {
     return orphaned;
   }
 
-  private async persist(): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true });
-    const body: PersistShape = { reviews: this.records };
-    await writeFile(this.filePath, JSON.stringify(body, null, 2), {
-      mode: 0o600,
-    });
+  private persist(): Promise<void> {
+    const next = this.writeChain.then(() =>
+      writeFileAtomic(
+        this.filePath,
+        () => {
+          const body: PersistShape = { reviews: this.records };
+          return JSON.stringify(body, null, 2);
+        },
+        { mode: 0o600 },
+      ),
+    );
+    this.writeChain = next.catch(() => {});
+    return next;
   }
 }

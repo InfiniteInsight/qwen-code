@@ -136,6 +136,47 @@ describe('loopGuard', () => {
       expect(last?.action).toBe('event_loop_wedge_exit');
       expect(last?.detail).toMatchObject({ lagMs: 90_000, strikes: 3 });
     });
+
+    it('awaits async audit record before calling exit(1) (#520)', async () => {
+      vi.useFakeTimers();
+      let resolveAudit: (() => void) | undefined;
+      const asyncRecord = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveAudit = resolve;
+          }),
+      );
+      const h = harness([30_000], {
+        audit: { record: asyncRecord },
+      });
+      tick(3_000); // 3 strikes reach wedge exit
+      expect(asyncRecord).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'event_loop_wedge_exit' }),
+      );
+      // exit(1) must wait for the audit record to complete
+      expect(h.exits).toEqual([]);
+
+      resolveAudit?.();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.exits).toEqual([1]);
+    });
+
+    it('exits after 250ms fallback if async audit record hangs (#520)', async () => {
+      vi.useFakeTimers();
+      const hangingRecord = vi.fn(() => new Promise<void>(() => {}));
+      const h = harness([30_000], {
+        audit: { record: hangingRecord },
+      });
+      tick(3_000); // 3 strikes reach wedge exit
+      expect(hangingRecord).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'event_loop_wedge_exit' }),
+      );
+      expect(h.exits).toEqual([]);
+
+      // Advance by fallback timeout (250ms)
+      await vi.advanceTimersByTimeAsync(250);
+      expect(h.exits).toEqual([1]);
+    });
   });
 
   describe('configuration', () => {

@@ -1570,4 +1570,101 @@ describe('multi-step tool turns commit sub-turns as they complete (#247)', () =>
     expect(display.length).toBeLessThan(MAX_TOOL_RESULT_DISPLAY_CHARS + 200);
     expect(display).toContain('truncated from');
   });
+
+  it('projects structured task_execution resultDisplay on agent tool calls (#518)', () => {
+    let s = initialDaemonProjectionState(SELF);
+
+    s = projectDaemonEvent(
+      s,
+      sessionUpdate({
+        sessionUpdate: 'tool_call',
+        toolCallId: 'agent_1',
+        title: 'Task: explore codebase',
+        status: 'in_progress',
+        rawInput: {
+          subagent_type: 'explore',
+          description: 'explore codebase',
+          prompt: 'Find all entry points',
+        },
+        _meta: { toolName: 'agent' },
+      }),
+    ).state;
+
+    expect(pendingToolCallsOf(s)[0]?.resultDisplay).toMatchObject({
+      type: 'task_execution',
+      subagentName: 'explore',
+      taskDescription: 'explore codebase',
+      taskPrompt: 'Find all entry points',
+      status: 'running',
+    });
+
+    s = projectDaemonEvent(
+      s,
+      sessionUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'agent_1',
+        status: 'completed',
+        content: [
+          {
+            type: 'content',
+            content: { type: 'text', text: 'Found 3 entry points' },
+          },
+        ],
+        rawOutput: {
+          type: 'task_execution',
+          subagentName: 'explore',
+          taskDescription: 'explore codebase',
+          status: 'completed',
+          executionSummary: {
+            totalToolCalls: 4,
+            totalDurationMs: 8500,
+            outputTokens: 1200,
+          },
+        },
+        _meta: { toolName: 'agent' },
+      }),
+    ).state;
+
+    expect(pendingToolCallsOf(s)[0]?.resultDisplay).toMatchObject({
+      type: 'task_execution',
+      subagentName: 'explore',
+      taskDescription: 'explore codebase',
+      status: 'completed',
+      result: 'Found 3 entry points',
+      executionSummary: {
+        totalToolCalls: 4,
+        totalDurationMs: 8500,
+        outputTokens: 1200,
+      },
+    });
+  });
+
+  it('uses Math.max(opts.lastEventId, maxId) in projectReplaySnapshot (#525)', () => {
+    const { state } = projectReplaySnapshot(
+      {
+        compactedReplay: [
+          {
+            id: 50,
+            type: 'session_update',
+            data: {
+              sessionId: 's1',
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'hello' },
+              },
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+      { ownClientId: SELF, lastEventId: 10 },
+    );
+    expect(state.lastEventId).toBe(50);
+
+    const emptyWithWatermark = projectReplaySnapshot(
+      { compactedReplay: [], liveJournal: [] },
+      { ownClientId: SELF, lastEventId: 42 },
+    );
+    expect(emptyWithWatermark.state.lastEventId).toBe(42);
+  });
 });

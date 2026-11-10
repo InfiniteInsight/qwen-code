@@ -1442,7 +1442,9 @@ export async function main() {
         process.env,
         config.getScreenReader(),
       );
-      if (selection.renderer === 'opentui') {
+      // `--attach-daemon` requires the Ink interactive UI (`startInteractiveUI`)
+      // which wires `DaemonStreamContext` and `attachDaemonUrl`.
+      if (!argv.attachDaemon && selection.renderer === 'opentui') {
         try {
           const { startOpenTuiUI } = await import(
             './ui/opentui/start-opentui-ui.js'

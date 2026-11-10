@@ -218,10 +218,32 @@ describe('UsageFeeder', () => {
     expect(h.ingested.map((i) => i.tag)).toEqual(['a', 'b']);
   });
 
-  it('session_closed forgets the cached model', async () => {
+  it('session_closed and session_died forget the cached model', async () => {
     const h = setup();
     h.cache.set('s1', 'm');
     h.feeder.onEvent('s1', { type: 'session_closed', data: {} });
+    expect(h.cache.get('s1')).toBeUndefined();
+
+    h.cache.set('s2', 'm2');
+    h.feeder.onEvent('s2', { type: 'session_died', data: {} });
+    expect(h.cache.get('s2')).toBeUndefined();
+  });
+
+  it('defers cache.forget when session_closed or session_died arrives while usage frames are pending (#507)', async () => {
+    let release!: (v: string) => void;
+    const h = setup({ ctx: () => new Promise((r) => (release = r)) });
+    h.feeder.onEvent('s1', { type: 'session_update', data: usageData('a') });
+    h.feeder.onEvent('s1', { type: 'session_died', data: {} });
+    expect(h.ingested).toHaveLength(0);
+
+    // Resolving the in-flight seed drains the pending frame with the resolved modelId
+    // BEFORE forgetting the session from the cache.
+    release('ctx-model');
+    await flush();
+    expect(h.ingested.map((i) => [i.tag, i.opts.modelId])).toEqual([
+      ['a', 'ctx-model'],
+    ]);
+    expect(h.unresolved).toEqual([]);
     expect(h.cache.get('s1')).toBeUndefined();
   });
 

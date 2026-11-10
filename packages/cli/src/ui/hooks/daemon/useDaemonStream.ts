@@ -80,6 +80,7 @@ import {
   type DaemonSessionControl,
   type DaemonSessionStateLike,
 } from './daemon-session-state.js';
+import type { DaemonSubagentSyncDriver } from './use-daemon-subagent-sync.js';
 
 /**
  * A vote on a daemon permission request. The `outcome` is itself an object
@@ -95,7 +96,9 @@ export interface DaemonPermissionResponse {
  * The minimal slice of `DaemonSessionClient` this hook drives. An attached
  * `DaemonSessionClient` satisfies it structurally (no import needed).
  */
-export interface DaemonSessionDriver extends DaemonSessionControl {
+export interface DaemonSessionDriver
+  extends DaemonSessionControl,
+    DaemonSubagentSyncDriver {
   /** This client's daemon clientId; required so the daemon's self-echo is dropped. */
   readonly clientId?: string;
   /**
@@ -163,6 +166,8 @@ export type AddHistoryItem = (
 
 export interface UseDaemonStreamResult {
   streamingState: StreamingState;
+  /** Synchronous getter for current streaming state (unaffected by stale closures). */
+  getStreamingState?: () => StreamingState;
   /** Submit a user turn: echo locally (responsive) + send to the daemon. */
   submitQuery: (query: string) => Promise<void>;
   /** Reset local pending turn state to Idle (used by local slash commands). */
@@ -230,6 +235,7 @@ export function useDaemonStream(
   driver: DaemonSessionDriver,
   addItem: AddHistoryItem,
   loss?: DaemonLossHandling,
+  onFrame?: (frame: DaemonFrame) => void,
 ): UseDaemonStreamResult {
   // PRECONDITION: the driver must be ATTACHED (clientId set) before mount.
   // Without a clientId the reducer can't distinguish our own echo from a remote
@@ -246,6 +252,8 @@ export function useDaemonStream(
   addItemRef.current = addItem;
   const lossRef = useRef(loss);
   lossRef.current = loss;
+  const onFrameRef = useRef(onFrame);
+  onFrameRef.current = onFrame;
   const goneRef = useRef(false);
   const pendingClearTokensRef = useRef(new Set<symbol>());
   // The driver whose replay snapshot has been committed. A ref (not state) so
@@ -339,6 +347,7 @@ export function useDaemonStream(
       setSnapshot((prev) =>
         hasRenderableStateChange(prev, state) ? state : prev,
       );
+      onFrameRef.current?.(frame);
     },
     [clearPendingState],
   );
@@ -455,10 +464,17 @@ export function useDaemonStream(
       for (let attempt = 0; !disposed && !ac.signal.aborted; attempt++) {
         try {
           dbg(`subscribe attempt=${attempt} clientId=${driver.clientId}`);
+          let sawTerminalSessionEvent = false;
           for await (const frame of driver.events({ signal: ac.signal })) {
             if (disposed) break;
             transportFailures = 0;
             attempt = 0;
+            if (
+              frame.type === 'session_closed' ||
+              frame.type === 'session_died'
+            ) {
+              sawTerminalSessionEvent = true;
+            }
             applyFrame(frame);
             if (
               lossRef.current &&
@@ -470,11 +486,11 @@ export function useDaemonStream(
           }
           dbg('stream ended');
           if (disposed || ac.signal.aborted) break;
-          // The daemon may close the SSE when idle (0.17.x closes per-turn/idle).
-          // Finalize any in-flight turn (unless waiting on user permission),
-          // then re-subscribe so the session keeps working across reconnects
-          // (resume picks up after the last event id).
-          if (!stateRef.current.pendingPermission) {
+          // Only finalize the turn when the stream closed due to a terminal
+          // session lifecycle event. A transient SSE EOF mid-turn will
+          // reconnect with Last-Event-ID and resume the turn without
+          // duplicating partial items or prematurely flipping to Idle.
+          if (sawTerminalSessionEvent && !stateRef.current.pendingPermission) {
             finalizeTurn();
           }
           await new Promise((r) => setTimeout(r, 500));
@@ -524,9 +540,12 @@ export function useDaemonStream(
   const submitQuery = useCallback(
     async (query: string) => {
       pendingClearTokensRef.current.clear();
+      const hadActiveTurnAtSubmit =
+        stateRef.current.streamingState !== StreamingState.Idle;
       if (
-        stateRef.current.pendingText.length > 0 ||
-        stateRef.current.tools.length > 0
+        !hadActiveTurnAtSubmit &&
+        (stateRef.current.pendingText.length > 0 ||
+          stateRef.current.tools.length > 0)
       ) {
         finalizeTurn();
       }
@@ -573,7 +592,30 @@ export function useDaemonStream(
         ) {
           return;
         }
-        finalizeTurn();
+        const errStatus =
+          (
+            err as {
+              status?: unknown;
+              statusCode?: unknown;
+              code?: unknown;
+            } | null
+          )?.status ?? (err as { statusCode?: unknown } | null)?.statusCode;
+        const errCode = (err as { code?: unknown } | null)?.code;
+        const errMsg = String((err as Error)?.message ?? err);
+        const isSessionBusyError =
+          errStatus === 409 ||
+          errCode === 409 ||
+          errCode === 'session_busy' ||
+          /busy|409|already running|in flight/i.test(errMsg);
+        const hasInFlightRemoteTurn =
+          hadActiveTurnAtSubmit ||
+          stateRef.current.pendingText.length > 0 ||
+          stateRef.current.pendingThought.length > 0 ||
+          stateRef.current.tools.length > 0 ||
+          stateRef.current.pendingPermission !== undefined;
+        if (!isSessionBusyError && !hasInFlightRemoteTurn) {
+          finalizeTurn();
+        }
         throw err;
       }
       dbg('prompt() resolved');
@@ -644,8 +686,14 @@ export function useDaemonStream(
     [snapshot.pendingPermission],
   );
 
+  const getStreamingState = useCallback(
+    () => stateRef.current.streamingState,
+    [],
+  );
+
   return {
     streamingState: snapshot.streamingState,
+    getStreamingState,
     submitQuery,
     clearPendingState,
     clearRemoteSession,

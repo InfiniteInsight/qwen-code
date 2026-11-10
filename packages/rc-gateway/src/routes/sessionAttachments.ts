@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { UnknownSessionError, type SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { relayDaemonAuthFailure } from './daemonAuth.js';
+import { isValidSessionId } from '../sessions/chatsPath.js';
 
 /**
  * Session attachments (add-capability-parity #109, first slice: uploads).
@@ -292,21 +293,23 @@ export function sendAttachmentError(res: Response, err: unknown): void {
  * signal about the route.
  */
 export function gateJsonBody(json: RequestHandler): RequestHandler {
-  return (req, res, next) =>
-    (req.method === 'POST' && req.path.endsWith('/attachments')) ||
-    // #130: one chunk of a resumable upload is a slice of the file, whatever
-    // media type the file has.
-    (req.method === 'PUT' &&
-      /\/attachment-uploads\/[^/]+\/chunks\/[^/]+$/.test(req.path)) ||
-    // #123: a workspace file write, edit or upload reads its own body after
-    // the scope check, under the #196 limit rather than this parser's 100 KB
-    // (routes/workspaceFileWrites.ts, createWorkspaceFileBody).
-    (req.method === 'POST' &&
-      /^\/rc\/workspace\/file\/(write|edit|upload)$/.test(req.path)) ||
-    // #123: the workspace memory write reads its own body the same way.
-    (req.method === 'POST' && req.path === '/rc/workspace/memory')
+  return (req, res, next) => {
+    const cleanPath = req.path.replace(/\/+$/, '') || '/';
+    return (req.method === 'POST' && cleanPath.endsWith('/attachments')) ||
+      // #130: one chunk of a resumable upload is a slice of the file, whatever
+      // media type the file has.
+      (req.method === 'PUT' &&
+        /\/attachment-uploads\/[^/]+\/chunks\/[^/]+$/.test(cleanPath)) ||
+      // #123: a workspace file write, edit or upload reads its own body after
+      // the scope check, under the #196 limit rather than this parser's 100 KB
+      // (routes/workspaceFileWrites.ts, createWorkspaceFileBody).
+      (req.method === 'POST' &&
+        /^\/rc\/workspace\/file\/(write|edit|upload)$/.test(cleanPath)) ||
+      // #123: the workspace memory write reads its own body the same way.
+      (req.method === 'POST' && cleanPath === '/rc/workspace/memory')
       ? next()
       : json(req, res, next);
+  };
 }
 
 /**
@@ -646,7 +649,26 @@ export function createResumableAttachmentUploads(deps: {
     return missing;
   };
 
+  const getStagedBytes = (): number => {
+    let total = 0;
+    for (const up of uploads.values()) {
+      if (up.state !== 'completed') {
+        for (const chunk of up.chunks.values()) {
+          total += chunk.length;
+        }
+      }
+    }
+    return total;
+  };
+
   const begin: RequestHandler = async (req, res) => {
+    if (!isValidSessionId(req.params.id)) {
+      res.status(400).json({
+        error: 'Invalid session id',
+        code: 'invalid_session_id',
+      });
+      return;
+    }
     const body = (req.body ?? {}) as Record<string, unknown>;
     const { name, mimeType, size } = body;
     if (
@@ -673,10 +695,7 @@ export function createResumableAttachmentUploads(deps: {
       return;
     }
     sweep();
-    let staged = 0;
-    for (const up of uploads.values()) {
-      if (up.state !== 'completed') staged += up.size;
-    }
+    const staged = getStagedBytes();
     const active = [...uploads.values()].filter(
       (u) => u.state !== 'completed',
     ).length;
@@ -739,6 +758,16 @@ export function createResumableAttachmentUploads(deps: {
         code: 'invalid_chunk',
       });
       return;
+    }
+    if (!up.chunks.has(index)) {
+      const staged = getStagedBytes();
+      if (staged + req.body.length > maxStagedBytes) {
+        res.status(429).json({
+          error: 'Too many uploads are in progress; try again shortly',
+          code: 'attachment_upload_capacity_exceeded',
+        });
+        return;
+      }
     }
     // The same index again replaces itself: a retry whose first try landed.
     up.chunks.set(index, req.body);

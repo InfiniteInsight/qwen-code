@@ -5047,10 +5047,19 @@ export class Session implements SessionContext {
     // The file path keeps the target snapshot: the agent restores files by
     // promptId after this returns, so that snapshot must still be findable.
     const snapshotsBeforeRewind = fileHistoryService.getSnapshots();
+    const rewoundSnapshots = snapshotsBeforeRewind.slice(targetTurnIndex);
     const survivingSnapshots = rewindFiles
       ? snapshotsBeforeRewind.slice(0, targetTurnIndex + 1)
       : snapshotsBeforeRewind.slice(0, targetTurnIndex);
     fileHistoryService.restoreFromSnapshots(survivingSnapshots);
+
+    this.#cancelRewoundBackgroundWork(
+      targetTurnIndex,
+      apiHistory,
+      apiTruncateIndex,
+      snapshotsBeforeRewind.slice(0, targetTurnIndex),
+      rewoundSnapshots,
+    );
 
     const approvalMode = this.config.getApprovalMode();
     this.config
@@ -5079,6 +5088,237 @@ export class Session implements SessionContext {
     }
 
     return { targetTurnIndex, apiTruncateIndex };
+  }
+
+  async recordInjectedHistoryTurn(text: string): Promise<void> {
+    this.turn += 1;
+    const promptId = `${this.config.getSessionId()}########${this.turn}`;
+    try {
+      this.config
+        .getChatRecordingService()
+        ?.recordUserMessage(text, undefined, undefined, promptId);
+    } catch (e) {
+      debugLogger.error(
+        `ChatRecording: recordInjectedHistoryTurn failed: ${e}`,
+      );
+    }
+    try {
+      const fileHistoryService = this.config.getFileHistoryService?.();
+      if (fileHistoryService) {
+        await fileHistoryService.makeSnapshot(promptId);
+        try {
+          const latestSnapshot = fileHistoryService.getSnapshots().at(-1);
+          if (latestSnapshot) {
+            this.config
+              .getChatRecordingService()
+              ?.recordFileHistorySnapshot(latestSnapshot);
+          }
+        } catch (e) {
+          debugLogger.error(`FileHistory: recordSnapshot failed: ${e}`);
+        }
+      }
+    } catch (e) {
+      debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
+    }
+  }
+
+  #cancelRewoundBackgroundWork(
+    targetTurnIndex: number,
+    apiHistory: readonly Content[],
+    apiTruncateIndex: number,
+    survivingTurnSnapshots: ReadonlyArray<{
+      promptId?: string;
+      timestamp?: Date | number | string;
+    }>,
+    rewoundSnapshots: ReadonlyArray<{
+      promptId?: string;
+      timestamp?: Date | number | string;
+    }>,
+  ): void {
+    const survivingToolUseIds = new Set<string>();
+    for (const content of apiHistory.slice(0, apiTruncateIndex)) {
+      for (const part of content.parts ?? []) {
+        const callId = part.functionCall?.id;
+        if (typeof callId === 'string' && callId.length > 0) {
+          survivingToolUseIds.add(callId);
+        }
+      }
+    }
+    const rewoundToolUseIds = new Set<string>();
+    for (const content of apiHistory.slice(apiTruncateIndex)) {
+      for (const part of content.parts ?? []) {
+        const callId = part.functionCall?.id;
+        if (typeof callId === 'string' && callId.length > 0) {
+          rewoundToolUseIds.add(callId);
+        }
+      }
+    }
+    const survivingPromptIds = new Set<string>();
+    for (const snap of survivingTurnSnapshots) {
+      if (typeof snap.promptId === 'string' && snap.promptId.length > 0) {
+        survivingPromptIds.add(snap.promptId);
+      }
+    }
+    const rewoundPromptIds = new Set<string>();
+    let cutoffTimestamp: number | undefined;
+    for (const snap of rewoundSnapshots) {
+      if (typeof snap.promptId === 'string' && snap.promptId.length > 0) {
+        rewoundPromptIds.add(snap.promptId);
+      }
+      const rawTs = snap.timestamp;
+      const ts =
+        rawTs instanceof Date
+          ? rawTs.getTime()
+          : typeof rawTs === 'number'
+            ? rawTs
+            : typeof rawTs === 'string'
+              ? Date.parse(rawTs)
+              : Number.NaN;
+      if (
+        Number.isFinite(ts) &&
+        (cutoffTimestamp === undefined || ts < cutoffTimestamp)
+      ) {
+        cutoffTimestamp = ts;
+      }
+    }
+
+    const belongsToRewoundTurn = (opts: {
+      startTime?: number;
+      toolUseId?: string;
+      sourceTurnId?: string;
+      todoWorkChainId?: string;
+    }): boolean => {
+      if (targetTurnIndex === 0) return true;
+      if (opts.toolUseId && rewoundToolUseIds.has(opts.toolUseId)) return true;
+      if (opts.sourceTurnId && rewoundPromptIds.has(opts.sourceTurnId)) {
+        return true;
+      }
+      if (opts.todoWorkChainId && rewoundPromptIds.has(opts.todoWorkChainId)) {
+        return true;
+      }
+      if (opts.toolUseId && survivingToolUseIds.has(opts.toolUseId)) {
+        return false;
+      }
+      if (opts.sourceTurnId && survivingPromptIds.has(opts.sourceTurnId)) {
+        return false;
+      }
+      if (
+        opts.todoWorkChainId &&
+        survivingPromptIds.has(opts.todoWorkChainId)
+      ) {
+        return false;
+      }
+      if (cutoffTimestamp !== undefined && typeof opts.startTime === 'number') {
+        return opts.startTime >= cutoffTimestamp;
+      }
+      return cutoffTimestamp === undefined;
+    };
+
+    const cancelledTaskIds = new Set<string>();
+    let workChanged = false;
+
+    const backgroundRegistry = this.config.getBackgroundTaskRegistry?.();
+    for (const entry of backgroundRegistry?.getAll?.() ?? []) {
+      if (
+        !belongsToRewoundTurn({
+          startTime: entry.startTime,
+          toolUseId: entry.toolUseId,
+          sourceTurnId: entry.sourceTurnId,
+          todoWorkChainId: entry.todoWorkChainId,
+        })
+      ) {
+        continue;
+      }
+      cancelledTaskIds.add(entry.id);
+      entry.notified = true;
+      if (entry.status === 'running') {
+        backgroundRegistry?.cancel?.(entry.id, { notify: false });
+        workChanged = true;
+      } else if (entry.status === 'paused') {
+        backgroundRegistry?.abandon?.(entry.id);
+        workChanged = true;
+      }
+    }
+
+    const shellRegistry = this.config.getBackgroundShellRegistry?.();
+    for (const entry of shellRegistry?.getAll?.() ?? []) {
+      if (
+        !belongsToRewoundTurn({
+          startTime: entry.startTime,
+          todoWorkChainId: entry.todoWorkChainId,
+        })
+      ) {
+        continue;
+      }
+      cancelledTaskIds.add(entry.id);
+      entry.notified = true;
+      if (entry.status === 'running') {
+        shellRegistry?.cancel?.(entry.id, Date.now());
+        workChanged = true;
+      }
+    }
+
+    const monitorRegistry = this.config.getMonitorRegistry?.();
+    for (const entry of monitorRegistry?.getAll?.() ?? []) {
+      if (
+        !belongsToRewoundTurn({
+          startTime: entry.startTime,
+          toolUseId: entry.toolUseId,
+          todoWorkChainId: entry.todoWorkChainId,
+        })
+      ) {
+        continue;
+      }
+      cancelledTaskIds.add(entry.id);
+      entry.notified = true;
+      if (entry.status === 'running') {
+        monitorRegistry?.cancel?.(entry.id, { notify: false });
+        workChanged = true;
+      }
+    }
+
+    const workflowRegistry = this.config.getWorkflowRunRegistry?.();
+    for (const entry of workflowRegistry?.list?.() ?? []) {
+      if (
+        !belongsToRewoundTurn({
+          startTime: entry.startTime,
+          toolUseId: entry.toolUseId,
+          todoWorkChainId: entry.todoWorkChainId,
+        })
+      ) {
+        continue;
+      }
+      cancelledTaskIds.add(entry.runId);
+      if (entry.status === 'running') {
+        workflowRegistry?.cancel?.(entry.runId, Date.now());
+        workChanged = true;
+      }
+    }
+
+    if (this.notificationQueue.length > 0) {
+      const beforeLen = this.notificationQueue.length;
+      const filtered = this.notificationQueue.filter(
+        (item) =>
+          !cancelledTaskIds.has(item.taskId) &&
+          !belongsToRewoundTurn({
+            toolUseId: item.toolUseId,
+            sourceTurnId: item.sourceTurnId,
+            todoWorkChainId: item.todoWorkChainId,
+          }),
+      );
+      if (filtered.length !== beforeLen) {
+        this.notificationQueue.splice(
+          0,
+          this.notificationQueue.length,
+          ...filtered,
+        );
+        workChanged = true;
+      }
+    }
+
+    if (workChanged) {
+      this.#activeWorkChanged();
+    }
   }
 
   captureHistorySnapshot(): Content[] {

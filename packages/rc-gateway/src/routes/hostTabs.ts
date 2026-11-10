@@ -142,6 +142,14 @@ export function sessionEndpointResolver(
         await daemon.sessionStatus(sessionId);
       }
     } catch (err) {
+      if (err instanceof WorkspacePoolFullError) {
+        return {
+          ok: false,
+          status: 503,
+          code: 'workspace_pool_full',
+          error: err.message || 'Workspace pool full',
+        };
+      }
       if (err instanceof UnknownSessionError || isSessionNotFoundError(err)) {
         needsResume = true;
       } else {
@@ -157,7 +165,7 @@ export function sessionEndpointResolver(
             ok: false,
             status: 503,
             code: 'workspace_pool_full',
-            error: 'Workspace pool full',
+            error: e.message || 'Workspace pool full',
           };
         }
         if (isSessionNotFoundError(e)) {
@@ -172,7 +180,15 @@ export function sessionEndpointResolver(
       }
       try {
         endpoint = lookup(sessionId);
-      } catch {
+      } catch (e) {
+        if (e instanceof WorkspacePoolFullError) {
+          return {
+            ok: false,
+            status: 503,
+            code: 'workspace_pool_full',
+            error: e.message || 'Workspace pool full',
+          };
+        }
         return down;
       }
     }
@@ -336,6 +352,7 @@ export function createHostTabRoutes(deps: HostTabRoutesDeps): HostTabRoutes {
   const isMirrored = deps.isMirrored ?? ((id: string) => isSessionMirrored(id));
 
   const notFound = { error: 'Tab not found', code: 'tab_not_found' };
+  const inFlightReopens = new Set<string>();
 
   const reopenTab = async (
     tabId: string,
@@ -360,104 +377,123 @@ export function createHostTabRoutes(deps: HostTabRoutesDeps): HostTabRoutes {
       return { status, body };
     };
     if (!isValidTabId(tabId)) return refuse(404, notFound);
-    const tab = await registry.view(tabId);
-    if (!tab) return refuse(404, notFound);
-    const sid = tab.sessionId;
-    if (tab.state === 'live') {
-      return refuse(
-        409,
-        { error: 'This tab is open', code: 'tab_live', state: tab.state },
-        sid,
-      );
-    }
-    if (tab.state !== 'crashed' && tab.state !== 'ghost') {
+    if (inFlightReopens.has(tabId)) {
       return refuse(
         409,
         {
-          error: 'Only a crashed or lost tab is reopened',
-          code: 'tab_not_reopenable',
-          state: tab.state,
+          error: 'A reopen for this tab is already in progress',
+          code: 'reopen_in_progress',
         },
-        sid,
+        registry.get(tabId)?.sessionId,
       );
     }
-    if (!deps.requests) {
-      return refuse(
-        501,
-        {
-          error: 'This gateway cannot open host terminals',
-          code: 'host_terminals_unsupported',
-        },
-        sid,
-      );
-    }
-    // A terminal already on the conversation is the answer, as on the open
-    // route. A check that throws counts as none.
-    let mirrored = false;
+    inFlightReopens.add(tabId);
     try {
-      mirrored = await isMirrored(sid);
-    } catch {
-      mirrored = false;
-    }
-    if (mirrored) {
+      const tab = await registry.view(tabId);
+      if (!tab) return refuse(404, notFound);
+      const sid = tab.sessionId;
+      if (tab.state === 'live') {
+        return refuse(
+          409,
+          { error: 'This tab is open', code: 'tab_live', state: tab.state },
+          sid,
+        );
+      }
+      if (
+        (tab.state !== 'crashed' && tab.state !== 'ghost') ||
+        (opts.auto &&
+          (tab.reopenedAt !== undefined || tab.autoReopenedAt !== undefined))
+      ) {
+        return refuse(
+          409,
+          {
+            error: 'Only a crashed or lost tab is reopened',
+            code: 'tab_not_reopenable',
+            state: tab.state,
+          },
+          sid,
+        );
+      }
+      if (!deps.requests) {
+        return refuse(
+          501,
+          {
+            error: 'This gateway cannot open host terminals',
+            code: 'host_terminals_unsupported',
+          },
+          sid,
+        );
+      }
+      // A terminal already on the conversation is the answer, as on the open
+      // route. A check that throws counts as none.
+      let mirrored = false;
+      try {
+        mirrored = await isMirrored(sid);
+      } catch {
+        mirrored = false;
+      }
+      if (mirrored) {
+        return {
+          status: 200,
+          body: { alreadyMirrored: true, sessionId: sid, tabId },
+        };
+      }
+      const before = await deps.requests.launcherLiveness(staleMs);
+      // The automatic reopen waits for a launcher it has heard from; a person
+      // pressing Reopen may queue for one that is merely unreadable.
+      const absent = opts.auto
+        ? before.state !== 'live'
+        : before.state === 'stale' || before.state === 'never';
+      if (absent) {
+        return refuse(
+          409,
+          {
+            error:
+              before.state === 'never'
+                ? 'No launcher has ever checked in on this host'
+                : 'The launcher is not checking in',
+            code: 'launcher_unavailable',
+            ...liveness(before),
+          },
+          sid,
+        );
+      }
+      const found = await deps.endpointFor(sid, tab.cwd);
+      if (!found.ok) {
+        return refuse(
+          found.status,
+          { error: found.error, code: found.code },
+          sid,
+        );
+      }
+      const command = planTerminalCommand(
+        { sessionId: sid, workspaceCwd: found.endpoint.workspaceCwd },
+        deps.planOpts,
+      );
+      const request = await deps.requests.enqueue({
+        sessionId: sid,
+        workspaceCwd: found.endpoint.workspaceCwd,
+        daemonUrl: found.endpoint.url,
+        daemonToken: found.endpoint.token!,
+        linuxArgv: command.linuxArgv,
+        title: command.title,
+      });
+      await registry.noteReopen(tabId, opts.auto);
+      void audit?.record({
+        action: 'host_tab_reopened',
+        ...(opts.actorTokenId ? { actorTokenId: opts.actorTokenId } : {}),
+        target: sid,
+        outcome: 'ok',
+        detail: { tabId, requestId: request.id, auto: opts.auto },
+      });
+      const after = await deps.requests.launcherLiveness(staleMs);
       return {
-        status: 200,
-        body: { alreadyMirrored: true, sessionId: sid, tabId },
+        status: 202,
+        body: { tabId, requestId: request.id, ...liveness(after) },
       };
+    } finally {
+      inFlightReopens.delete(tabId);
     }
-    const before = await deps.requests.launcherLiveness(staleMs);
-    // The automatic reopen waits for a launcher it has heard from; a person
-    // pressing Reopen may queue for one that is merely unreadable.
-    const absent = opts.auto
-      ? before.state !== 'live'
-      : before.state === 'stale' || before.state === 'never';
-    if (absent) {
-      return refuse(
-        409,
-        {
-          error:
-            before.state === 'never'
-              ? 'No launcher has ever checked in on this host'
-              : 'The launcher is not checking in',
-          code: 'launcher_unavailable',
-          ...liveness(before),
-        },
-        sid,
-      );
-    }
-    const found = await deps.endpointFor(sid, tab.cwd);
-    if (!found.ok) {
-      return refuse(
-        found.status,
-        { error: found.error, code: found.code },
-        sid,
-      );
-    }
-    const command = planTerminalCommand(
-      { sessionId: sid, workspaceCwd: found.endpoint.workspaceCwd },
-      deps.planOpts,
-    );
-    const request = await deps.requests.enqueue({
-      sessionId: sid,
-      workspaceCwd: found.endpoint.workspaceCwd,
-      daemonUrl: found.endpoint.url,
-      daemonToken: found.endpoint.token!,
-      linuxArgv: command.linuxArgv,
-      title: command.title,
-    });
-    await registry.noteReopen(tabId, opts.auto);
-    void audit?.record({
-      action: 'host_tab_reopened',
-      ...(opts.actorTokenId ? { actorTokenId: opts.actorTokenId } : {}),
-      target: sid,
-      outcome: 'ok',
-      detail: { tabId, requestId: request.id, auto: opts.auto },
-    });
-    const after = await deps.requests.launcherLiveness(staleMs);
-    return {
-      status: 202,
-      body: { tabId, requestId: request.id, ...liveness(after) },
-    };
   };
 
   const list: RequestHandler = async (_req, res) => {
@@ -532,13 +568,21 @@ export function createHostTabRoutes(deps: HostTabRoutesDeps): HostTabRoutes {
       if (l.state !== 'live') return;
       const now = (deps.now ?? registry.now)();
       for (const t of await registry.list()) {
-        if (tried.has(t.tabId) || !autoReopenEligible(t, now)) continue;
+        if (
+          tried.has(t.tabId) ||
+          inFlightReopens.has(t.tabId) ||
+          t.reopenedAt !== undefined ||
+          !autoReopenEligible(t, now)
+        ) {
+          continue;
+        }
         tried.add(t.tabId);
         const out = await reopenTab(t.tabId, { auto: true });
         if (
           out.status === 502 ||
           out.status === 503 ||
-          'alreadyMirrored' in out.body
+          'alreadyMirrored' in out.body ||
+          out.body.code === 'reopen_in_progress'
         ) {
           tried.delete(t.tabId);
         }

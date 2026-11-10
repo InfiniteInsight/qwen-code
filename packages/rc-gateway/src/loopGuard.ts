@@ -97,6 +97,7 @@ export function startLoopGuard(deps: LoopGuardDeps = {}): () => void {
 
   let strikes = 0;
   let timer: ReturnType<typeof setInterval> | undefined;
+  let exiting = false;
 
   const stop = (): void => {
     if (timer !== undefined) clearInterval(timer);
@@ -123,13 +124,31 @@ export function startLoopGuard(deps: LoopGuardDeps = {}): () => void {
       `loop guard: event loop delayed ${Math.round(lagMs)}ms (threshold ${thresholdMs}ms), strike ${strikes}/${strikeLimit}; ${formatResources(held)}`,
     );
     void deps.audit?.record({ action: 'event_loop_lag', detail });
-    if (strikes < strikeLimit) return;
+    if (strikes < strikeLimit || exiting) return;
+    exiting = true;
+    stop();
     deps.log?.(
       `loop guard: event loop delayed ${Math.round(lagMs)}ms for ${strikes} ticks in a row, exiting so systemd can replace this process`,
     );
-    void deps.audit?.record({ action: 'event_loop_wedge_exit', detail });
-    stop();
-    exit(1);
+    const result = deps.audit?.record({
+      action: 'event_loop_wedge_exit',
+      detail,
+    });
+    if (result && typeof (result as Promise<unknown>).then === 'function') {
+      let timerId: NodeJS.Timeout | undefined;
+      const fallback = new Promise<void>((r) => {
+        timerId = setTimeout(r, 250);
+      });
+      void Promise.race([
+        Promise.resolve(result).catch(() => {}),
+        fallback,
+      ]).finally(() => {
+        if (timerId !== undefined) clearTimeout(timerId);
+        exit(1);
+      });
+    } else {
+      exit(1);
+    }
   };
 
   timer = setInterval(tick, sampleMs);

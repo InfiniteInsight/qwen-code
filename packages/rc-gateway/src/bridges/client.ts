@@ -180,6 +180,13 @@ export class BridgeClient {
     onEvent: (ev: BridgeEvent) => void,
     signal?: AbortSignal,
     lastEventId?: number,
+    onReplayTruncated?:
+      | ((earliestAvailableId?: number) => void | Promise<void>)
+      | {
+          onReplayTruncated?: (
+            earliestAvailableId?: number,
+          ) => void | Promise<void>;
+        },
   ): Promise<void> {
     const headers = this.authHeaders();
     if (lastEventId !== undefined && Number.isFinite(lastEventId)) {
@@ -192,7 +199,37 @@ export class BridgeClient {
         { headers, signal },
       );
     } catch {
-      return; // network/abort before headers → caller may reconnect
+      return; // network/abort before headers -> caller may reconnect
+    }
+    if (res.status === 412) {
+      let earliestAvailableId: number | undefined;
+      try {
+        const body = (await res.json()) as {
+          earliestAvailableId?: unknown;
+          data?: { earliestAvailableId?: unknown };
+        };
+        const rawEarliest =
+          body?.data?.earliestAvailableId ?? body?.earliestAvailableId;
+        if (typeof rawEarliest === 'number' && Number.isFinite(rawEarliest)) {
+          earliestAvailableId = rawEarliest;
+        }
+      } catch {
+        // Ignore non-JSON 412 body; treat as unknown horizon.
+      }
+      const truncatedCb =
+        typeof onReplayTruncated === 'function'
+          ? onReplayTruncated
+          : onReplayTruncated?.onReplayTruncated;
+      if (truncatedCb) {
+        await truncatedCb(earliestAvailableId);
+      } else {
+        onEvent({
+          type: 'replay_truncated',
+          data:
+            earliestAvailableId !== undefined ? { earliestAvailableId } : {},
+        });
+      }
+      return;
     }
     if (!res.ok || !res.body) return;
     const reader = res.body.getReader();

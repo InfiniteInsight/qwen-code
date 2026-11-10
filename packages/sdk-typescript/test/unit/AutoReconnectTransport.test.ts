@@ -739,6 +739,67 @@ describe('AutoReconnectTransport', () => {
       expect(replacement.subscribeEvents).not.toHaveBeenCalled();
       transport.dispose();
     });
+
+    it.each(['session_closed', 'session_died'] as const)(
+      'stops and returns cleanly without reconnecting after %s (#516)',
+      async (terminalType) => {
+        const initial = createMockTransport({
+          subscribeEvents: vi.fn(async function* () {
+            yield {
+              type: terminalType,
+              data: { sessionId: 's1', reason: 'terminated' },
+              id: 7,
+              v: 1,
+            } as DaemonEvent;
+            throw new DaemonTransportClosedError('closed after terminal');
+          }),
+        });
+        const factory = vi.fn();
+        const transport = new AutoReconnectTransport({
+          baseUrl: 'http://d',
+          initial,
+          factory,
+        });
+
+        const events: DaemonEvent[] = [];
+        for await (const ev of transport.subscribeEvents('s1')) {
+          events.push(ev);
+        }
+
+        expect(events).toHaveLength(1);
+        expect(events[0]?.type).toBe(terminalType);
+        expect(factory).not.toHaveBeenCalled();
+        transport.dispose();
+      },
+    );
+
+    it('bounds consecutive zero-event DaemonTransportClosedError reconnects instead of looping forever (#516)', async () => {
+      const makeAlwaysFailingTransport = () =>
+        createMockTransport({
+          subscribeEvents: vi.fn(async function* () {
+            yield await Promise.reject(
+              new DaemonTransportClosedError('immediate drop'),
+            );
+          }),
+        });
+
+      const factory = vi.fn(async () => makeAlwaysFailingTransport());
+      const transport = new AutoReconnectTransport({
+        baseUrl: 'http://d',
+        initial: makeAlwaysFailingTransport(),
+        factory,
+      });
+
+      const consume = async () => {
+        for await (const _ev of transport.subscribeEvents('s1')) {
+          // should not yield
+        }
+      };
+
+      await expect(consume()).rejects.toThrow(DaemonTransportClosedError);
+      expect(factory).toHaveBeenCalledTimes(3);
+      transport.dispose();
+    });
   });
 
   // ---- Default behavior -------------------------------------------------

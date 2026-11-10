@@ -201,9 +201,18 @@ export function createSessionBtwRoute(
     // the slash-command route uses for the same shape of wait
     // (packages/rc-gateway/src/routes/commands.ts:211).
     const abort = new AbortController();
-    res.on('close', () => {
+    if (
+      req.destroyed ||
+      (res as { closed?: boolean }).closed ||
+      res.writableEnded
+    ) {
+      abort.abort();
+      return;
+    }
+    const onClose = () => {
       if (!res.writableEnded) abort.abort();
-    });
+    };
+    res.on('close', onClose);
 
     let result: unknown;
     try {
@@ -258,6 +267,8 @@ export function createSessionBtwRoute(
         .status(502)
         .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
       return;
+    } finally {
+      res.off('close', onClose);
     }
 
     // The pair is the daemon's answer about its own conversation, so it travels

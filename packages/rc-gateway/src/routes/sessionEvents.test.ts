@@ -1808,6 +1808,33 @@ describe('session-events daemon cursor and epoch identity (#174)', () => {
     expect(gatewayCursorForDaemonCursor(walDir, sid, 9)).toBe(13);
   });
 
+  it('subscribes upstream at cursor 0 (not 1) when WAL holds child_forked at id 1 on an empty fork (#503)', async () => {
+    const sid = 'b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9';
+    const bus = new FakeBusDaemon();
+    const walDir = mkdtempSync(join(tmpdir(), 'rc-se-fork-503-'));
+    const wal = getSharedWal(walDir, sid);
+    wal.append({
+      id: 1,
+      v: 1,
+      type: 'child_forked',
+      data: { parentSessionId: 'p1', forkedAt: '2026-01-01T00:00:00.000Z' },
+    });
+    wal.close();
+
+    const url = `${await mountFanout(bus, walDir)}/session/${sid}/events`;
+    const w = await watch(url, { 'Last-Event-ID': '1' });
+    await w.waitFor((fs) => fs.some((f) => f.ev.type === 'replay_complete'));
+
+    // Upstream daemon subscription must ask for lastEventId: 0, not 1
+    expect(bus.subscriptions[0]?.lastEventId).toBe(0);
+
+    // First live daemon event (raw id 1) must be relayed at WAL id 2
+    bus.publish('first-turn-reply');
+    await w.waitFor(() => texts(w).includes('first-turn-reply'));
+    expect(w.ids()).toContain(2);
+    w.close();
+  });
+
   it('an epoch change on a session that goes quiet is announced once, not on every page open (#254)', async () => {
     // The signature measured in the field: the bus is replaced while the
     // conversation produces nothing, so the log ends on the gap marker and no

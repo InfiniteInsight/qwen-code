@@ -17,10 +17,11 @@
  * reducer commits a `tool_group` history item on `turn_complete`. Live tool
  * display + the permission prompt binding are a following slice.
  */
-import { useContext } from 'react';
+import { useContext, useRef } from 'react';
 import { StreamingState } from '../../types.js';
 import { isSlashCommand } from '../../utils/commandUtils.js';
 import { useDaemonStream } from './useDaemonStream.js';
+import { useDaemonSubagentSync } from './use-daemon-subagent-sync.js';
 import {
   DaemonLossContext,
   DaemonStreamContext,
@@ -113,11 +114,27 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
   _geminiClient,
   _history,
   addItem,
-  _config,
+  config,
   _isConfigInitialized,
   _settings,
   _onDebugMessage,
   handleSlashCommand,
+  _shellModeActive,
+  _getPreferredEditor,
+  _onAuthError,
+  _performMemoryRefresh,
+  _modelSwitchedFromQuotaError,
+  _setModelSwitchedFromQuotaError,
+  _onEditorClose,
+  _onCancelSubmit,
+  _setShellInputFocused,
+  _terminalWidth,
+  _terminalHeight,
+  _midTurnDrainRef,
+  _logger,
+  _availableTerminalHeightRef,
+  _terminalWidthRef,
+  midTurnRestoreRef,
 ) => {
   const driver = useContext(DaemonStreamContext);
   if (!driver) {
@@ -126,12 +143,22 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
     );
   }
   const loss = useContext(DaemonLossContext);
-  const ds = useDaemonStream(driver, addItem, loss ?? undefined);
+  const onSubagentFrame = useDaemonSubagentSync(config, driver);
+  const ds = useDaemonStream(
+    driver,
+    addItem,
+    loss ?? undefined,
+    onSubagentFrame,
+  );
+  const streamingStateRef = useRef(ds.streamingState);
+  streamingStateRef.current = ds.streamingState;
+  const getCurrentStreamingState = () =>
+    ds.getStreamingState?.() ?? streamingStateRef.current;
 
   return {
     streamingState: ds.streamingState,
     submitQuery: async (query, _submitType, promptId, metadata) => {
-      if (ds.streamingState !== StreamingState.Idle) {
+      if (getCurrentStreamingState() !== StreamingState.Idle) {
         metadata?.onAdmissionFailed?.();
         metadata?.onDeliveryFailed?.();
         return;
@@ -167,7 +194,17 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
             if (!slashResult || slashResult.type !== 'submit_prompt') {
               return;
             }
-            await ds.submitQuery(toText(slashResult.content));
+            const promptText = toText(slashResult.content);
+            if (getCurrentStreamingState() !== StreamingState.Idle) {
+              if (midTurnRestoreRef?.current) {
+                midTurnRestoreRef.current([promptText]);
+              } else {
+                metadata?.onAdmissionFailed?.();
+                metadata?.onDeliveryFailed?.();
+              }
+              return;
+            }
+            await ds.submitQuery(promptText);
             return;
           }
         }

@@ -1372,6 +1372,7 @@ export class AcpDispatcher {
     options: { initialReplayPending?: boolean; removePersisted?: boolean } = {},
   ): DeliveryReceipt & { armInitialReplay(): boolean } {
     let settled = false;
+    let armedInitialReplay = Boolean(options.initialReplayPending);
     const ownershipIdentity = conn.captureSessionOwnershipIdentity(sessionId);
     const releaseIdentity = () =>
       conn.releaseSessionOwnershipIdentity(sessionId, ownershipIdentity);
@@ -1392,10 +1393,18 @@ export class AcpDispatcher {
       conn.ownSession(sessionId);
       releaseIdentity();
       this.attachWsSessionStreamIfNeeded(conn, sessionId);
+      this.flushInitialReplayOnActiveSseStreamIfNeeded(
+        conn,
+        sessionId,
+        runtime.bridge,
+      );
     };
     const rollback = () => {
       if (settled) return;
       settled = true;
+      if (armedInitialReplay) {
+        conn.markInitialReplayComplete(sessionId);
+      }
       if (attached) {
         try {
           void runtime.bridge.detachClient(sessionId, clientId).catch(() => {});
@@ -1423,6 +1432,7 @@ export class AcpDispatcher {
         ) {
           return false;
         }
+        armedInitialReplay = true;
         conn.markInitialReplayPending(sessionId);
         return true;
       },
@@ -6352,6 +6362,61 @@ export class AcpDispatcher {
         cleanupSession();
       },
     );
+  }
+
+  private flushInitialReplayOnActiveSseStreamIfNeeded(
+    conn: AcpConnection,
+    sessionId: string,
+    bridge: HttpAcpBridge = this.bridge,
+  ): void {
+    const binding = conn.sessions.get(sessionId);
+    if (
+      !conn.ownsSession(sessionId) ||
+      !binding?.stream ||
+      binding.stream.isClosed ||
+      binding.stream.kind === 'ws' ||
+      !conn.hasInitialReplayPending(sessionId)
+    ) {
+      return;
+    }
+    const signal = binding.abort?.signal;
+    let lastDeliveredId = 0;
+    const snapshot = bridge.getSessionReplaySnapshot(sessionId);
+    if (snapshot) {
+      if (snapshot.degraded) {
+        writeStderrLine(
+          `qwen serve: /acp initial replay used a DEGRADED snapshot (compaction failure) session=${logSafe(sessionId)}; replay may be incomplete`,
+        );
+      }
+      const snapshotEvents = [
+        ...snapshot.compactedTurns,
+        ...snapshot.liveJournal,
+      ];
+      for (const event of snapshotEvents) {
+        if (signal?.aborted || !binding.stream || binding.stream.isClosed) {
+          return;
+        }
+        if (typeof event.id === 'number' && event.id <= lastDeliveredId) {
+          continue;
+        }
+        conn.touch();
+        this.translateEvent(conn, sessionId, event);
+        if (typeof event.id === 'number') {
+          lastDeliveredId = event.id;
+          conn.releaseDeferredSessionReplies(sessionId, event.id);
+        }
+      }
+      if (signal?.aborted || !binding.stream || binding.stream.isClosed) {
+        return;
+      }
+      lastDeliveredId = Math.max(lastDeliveredId, snapshot.lastEventId);
+    } else {
+      writeStderrLine(
+        `qwen serve: /acp initial replay skipped (no snapshot) session=${logSafe(sessionId)}`,
+      );
+    }
+    conn.markInitialReplayComplete(sessionId);
+    conn.endReplayDeferral(sessionId, lastDeliveredId, false);
   }
 
   private async replyOwnership(

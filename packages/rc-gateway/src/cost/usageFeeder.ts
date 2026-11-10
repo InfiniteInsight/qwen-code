@@ -70,6 +70,8 @@ interface Pending {
 export class UsageFeeder {
   private readonly deps: UsageFeederDeps;
   private readonly pending = new Map<string, Pending>();
+  private readonly inFlight = new Set<string>();
+  private readonly forgetAfterDrain = new Set<string>();
 
   constructor(deps: UsageFeederDeps) {
     this.deps = deps;
@@ -89,13 +91,28 @@ export class UsageFeeder {
       }
       return;
     }
-    if (ev.type === 'session_closed') {
-      cache.forget(sessionId);
+    if (ev.type === 'session_closed' || ev.type === 'session_died') {
+      if (this.inFlight.has(sessionId) || this.pending.has(sessionId)) {
+        this.forgetAfterDrain.add(sessionId);
+      } else {
+        cache.forget(sessionId);
+      }
       return;
     }
     // First sight of a session: start seeding now, even if this frame carries no
     // usage, so the id is usually there by the time the first turn ends.
-    if (cache.get(sessionId) === undefined) void cache.ensure(sessionId);
+    if (cache.get(sessionId) === undefined && !this.inFlight.has(sessionId)) {
+      this.inFlight.add(sessionId);
+      void cache.ensure(sessionId).finally(() => {
+        this.inFlight.delete(sessionId);
+        if (
+          !this.pending.has(sessionId) &&
+          this.forgetAfterDrain.delete(sessionId)
+        ) {
+          cache.forget(sessionId);
+        }
+      });
+    }
 
     const usage = extractUsage(ev.data);
     if (!usage) return;
@@ -144,10 +161,7 @@ export class UsageFeeder {
         () => this.drain(sessionId, ''),
         this.deps.maxWaitMs ?? 10_000,
       );
-      void this.deps.cache.ensure(sessionId).then(
-        (id) => this.drain(sessionId, id ?? ''),
-        () => this.drain(sessionId, ''),
-      );
+      this.resolveAndDrain(sessionId);
     }
     p.frames.push(frame);
     const max = this.deps.maxQueuePerSession ?? 64;
@@ -156,6 +170,25 @@ export class UsageFeeder {
       this.ingestNow(sessionId, oldest.data, oldest.attribution, '', oldest.ts);
       this.deps.onUnresolved?.(sessionId, 1);
     }
+  }
+
+  private resolveAndDrain(sessionId: string): void {
+    this.inFlight.add(sessionId);
+    void this.deps.cache
+      .ensure(sessionId)
+      .then(
+        (id) => this.drain(sessionId, id ?? ''),
+        () => this.drain(sessionId, ''),
+      )
+      .finally(() => {
+        this.inFlight.delete(sessionId);
+        if (
+          !this.pending.has(sessionId) &&
+          this.forgetAfterDrain.delete(sessionId)
+        ) {
+          this.deps.cache.forget(sessionId);
+        }
+      });
   }
 
   /** Write every parked frame for the session with `modelId` ('' = unresolved). */
@@ -169,6 +202,12 @@ export class UsageFeeder {
     }
     if (!modelId && p.frames.length > 0) {
       this.deps.onUnresolved?.(sessionId, p.frames.length);
+    }
+    if (
+      !this.inFlight.has(sessionId) &&
+      this.forgetAfterDrain.delete(sessionId)
+    ) {
+      this.deps.cache.forget(sessionId);
     }
   }
 }

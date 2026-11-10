@@ -4421,4 +4421,130 @@ describe('DaemonSessionClient.setApprovalMode', () => {
     expect(calls[0]?.method).toBe('POST');
     expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
   });
+
+  it('self-heals invalid_client_id across session control methods via reattach (#514)', async () => {
+    const clientIdsByPath = new Map<string, string[]>();
+    const recordHeader = (path: string, header: string | undefined) => {
+      const list = clientIdsByPath.get(path) ?? [];
+      list.push(header ?? '');
+      clientIdsByPath.set(path, list);
+      return list.length;
+    };
+
+    let currentRecoveredId = 1;
+    const { fetch } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/resume')) {
+        currentRecoveredId += 1;
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: `client-${currentRecoveredId}`,
+          state: {},
+        });
+      }
+      const path = new URL(req.url).pathname;
+      const attempt = recordHeader(path, req.headers['x-qwen-client-id']);
+      if (attempt === 1) {
+        return jsonResponse(400, {
+          code: 'invalid_client_id',
+          error: 'unknown client',
+        });
+      }
+      if (path.endsWith('/approval-mode')) {
+        return jsonResponse(200, { mode: 'yolo', previous: 'default' });
+      }
+      if (path.endsWith('/model')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          previousModel: 'm-1',
+          currentModel: 'm-2',
+        });
+      }
+      if (path.endsWith('/rewind')) {
+        return jsonResponse(200, {
+          rewoundToPromptId: 'p-1',
+          targetTurnIndex: 0,
+          filesChanged: [],
+          filesFailed: [],
+        });
+      }
+      if (path.endsWith('/cancel')) {
+        return new Response(null, { status: 204 });
+      }
+      if (path.endsWith('/mid-turn-messages/send-now')) {
+        return jsonResponse(200, { delivered: true, count: 1 });
+      }
+      if (path.endsWith('/mid-turn-messages/msg-1')) {
+        return jsonResponse(200, { removed: true });
+      }
+      if (path.endsWith('/mid-turn-message')) {
+        return jsonResponse(202, {
+          accepted: true,
+          messageId: 'msg-1',
+          queueLength: 1,
+        });
+      }
+      if (path.endsWith('/permission/req-1')) {
+        return jsonResponse(200, { resolved: true });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.setApprovalMode('yolo')).resolves.toMatchObject({
+      mode: 'yolo',
+    });
+    expect(session.clientId).toBe('client-2');
+    expect(clientIdsByPath.get('/session/s-1/approval-mode')).toEqual([
+      'client-1',
+      'client-2',
+    ]);
+
+    await expect(session.setModel('m-2')).resolves.toMatchObject({
+      currentModel: 'm-2',
+    });
+    expect(session.clientId).toBe('client-3');
+    expect(clientIdsByPath.get('/session/s-1/model')).toEqual([
+      'client-2',
+      'client-3',
+    ]);
+
+    await expect(session.rewind('p-1')).resolves.toMatchObject({
+      rewoundToPromptId: 'p-1',
+    });
+    expect(session.clientId).toBe('client-4');
+
+    await expect(session.cancel()).resolves.toBeUndefined();
+    expect(session.clientId).toBe('client-5');
+
+    await expect(
+      session.enqueueMidTurnMessage('follow up'),
+    ).resolves.toMatchObject({ accepted: true });
+    expect(session.clientId).toBe('client-6');
+
+    await expect(session.sendMidTurnMessagesNow()).resolves.toMatchObject({
+      delivered: true,
+    });
+    expect(session.clientId).toBe('client-7');
+
+    await expect(session.removeMidTurnMessage('msg-1')).resolves.toMatchObject({
+      removed: true,
+    });
+    expect(session.clientId).toBe('client-8');
+
+    await expect(
+      session.respondToSessionPermission('req-1', { optionId: 'allow_once' }),
+    ).resolves.toBe(true);
+    expect(session.clientId).toBe('client-9');
+  });
 });

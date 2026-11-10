@@ -53,6 +53,7 @@ let nextSyntheticId = 1;
  */
 export function denormalizeAcpNotification(
   notification: JsonRpcNotification,
+  eventId?: number,
 ): DaemonEvent | undefined {
   const params = notification.params ?? {};
 
@@ -116,7 +117,7 @@ export function denormalizeAcpNotification(
               : undefined;
 
     return {
-      id: nextSyntheticId++,
+      id: eventId ?? nextSyntheticId++,
       v: 1,
       type,
       data,
@@ -155,7 +156,7 @@ export function denormalizeAcpNotification(
           ? dataObj['promptId']
           : undefined;
     return {
-      id: nextSyntheticId++,
+      id: eventId ?? nextSyntheticId++,
       v: 1,
       type,
       data: params['data'] ?? params,
@@ -179,7 +180,7 @@ export function denormalizeAcpNotification(
           : undefined;
     if (!requestId) return undefined;
     return {
-      id: nextSyntheticId++,
+      id: eventId ?? nextSyntheticId++,
       v: 1,
       type: 'permission_request',
       data: {
@@ -210,7 +211,7 @@ export function denormalizeAcpNotification(
       : notification.method;
 
     return {
-      id: nextSyntheticId++,
+      id: eventId ?? nextSyntheticId++,
       v: 1,
       type,
       data: params,

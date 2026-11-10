@@ -66,14 +66,30 @@ function settleWithin<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
  *
  * Started BEFORE the prompt is sent, because the chunks arrive during the turn.
  */
-function startTurnCollector(daemon: SessionDaemon, sessionId: string) {
-  const collected = { text: '', tokens: 0 };
+function startTurnCollector(
+  daemon: SessionDaemon,
+  sessionId: string,
+  lastEventId?: number,
+) {
+  const collected: { text: string; tokens: number; lastEventId?: number } = {
+    text: '',
+    tokens: 0,
+    ...(lastEventId !== undefined ? { lastEventId } : {}),
+  };
   const abort = new AbortController();
   const settled = (async () => {
     try {
       for await (const ev of daemon.subscribeEvents(sessionId, {
         signal: abort.signal,
+        ...(lastEventId !== undefined ? { lastEventId } : {}),
       })) {
+        if (
+          typeof ev.id === 'number' &&
+          Number.isFinite(ev.id) &&
+          (collected.lastEventId === undefined || ev.id > collected.lastEventId)
+        ) {
+          collected.lastEventId = ev.id;
+        }
         if (ev.type === 'session_update') {
           collected.text += extractAgentText(ev.data);
           // The ingester's single locus, for the reason it states there: taking
@@ -91,10 +107,12 @@ function startTurnCollector(daemon: SessionDaemon, sessionId: string) {
       // whether the turn worked, and whatever text did arrive is still the best
       // reading of the reply that exists.
     }
+    return collected;
   })();
   return {
     collected,
     settled,
+    done: settled,
     stop: (): void => {
       abort.abort();
     },
@@ -120,14 +138,14 @@ export class SessionSpawner implements AgentSpawner {
     let sessionClosed = false;
     // A signal that already fired never invokes the listener, so read it here.
     const cancelled = { value: req.signal?.aborted === true };
-    const closeSession = (): void => {
+    const closeSession = async (): Promise<void> => {
       if (sessionId === undefined || sessionClosed) return;
       sessionClosed = true;
-      void this.deps.daemon.closeSession(sessionId).catch(() => {});
+      await this.deps.daemon.closeSession?.(sessionId).catch(() => {});
     };
     const onAbort = (): void => {
       cancelled.value = true;
-      closeSession();
+      void closeSession();
     };
     if (cancelled.value) {
       throw new Error('workflow cancelled before the session was created');
@@ -179,12 +197,18 @@ export class SessionSpawner implements AgentSpawner {
         ? `${req.systemContext}\n\n${promptText}`
         : promptText;
       let lastError = '';
+      let lastEventId: number | undefined;
       for (let attempt = 0; attempt < attempts; attempt++) {
         if (cancelled.value) throw new Error('workflow cancelled');
         // Subscribed BEFORE the send. The reply exists only as frames that
         // arrive during the turn, so a reader opened after prompt() settles
-        // would see none of them.
-        const collector = startTurnCollector(this.deps.daemon, sessionId);
+        // would see none of them. Pass lastEventId from the previous attempt
+        // so retry turns skip prior turns' frames in the daemon ring buffer.
+        const collector = startTurnCollector(
+          this.deps.daemon,
+          sessionId,
+          lastEventId,
+        );
         try {
           await this.deps.daemon.prompt(
             sessionId,
@@ -201,6 +225,9 @@ export class SessionSpawner implements AgentSpawner {
         }
         await settleWithin(collector.settled, TURN_DRAIN_GRACE_MS, undefined);
         collector.stop();
+        if (collector.collected.lastEventId !== undefined) {
+          lastEventId = collector.collected.lastEventId;
+        }
         tokens += collector.collected.tokens;
         const text = collector.collected.text;
         if (!req.schema) {
@@ -219,13 +246,17 @@ export class SessionSpawner implements AgentSpawner {
         `schema validation failed after ${attempts} attempts: ${lastError}`,
       );
     } catch (err) {
-      await settle(cancelled.value ? 'cancelled' : 'failed');
+      const isCancelled =
+        cancelled.value ||
+        req.signal?.aborted === true ||
+        (err as { name?: unknown } | undefined)?.name === 'AbortError';
+      await settle(isCancelled ? 'cancelled' : 'failed');
       throw err;
     } finally {
       req.signal?.removeEventListener('abort', onAbort);
       // Every path, not just cancel: a workflow that ran fifty agents to
       // completion used to leave all fifty sessions attached.
-      closeSession();
+      await closeSession();
     }
   }
 }

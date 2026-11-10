@@ -9091,6 +9091,82 @@ describe('Session', () => {
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(1);
     });
 
+    it('cancels background tasks and drops queued notifications from rewound turns while preserving surviving turns (#512)', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'turn 0' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-turn-0',
+                name: 'agent',
+                args: {},
+              },
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'turn 1' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-turn-1',
+                name: 'agent',
+                args: {},
+              },
+            },
+          ],
+        },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue([
+        {
+          promptId: 'p0',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+        {
+          promptId: 'p1',
+          timestamp: new Date('2026-06-13T00:01:00.000Z'),
+          trackedFileBackups: {},
+        },
+      ]);
+
+      const survivingAgent = {
+        id: 'agent-0',
+        status: 'running',
+        startTime: Date.parse('2026-06-13T00:00:10.000Z'),
+        toolUseId: 'call-turn-0',
+        sourceTurnId: 'p0',
+        notified: false,
+      };
+      const rewoundAgent = {
+        id: 'agent-1',
+        status: 'running',
+        startTime: Date.parse('2026-06-13T00:01:10.000Z'),
+        toolUseId: 'call-turn-1',
+        sourceTurnId: 'p1',
+        notified: false,
+      };
+      const cancelAgent = vi.fn();
+      const existingRegistry = mockConfig.getBackgroundTaskRegistry();
+      mockConfig.getBackgroundTaskRegistry = vi.fn().mockReturnValue({
+        ...existingRegistry,
+        getAll: () => [survivingAgent, rewoundAgent],
+        cancel: cancelAgent,
+      } as never);
+
+      session.rewindToTurn(1);
+
+      expect(cancelAgent).toHaveBeenCalledTimes(1);
+      expect(cancelAgent).toHaveBeenCalledWith('agent-1', { notify: false });
+      expect(rewoundAgent.notified).toBe(true);
+      expect(survivingAgent.notified).toBe(false);
+    });
+
     it('counts only real user prompts as rewindable turns', () => {
       const history: Content[] = [
         {

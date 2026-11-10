@@ -114,8 +114,12 @@ export class AutoReconnectTransport implements DaemonTransport {
 
     let lastEventId = opts.lastEventId;
     let currentEpoch = opts.epoch;
+    let emptyReconnectAttempts = 0;
+    const maxEmptyReconnectAttempts = 3;
 
     while (!this._disposed) {
+      let yieldedInAttempt = false;
+      let terminalEventSeen = false;
       try {
         for await (const ev of this.inner.subscribeEvents(sessionId, {
           ...opts,
@@ -126,19 +130,36 @@ export class AutoReconnectTransport implements DaemonTransport {
             opts.onEpoch?.(epoch);
           },
         })) {
+          yieldedInAttempt = true;
+          emptyReconnectAttempts = 0;
           if (typeof ev.id === 'number') {
             lastEventId = ev.id;
           }
+          if (ev.type === 'session_closed' || ev.type === 'session_died') {
+            terminalEventSeen = true;
+          }
           yield ev;
+          if (terminalEventSeen) {
+            return;
+          }
         }
         return;
       } catch (err) {
+        if (terminalEventSeen && err instanceof DaemonTransportClosedError) {
+          return;
+        }
         if (
           !(err instanceof DaemonTransportClosedError) ||
           this._disposed ||
           opts.signal?.aborted
         ) {
           throw err;
+        }
+        if (!yieldedInAttempt) {
+          emptyReconnectAttempts += 1;
+          if (emptyReconnectAttempts > maxEmptyReconnectAttempts) {
+            throw err;
+          }
         }
         await this.reconnect();
         if (this._disposed) throw new DaemonTransportClosedError();

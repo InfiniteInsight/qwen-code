@@ -1215,6 +1215,12 @@ export interface DaemonTranscriptSidechannelState {
    */
   currentToolCallId?: string;
   /**
+   * Session identifier that owns this transcript state, when known. Used to
+   * ignore workspace-broadcast `session.approval_mode.changed` events that
+   * originated from a peer session.
+   */
+  sessionId?: string;
+  /**
    * Approval mode for the current session, mirrored from
    * `session.approval_mode.changed` events. Renderers use this to badge
    * the input area ("plan" / "default" / "auto-edit" / "yolo").
@@ -1301,6 +1307,7 @@ export interface DaemonTranscriptState
 }
 
 export interface DaemonTranscriptReducerOptions {
+  sessionId?: string;
   maxBlocks?: number;
   maxRetainedBytes?: number;
   now?: number;

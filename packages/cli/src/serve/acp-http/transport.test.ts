@@ -12074,6 +12074,99 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       },
     );
   });
+
+  it('flushes initial replay snapshot onto an already-open HTTP+SSE session stream when session/load runs on an owned session (#511)', async () => {
+    const connId = await initialize();
+    const connReader = frameReader(await openStream(connId));
+    let sessReader: ReturnType<typeof frameReader> | undefined;
+    try {
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'session/new',
+        params: { cwd: TEST_WORKSPACE },
+      });
+      const newRes = (await connReader.next()) as {
+        result: { sessionId: string };
+      };
+      const sessionId = newRes.result.sessionId;
+
+      sessReader = frameReader(await openStream(connId, sessionId));
+      await vi.waitFor(() => {
+        expect(bridge.subscribeCalls.length).toBeGreaterThan(0);
+      });
+
+      bridge.replaySnapshot = {
+        compactedTurns: [
+          {
+            v: 1,
+            id: 10,
+            type: 'session_update',
+            data: {
+              sessionId,
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'replayed user turn' },
+              },
+            },
+          },
+        ],
+        liveJournal: [
+          {
+            v: 1,
+            id: 11,
+            type: 'session_update',
+            data: {
+              sessionId,
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'replayed assistant turn' },
+              },
+            },
+          },
+        ],
+        lastEventId: 11,
+      };
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'session/load',
+        params: { sessionId, cwd: TEST_WORKSPACE },
+      });
+      const loadRes = (await connReader.next()) as {
+        id: number;
+        result?: Record<string, unknown>;
+      };
+      expect(loadRes.id).toBe(2);
+
+      const replayedFirst = await sessReader.next();
+      const replayedSecond = await sessReader.next();
+      expect(replayedFirst).toMatchObject({
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: 'replayed user turn' },
+          },
+        },
+      });
+      expect(replayedSecond).toMatchObject({
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'replayed assistant turn' },
+          },
+        },
+      });
+    } finally {
+      sessReader?.close();
+      connReader.close();
+    }
+  });
 });
 
 // ── WebSocket transport security tests ────────────────────────────────

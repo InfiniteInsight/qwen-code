@@ -368,11 +368,15 @@ export function createForkRoute(
     //    (scan hit), fall back to the plain `loadSession` — unroutable under
     //    a pool, which rolls back below. On ANY failure: roll back the
     //    just-written file; pool-full -> 503, everything else -> 502.
+    let restored:
+      | Awaited<ReturnType<ForkDaemon['resumeSession']>>
+      | Awaited<ReturnType<ForkDaemon['loadSession']>>
+      | undefined;
     try {
       if (workspaceCwd) {
-        await daemon.resumeSession(newId, { workspaceCwd });
+        restored = await daemon.resumeSession(newId, { workspaceCwd });
       } else {
-        await daemon.loadSession(newId);
+        restored = await daemon.loadSession(newId);
       }
     } catch (err) {
       await removeFork(chatsDir, newId);
@@ -390,10 +394,35 @@ export function createForkRoute(
 
     // 7. Seed the WAL and publish SSE events when deps are wired.
     //    session_forked id = fromEventId + 1 (defaults to 1 when absent),
-    //    raised above the parent WAL's end; child_forked id = 1 (the child
-    //    WAL is always fresh).
+    //    raised above the parent WAL's end; child_forked id follows any
+    //    in-band replay frames returned by daemon restore (or 1 when none).
     const parentEventId = fromEventId ?? 0;
     let sessionForkedId = parentEventId + 1;
+    let childForkedId = 1;
+
+    const restoredObj =
+      restored !== undefined &&
+      restored !== null &&
+      typeof restored === 'object'
+        ? (restored as {
+            compactedReplay?: Array<{
+              id?: number;
+              v?: number;
+              type?: string;
+              data?: unknown;
+              ts?: string;
+            }>;
+            liveJournal?: Array<{
+              id?: number;
+              v?: number;
+              type?: string;
+              data?: unknown;
+              ts?: string;
+            }>;
+            lastEventId?: number;
+            eventEpoch?: string;
+          })
+        : undefined;
 
     if (walDir) {
       // Registry handles for both, so the relay that already streams the
@@ -417,11 +446,59 @@ export function createForkRoute(
       parentWal.close();
 
       const childWal = getSharedWal(walDir, newId);
+      const replayFrames = [
+        ...(Array.isArray(restoredObj?.compactedReplay)
+          ? restoredObj.compactedReplay
+          : []),
+        ...(Array.isArray(restoredObj?.liveJournal)
+          ? restoredObj.liveJournal
+          : []),
+      ];
+      const restoredEpoch =
+        typeof restoredObj?.eventEpoch === 'string' &&
+        restoredObj.eventEpoch.length > 0
+          ? restoredObj.eventEpoch
+          : undefined;
+      let nextChildId = (childWal.latestId() ?? 0) + 1;
+      let lastRawId =
+        typeof restoredObj?.lastEventId === 'number' &&
+        Number.isFinite(restoredObj.lastEventId) &&
+        restoredObj.lastEventId >= 0
+          ? restoredObj.lastEventId
+          : 0;
+      for (const frame of replayFrames) {
+        if (!frame || typeof frame !== 'object') continue;
+        const rawId =
+          typeof frame.id === 'number' &&
+          Number.isFinite(frame.id) &&
+          frame.id >= 1
+            ? frame.id
+            : nextChildId;
+        const outId = Math.max(rawId, nextChildId);
+        nextChildId = outId + 1;
+        if (rawId > lastRawId) lastRawId = rawId;
+        childWal.append({
+          id: outId,
+          v: typeof frame.v === 'number' ? frame.v : 1,
+          type: typeof frame.type === 'string' ? frame.type : 'session_update',
+          data: frame.data,
+          ...(typeof frame.ts === 'string' ? { ts: frame.ts } : {}),
+          _rc: {
+            raw: rawId,
+            ...(restoredEpoch !== undefined ? { epoch: restoredEpoch } : {}),
+          },
+        });
+      }
+      childForkedId = nextChildId;
       childWal.append({
-        id: 1,
+        id: childForkedId,
         v: 1,
         type: 'child_forked',
         data: { parentSessionId: parentId, forkedAt },
+        _rc: {
+          raw: lastRawId,
+          ...(restoredEpoch !== undefined ? { epoch: restoredEpoch } : {}),
+        },
       });
       childWal.close();
     }
@@ -441,7 +518,7 @@ export function createForkRoute(
         type: 'session_event',
         sessionId: newId,
         event: {
-          id: 1,
+          id: childForkedId,
           v: 1,
           type: 'child_forked',
           data: { parentSessionId: parentId, forkedAt },

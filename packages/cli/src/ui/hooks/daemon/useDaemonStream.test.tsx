@@ -8,7 +8,10 @@
 import { StrictMode } from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
-import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
+import {
+  BackgroundTaskRegistry,
+  ToolConfirmationOutcome,
+} from '@qwen-code/qwen-code-core';
 import { StreamingState, type HistoryItemWithoutId } from '../../types.js';
 import {
   useDaemonStream,
@@ -1482,6 +1485,333 @@ describe('useDaemonStream', () => {
     expect(added).toContainEqual({
       type: 'gemini',
       text: 'Real assistant reply',
+    });
+  });
+
+  it('preserves in-flight turn state and pending text across a transient SSE EOF without terminal session event (#508)', async () => {
+    const driver = makeFakeDriver({ clientId: 'me' });
+    const added: HistoryItemWithoutId[] = [];
+    const addItem = vi.fn((item: HistoryItemWithoutId) => {
+      added.push(item);
+      return added.length;
+    });
+    const { result } = renderHook(() => useDaemonStream(driver, addItem));
+    await waitFor(() => expect(driver.stats().eventsCalls).toBe(1));
+
+    act(() => {
+      driver.push(
+        su(
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Part 1 ' },
+          },
+          'phone',
+        ),
+      );
+      // Simulate transient SSE EOF without session_closed / session_died.
+      driver.end();
+    });
+
+    await waitFor(() =>
+      expect(result.current.pendingHistoryItems).toEqual([
+        { type: 'gemini', text: 'Part 1 ' },
+      ]),
+    );
+    // Streaming state must remain Responding and partial text must not be prematurely committed.
+    expect(result.current.streamingState).toBe(StreamingState.Responding);
+    expect(added).toEqual([]);
+  });
+
+  it('does not finalize an active remote turn when submitQuery rejects with a 409 session-busy error (#508)', async () => {
+    const driver = makeFakeDriver({ clientId: 'me', manualPrompt: true });
+    const added: HistoryItemWithoutId[] = [];
+    const addItem = vi.fn((item: HistoryItemWithoutId) => {
+      added.push(item);
+      return added.length;
+    });
+    const { result } = renderHook(() => useDaemonStream(driver, addItem));
+    await waitFor(() => expect(driver.stats().eventsCalls).toBe(1));
+
+    // Remote client starts a turn.
+    act(() => {
+      driver.push(
+        su(
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Remote streaming...' },
+          },
+          'phone',
+        ),
+      );
+    });
+    await waitFor(() =>
+      expect(result.current.streamingState).toBe(StreamingState.Responding),
+    );
+
+    let sent!: Promise<void>;
+    act(() => {
+      sent = result.current.submitQuery('concurrent prompt');
+    });
+
+    await act(async () => {
+      driver.failPrompt(
+        Object.assign(new Error('Session is busy (409)'), {
+          status: 409,
+          code: 'session_busy',
+        }),
+      );
+      await expect(sent).rejects.toThrow('Session is busy (409)');
+    });
+
+    // Remote turn must stay Responding and keep its partial text in pendingHistoryItems.
+    expect(result.current.streamingState).toBe(StreamingState.Responding);
+    expect(result.current.pendingHistoryItems).toEqual([
+      { type: 'gemini', text: 'Remote streaming...' },
+    ]);
+    expect(added).toEqual([{ type: 'user', text: 'concurrent prompt' }]);
+  });
+
+  it('useDaemonStreamAdapter enqueues slash command submit_prompt into midTurnRestoreRef when stream becomes busy while slash command resolves (#508)', async () => {
+    const driver = makeFakeDriver({ clientId: 'me', manualPrompt: true });
+    let resolveSlash!: (val: {
+      type: 'submit_prompt';
+      content: string;
+    }) => void;
+    const handleSlashCommand = vi.fn(
+      () =>
+        new Promise<{ type: 'submit_prompt'; content: string }>((resolve) => {
+          resolveSlash = resolve;
+        }),
+    );
+    const midTurnRestore = vi.fn();
+    const midTurnRestoreRef = { current: midTurnRestore };
+
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <DaemonStreamContext.Provider value={driver}>
+        {children}
+      </DaemonStreamContext.Provider>
+    );
+    const { result } = renderHook(
+      () =>
+        (
+          useDaemonStreamAdapter as (
+            ...args: unknown[]
+          ) => ReturnType<typeof useDaemonStreamAdapter>
+        )(
+          {} as never,
+          [],
+          vi.fn(),
+          {} as never,
+          true,
+          {} as never,
+          vi.fn(),
+          handleSlashCommand,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          midTurnRestoreRef,
+        ),
+      { wrapper },
+    );
+
+    let slashSubmit!: Promise<void>;
+    act(() => {
+      slashSubmit = result.current.submitQuery('/commit');
+    });
+
+    // While /commit is resolving, a remote turn starts streaming.
+    act(() => {
+      driver.push(
+        su(
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Remote turn active' },
+          },
+          'phone',
+        ),
+      );
+    });
+    await waitFor(() =>
+      expect(result.current.streamingState).toBe(StreamingState.Responding),
+    );
+
+    await act(async () => {
+      resolveSlash({ type: 'submit_prompt', content: 'expanded slash prompt' });
+      await slashSubmit;
+    });
+
+    expect(midTurnRestore).toHaveBeenCalledWith(['expanded slash prompt']);
+    expect(driver.stats().prompts).toEqual([]);
+  });
+
+  it('synchronizes daemon subagent tasks and live _meta.parentToolCallId frames into BackgroundTaskRegistry', async () => {
+    const registry = new BackgroundTaskRegistry();
+    const fakeConfig = {
+      getBackgroundTaskRegistry: () => registry,
+    };
+    const cancelTask = vi.fn().mockResolvedValue({ cancelled: true });
+    const messageSubagentSession = vi.fn().mockResolvedValue({});
+    let agentsPayload: {
+      tasks: Array<{
+        kind: 'agent';
+        id: string;
+        description: string;
+        subagentType: string;
+        status: 'running' | 'completed';
+        startTime: number;
+        isBackgrounded: boolean;
+        toolUseId: string;
+        stats: { totalTokens: number; toolUses: number; durationMs: number };
+        recentActivities: Array<{
+          name: string;
+          description: string;
+          at: number;
+        }>;
+      }>;
+    } = {
+      tasks: [
+        {
+          kind: 'agent',
+          id: 'agent-1',
+          description: 'Explore auth module',
+          subagentType: 'explore',
+          status: 'running',
+          startTime: 1000,
+          isBackgrounded: false,
+          toolUseId: 'call-agent-1',
+          stats: { totalTokens: 450, toolUses: 1, durationMs: 1200 },
+          recentActivities: [
+            { name: 'Read', description: 'src/auth.ts', at: 1100 },
+          ],
+        },
+      ],
+    };
+    const baseDriver = makeFakeDriver({ clientId: 'tui-client-1' });
+    const driver: DaemonSessionDriver = {
+      ...baseDriver,
+      session: { sessionId: 'sess-1' },
+      client: { messageSubagentSession },
+      agents: vi.fn(async () => agentsPayload),
+      cancelTask,
+    };
+    const addItem = vi.fn(() => 0);
+
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <DaemonStreamContext.Provider value={driver}>
+        {children}
+      </DaemonStreamContext.Provider>
+    );
+
+    renderHook(
+      () =>
+        (
+          useDaemonStreamAdapter as (
+            ...args: unknown[]
+          ) => ReturnType<typeof useDaemonStreamAdapter>
+        )(
+          {} as never,
+          [],
+          addItem,
+          fakeConfig as never,
+          true,
+          {} as never,
+          vi.fn(),
+        ),
+      { wrapper },
+    );
+
+    await waitFor(() => {
+      const entry = registry.get('agent-1');
+      expect(entry).toBeDefined();
+      expect(entry?.subagentType).toBe('explore');
+      expect(entry?.description).toBe('Explore auth module');
+      expect(entry?.toolUseId).toBe('call-agent-1');
+    });
+
+    // Stream live child thought, tool_call, and speech chunks tagged with _meta.parentToolCallId
+    act(() => {
+      baseDriver.push(
+        su({
+          sessionUpdate: 'agent_thought_chunk',
+          content: { type: 'text', text: 'Checking token validation' },
+          _meta: { parentToolCallId: 'call-agent-1' },
+        }),
+      );
+      baseDriver.push(
+        su({
+          sessionUpdate: 'tool_call',
+          toolCallId: 'child-tc-1',
+          title: 'Grep',
+          rawInput: { pattern: 'verifyToken' },
+          _meta: { parentToolCallId: 'call-agent-1', toolName: 'Grep' },
+        }),
+      );
+      baseDriver.push(
+        su({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Found verifyToken in auth.ts' },
+          _meta: { parentToolCallId: 'call-agent-1' },
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      const entry = registry.get('agent-1');
+      expect(entry?.latestThought).toBe('Checking token validation');
+      expect(entry?.liveText).toBe('Found verifyToken in auth.ts');
+      expect(entry?.activityPhase).toBe('responding');
+      expect(entry?.recentActivities?.at(-1)).toMatchObject({
+        name: 'Grep',
+        description: 'verifyToken',
+      });
+    });
+
+    // Sending a message to the running subagent forwards to daemon client
+    act(() => {
+      registry.queueMessage('agent-1', 'Check refresh tokens too');
+    });
+    await waitFor(() => {
+      expect(messageSubagentSession).toHaveBeenCalledWith(
+        'sess-1',
+        'agent-1',
+        'Check refresh tokens too',
+      );
+    });
+
+    // Cancelling the subagent in local registry forwards to driver.cancelTask
+    act(() => {
+      registry.cancel('agent-1');
+    });
+    await waitFor(() => {
+      expect(cancelTask).toHaveBeenCalledWith('agent-1', 'agent');
+    });
+
+    // Subsequent task_changed event reconciles completed state
+    agentsPayload = {
+      tasks: [
+        {
+          ...agentsPayload.tasks[0]!,
+          status: 'completed' as const,
+        },
+      ],
+    };
+    act(() => {
+      baseDriver.push({ type: 'task_changed', data: {} });
+    });
+    await waitFor(() => {
+      expect(registry.get('agent-1')?.status).toBe('completed');
     });
   });
 });

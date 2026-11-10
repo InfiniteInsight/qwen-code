@@ -73,4 +73,41 @@ describe('ReviewRegistry', () => {
     expect(reg.get(a.reviewId)?.status).toBe('running');
     expect(reg.get(b.reviewId)?.status).toBe('orphaned');
   });
+
+  it('serializes concurrent register, setReport, and setStatus writes atomically (#506)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'reviews-'));
+    const path = join(dir, 'reviews.json');
+    const reg = await ReviewRegistry.open(path);
+    const created = await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        reg.register({
+          sessionId: `s-${i}`,
+          target: { kind: 'pr', number: i + 1 },
+          comment: false,
+          autofix: false,
+          approvalLeg: 'vote',
+          triggeredByTokenId: 'tok1',
+        }),
+      ),
+    );
+    await Promise.all(
+      created.flatMap((rec, i) => [
+        reg.setReport(rec.reviewId, `/tmp/r-${i}.md`, {
+          findingsCount: i,
+          verdict: 'pass',
+        }),
+        reg.setStatus(rec.reviewId, i % 2 === 0 ? 'completed' : 'failed'),
+      ]),
+    );
+    const reopened = await ReviewRegistry.open(path);
+    expect(reopened.list()).toHaveLength(20);
+    expect(reopened.list({ status: 'completed' })).toHaveLength(10);
+    expect(reopened.list({ status: 'failed' })).toHaveLength(10);
+    for (let i = 0; i < created.length; i++) {
+      expect(reopened.get(created[i]!.reviewId)?.summary).toEqual({
+        findingsCount: i,
+        verdict: 'pass',
+      });
+    }
+  });
 });

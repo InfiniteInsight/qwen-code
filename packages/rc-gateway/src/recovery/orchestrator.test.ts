@@ -497,7 +497,7 @@ describe('createReportOutcome', () => {
     unsub();
   });
 
-  it('WAL dark (no walDir): no durable frames and no owner session_event, but audit + push still happen', () => {
+  it('WAL dark (no walDir): owner receives session_event markers even without durable WAL (#521)', () => {
     const owner = new OwnerEventBus();
     const ownerEvents: OwnerEvent[] = [];
     const unsub = owner.subscribe((ev) => ownerEvents.push(ev));
@@ -513,7 +513,32 @@ describe('createReportOutcome', () => {
       tookMs: 3,
     });
 
-    expect(ownerEvents).toHaveLength(0);
+    expect(ownerEvents).toHaveLength(2);
+    expect(ownerEvents[0]).toMatchObject({
+      type: 'session_event',
+      sessionId: sid,
+      event: {
+        id: 1,
+        v: 1,
+        type: 'session_interrupted',
+        data: {
+          sessionId: sid,
+          recovered: true,
+          hadInFlightTurn: false,
+          exitCode: 0,
+        },
+      },
+    });
+    expect(ownerEvents[1]).toMatchObject({
+      type: 'session_event',
+      sessionId: sid,
+      event: {
+        id: 2,
+        v: 1,
+        type: 'session_recovered',
+        data: { sessionId: sid, tookMs: 3 },
+      },
+    });
     expect(entries).toEqual([
       {
         action: 'session_interrupted',

@@ -192,6 +192,30 @@ describe('denormalizeAcpNotification', () => {
     expect(e2!.id).toBe(2);
   });
 
+  it('preserves explicit server-assigned eventId without advancing synthetic counter (#515)', () => {
+    const n1: JsonRpcNotification = {
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: { type: 'a', data: {} },
+    };
+    const n2: JsonRpcNotification = {
+      jsonrpc: '2.0',
+      method: '_qwen/notify',
+      params: { kind: 'replay_complete', data: {} },
+    };
+    const n3: JsonRpcNotification = {
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: { type: 'c', data: {} },
+    };
+    const e1 = denormalizeAcpNotification(n1, 42);
+    const e2 = denormalizeAcpNotification(n2, 43);
+    const e3 = denormalizeAcpNotification(n3);
+    expect(e1!.id).toBe(42);
+    expect(e2!.id).toBe(43);
+    expect(e3!.id).toBe(1);
+  });
+
   it('preserves _meta when present as a plain object', () => {
     const notification: JsonRpcNotification = {
       jsonrpc: '2.0',

@@ -2309,15 +2309,27 @@ export function reduceDaemonSessionEvent(
     // `data.originatorClientId` (which the daemon does NOT currently
     // populate, but the field exists on the Data interfaces) and falls
     // back to the envelope.
-    case 'approval_mode_changed':
+    case 'approval_mode_changed': {
+      const isForeignSession =
+        base.sessionId !== undefined && event.data.sessionId !== base.sessionId;
       return {
         ...base,
-        approvalMode: event.data.next,
-        planExecutionMode:
-          event.data.next === 'plan' ? event.data.planExecutionMode : undefined,
+        ...(base.sessionId === undefined && !event.data.persisted
+          ? { sessionId: event.data.sessionId }
+          : {}),
+        ...(isForeignSession
+          ? {}
+          : {
+              approvalMode: event.data.next,
+              planExecutionMode:
+                event.data.next === 'plan'
+                  ? event.data.planExecutionMode
+                  : undefined,
+            }),
         approvalModeChangedCount: base.approvalModeChangedCount + 1,
         lastApprovalModeChange: mergeOriginator(event.data, event),
       };
+    }
     case 'tool_toggled':
       return {
         ...base,

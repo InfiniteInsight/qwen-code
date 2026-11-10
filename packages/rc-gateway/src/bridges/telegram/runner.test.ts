@@ -356,6 +356,101 @@ describe('TelegramBridge — cursor persistence', () => {
     const entry = cursors.get('tok_b', 'sess-q');
     expect(entry?.lastEventId).toBe(42);
   });
+
+  it('resets expired cursor on 412 replay_truncated and reconnects with updated cursor in per-session loop (#504)', async () => {
+    await chats.bind(7, 'sess-q');
+    const cursors = await CursorStore.open(join(dir, 'cursors.json'));
+    await cursors.setLastEventId('tok_trunc', 'sess-q', 10);
+
+    const passedCursors: Array<number | undefined> = [];
+    const ac = new AbortController();
+    const botApi = {
+      getUpdates: async (_o: number, _t: number, signal?: AbortSignal) => {
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted) {
+            resolve();
+            return;
+          }
+          signal?.addEventListener('abort', () => resolve(), { once: true });
+        });
+        return { ok: false, status: 0, updates: [] };
+      },
+      sendMessage: async () => ({ ok: true, status: 200 }),
+      answerCallbackQuery: async () => ({ ok: true, status: 200 }),
+    } as unknown as TelegramBotApi;
+
+    const client = {
+      register: async () => ({ ok: true, status: 200 }),
+      heartbeat: async () => ({ ok: true, status: 200 }),
+      subscribeEvents: async (
+        _sid: string,
+        _cb: (ev: unknown) => void,
+        _signal?: AbortSignal,
+        cursor?: number,
+        onReplayTruncated?: (earliest?: number) => void | Promise<void>,
+      ) => {
+        passedCursors.push(cursor);
+        if (passedCursors.length === 1) {
+          await onReplayTruncated?.(50);
+          return;
+        }
+        ac.abort();
+      },
+    } as unknown as BridgeClient;
+
+    const bridge = new TelegramBridge({
+      botApi,
+      client,
+      chats,
+      cursors,
+      tokenId: 'tok_trunc',
+      baseUrl: 'http://127.0.0.1:4170',
+      pollTimeoutSec: 0,
+      sleep: async () => {},
+    });
+    await bridge.start(ac.signal);
+    expect(passedCursors).toEqual([10, 49]);
+    await cursors['inFlight'];
+    await cursors['queued'];
+    expect(cursors.get('tok_trunc', 'sess-q')?.lastEventId).toBe(49);
+  });
+
+  it('reconciles newly bound sessions even when getUpdates encounters a transient poll error (#504)', async () => {
+    const subscribed: string[] = [];
+    let pollCall = 0;
+    const ac = new AbortController();
+    const botApi = {
+      getUpdates: async () => {
+        pollCall++;
+        if (pollCall === 1) {
+          await chats.bind(7, 'sess-during-outage');
+          return { ok: false, status: 502, updates: [] };
+        }
+        ac.abort();
+        return { ok: true, status: 200, updates: [] };
+      },
+      sendMessage: async () => ({ ok: true, status: 200 }),
+      answerCallbackQuery: async () => ({ ok: true, status: 200 }),
+    } as unknown as TelegramBotApi;
+    const client = {
+      register: async () => ({ ok: true, status: 200 }),
+      heartbeat: async () => ({ ok: true, status: 200 }),
+      subscribeEvents: async (sid: string) => {
+        subscribed.push(sid);
+      },
+    } as unknown as BridgeClient;
+
+    const bridge = new TelegramBridge({
+      botApi,
+      client,
+      chats,
+      baseUrl: 'http://127.0.0.1:4170',
+      pollTimeoutSec: 0,
+      sleep: async () => {},
+    });
+    await bridge.start(ac.signal);
+    expect(subscribed).toContain('sess-during-outage');
+  });
 });
 
 describe('TelegramBridge, a failing getUpdates (#168)', () => {

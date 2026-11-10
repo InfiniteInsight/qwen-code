@@ -455,4 +455,65 @@ describe('POST /session/:id/btw', () => {
     expect(out.status).toBe(200);
     expect(entries).toHaveLength(0);
   });
+
+  it('aborts and returns early without calling daemon if req is destroyed (#524)', async () => {
+    let called = false;
+    const daemon = {
+      btwSession: async () => {
+        called = true;
+        return { sessionId: SID, answer: SECRET_ANSWER };
+      },
+    } as unknown as SessionDaemon;
+    const req = fakeReq({ body: { question: QUESTION } });
+    (req as unknown as { destroyed: boolean }).destroyed = true;
+    const res = fakeRes();
+    const out = await callRoute(daemon, undefined, { req, res });
+    expect(called).toBe(false);
+    expect(out.status).toBeUndefined();
+  });
+
+  it('aborts and returns early without calling daemon if res is closed (#524)', async () => {
+    let called = false;
+    const daemon = {
+      btwSession: async () => {
+        called = true;
+        return { sessionId: SID, answer: SECRET_ANSWER };
+      },
+    } as unknown as SessionDaemon;
+    const req = fakeReq({ body: { question: QUESTION } });
+    const res = fakeRes();
+    (res as unknown as { closed: boolean }).closed = true;
+    const out = await callRoute(daemon, undefined, { req, res });
+    expect(called).toBe(false);
+    expect(out.status).toBeUndefined();
+  });
+
+  it('aborts and returns early without calling daemon if res.writableEnded is true (#524)', async () => {
+    let called = false;
+    const daemon = {
+      btwSession: async () => {
+        called = true;
+        return { sessionId: SID, answer: SECRET_ANSWER };
+      },
+    } as unknown as SessionDaemon;
+    const req = fakeReq({ body: { question: QUESTION } });
+    const res = fakeRes();
+    res.writableEnded = true;
+    const out = await callRoute(daemon, undefined, { req, res });
+    expect(called).toBe(false);
+    expect(out.status).toBeUndefined();
+  });
+
+  it('removes close listener in finally after daemon.btwSession completes (#524)', async () => {
+    const res = fakeRes();
+    expect(res.listenerCount('close')).toBe(0);
+    const daemon = {
+      btwSession: async () => {
+        expect(res.listenerCount('close')).toBe(1);
+        return { sessionId: SID, answer: SECRET_ANSWER };
+      },
+    } as unknown as SessionDaemon;
+    await callRoute(daemon, undefined, { res });
+    expect(res.listenerCount('close')).toBe(0);
+  });
 });

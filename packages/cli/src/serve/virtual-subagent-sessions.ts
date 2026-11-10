@@ -311,6 +311,63 @@ function replayCursorState(
   };
 }
 
+function trimStreamedAssistantRecord(
+  record: ChatRecord,
+  streamed: { textLen: number; thoughtLen: number },
+): ChatRecord | null {
+  const parts = record.message?.parts;
+  if (!parts || parts.length === 0) {
+    return null;
+  }
+  let remainingTextToSkip = streamed.textLen;
+  let remainingThoughtToSkip = streamed.thoughtLen;
+  const nextParts: NonNullable<ChatRecord['message']>['parts'] = [];
+  for (const part of parts) {
+    if (typeof part.text === 'string') {
+      const isThought = 'thought' in part && Boolean(part.thought);
+      if (isThought) {
+        if (remainingThoughtToSkip >= part.text.length) {
+          remainingThoughtToSkip -= part.text.length;
+          continue;
+        }
+        const suffix =
+          remainingThoughtToSkip > 0
+            ? part.text.slice(remainingThoughtToSkip)
+            : part.text;
+        remainingThoughtToSkip = 0;
+        if (suffix.length > 0) {
+          nextParts.push({ ...part, text: suffix });
+        }
+      } else {
+        if (remainingTextToSkip >= part.text.length) {
+          remainingTextToSkip -= part.text.length;
+          continue;
+        }
+        const suffix =
+          remainingTextToSkip > 0
+            ? part.text.slice(remainingTextToSkip)
+            : part.text;
+        remainingTextToSkip = 0;
+        if (suffix.length > 0) {
+          nextParts.push({ ...part, text: suffix });
+        }
+      }
+      continue;
+    }
+    nextParts.push(part);
+  }
+  if (nextParts.length === 0) {
+    return null;
+  }
+  return {
+    ...record,
+    message: {
+      ...record.message!,
+      parts: nextParts,
+    },
+  };
+}
+
 class VirtualSubagentTarget {
   private readonly bus = new EventBus(1_024, 8);
   private readonly events: BridgeEvent[] = [];
@@ -323,9 +380,13 @@ class VirtualSubagentTarget {
   private streamReady = false;
   private canonicalThroughTimestamp = 0;
   private readonly completedStreamRounds = new Set<string>();
-  private readonly streamedRounds = new Set<string>();
+  private readonly streamedRoundLengths = new Map<
+    string,
+    { textLen: number; thoughtLen: number }
+  >();
   private readonly streamRunIds = new Set<string>();
   private legacyStreamedSinceCanonical = false;
+  private legacyStreamedLengths = { textLen: 0, thoughtLen: 0 };
   private replayState: unknown;
   private initialized = false;
   private refreshPromise: Promise<void> = Promise.resolve();
@@ -429,16 +490,18 @@ class VirtualSubagentTarget {
     this.canonicalStreamOffset = 0;
     this.completedStreamRounds.clear();
     this.streamRunIds.clear();
-    this.streamedRounds.clear();
+    this.streamedRoundLengths.clear();
     this.legacyStreamedSinceCanonical = false;
+    this.legacyStreamedLengths = { textLen: 0, thoughtLen: 0 };
   }
 
   private resetStreamState(): void {
     this.streamOffset = 0;
     this.canonicalStreamOffset = 0;
     this.streamRunIds.clear();
-    this.streamedRounds.clear();
+    this.streamedRoundLengths.clear();
     this.legacyStreamedSinceCanonical = false;
+    this.legacyStreamedLengths = { textLen: 0, thoughtLen: 0 };
   }
 
   private async readNewRecords(endOffset?: number): Promise<ChatRecord[]> {
@@ -567,8 +630,25 @@ class VirtualSubagentTarget {
           }),
         });
         this.rememberEvent(event);
-        if (roundKey) this.streamedRounds.add(roundKey);
-        else this.legacyStreamedSinceCanonical = true;
+        if (roundKey) {
+          const prev = this.streamedRoundLengths.get(roundKey) ?? {
+            textLen: 0,
+            thoughtLen: 0,
+          };
+          if (record.thought) {
+            prev.thoughtLen += record.text.length;
+          } else {
+            prev.textLen += record.text.length;
+          }
+          this.streamedRoundLengths.set(roundKey, prev);
+        } else {
+          this.legacyStreamedSinceCanonical = true;
+          if (record.thought) {
+            this.legacyStreamedLengths.thoughtLen += record.text.length;
+          } else {
+            this.legacyStreamedLengths.textLen += record.text.length;
+          }
+        }
       }
       for (const completed of this.completedStreamRounds) {
         const runId = completed.slice(0, completed.lastIndexOf(':'));
@@ -582,8 +662,9 @@ class VirtualSubagentTarget {
       this.streamOffset = 0;
       this.canonicalStreamOffset = 0;
       this.streamRunIds.clear();
-      this.streamedRounds.clear();
+      this.streamedRoundLengths.clear();
       this.legacyStreamedSinceCanonical = false;
+      this.legacyStreamedLengths = { textLen: 0, thoughtLen: 0 };
     } finally {
       await handle?.close();
     }
@@ -596,20 +677,26 @@ class VirtualSubagentTarget {
       return;
     }
     for (const record of records) {
+      const hasTextContent = Boolean(
+        record.message?.parts?.some(
+          (part) => typeof part.text === 'string' && part.text.length > 0,
+        ),
+      );
       if (
         record.type === 'assistant' &&
-        (record.usageMetadata !== undefined ||
-          record.message?.parts?.some((part) => typeof part.text === 'string'))
+        (record.usageMetadata !== undefined || hasTextContent)
       ) {
-        if (
-          typeof record.agentRunId === 'string' &&
-          typeof record.agentRound === 'number'
-        ) {
-          this.completedStreamRounds.add(
-            `${record.agentRunId}:${record.agentRound}`,
-          );
-        } else {
-          this.canonicalStreamOffset = this.streamOffset;
+        if (hasTextContent) {
+          if (
+            typeof record.agentRunId === 'string' &&
+            typeof record.agentRound === 'number'
+          ) {
+            this.completedStreamRounds.add(
+              `${record.agentRunId}:${record.agentRound}`,
+            );
+          } else {
+            this.canonicalStreamOffset = this.streamOffset;
+          }
         }
         const timestamp = Date.parse(record.timestamp);
         if (Number.isFinite(timestamp)) {
@@ -620,23 +707,44 @@ class VirtualSubagentTarget {
         }
       }
     }
-    if (this.streamedRounds.size > 0 || this.legacyStreamedSinceCanonical) {
-      records = records.filter((record) => {
+    if (
+      this.streamedRoundLengths.size > 0 ||
+      this.legacyStreamedSinceCanonical
+    ) {
+      records = records.flatMap((record) => {
+        if (record.type !== 'assistant') {
+          return [record];
+        }
+        const hasTextContent = Boolean(
+          record.message?.parts?.some(
+            (part) => typeof part.text === 'string' && part.text.length > 0,
+          ),
+        );
+        if (!hasTextContent) {
+          return [record];
+        }
         const roundKey =
           typeof record.agentRunId === 'string' &&
           typeof record.agentRound === 'number'
             ? `${record.agentRunId}:${record.agentRound}`
             : undefined;
-        if (roundKey && this.streamedRounds.delete(roundKey)) return false;
+        if (roundKey && this.streamedRoundLengths.has(roundKey)) {
+          const streamed = this.streamedRoundLengths.get(roundKey)!;
+          this.streamedRoundLengths.delete(roundKey);
+          const trimmed = trimStreamedAssistantRecord(record, streamed);
+          return trimmed ? [trimmed] : [];
+        }
         if (
           !this.legacyStreamedSinceCanonical ||
-          record.type !== 'assistant' ||
           record.message?.parts?.some((part) => part.functionCall)
         ) {
-          return true;
+          return [record];
         }
+        const streamed = this.legacyStreamedLengths;
         this.legacyStreamedSinceCanonical = false;
-        return false;
+        this.legacyStreamedLengths = { textLen: 0, thoughtLen: 0 };
+        const trimmed = trimStreamedAssistantRecord(record, streamed);
+        return trimmed ? [trimmed] : [];
       });
       if (records.length === 0) {
         this.initialized = true;
@@ -684,7 +792,10 @@ class VirtualSubagentTarget {
         })
       : this.bus.seedReplayEvents(inputs);
     if (!this.snapshotDelivered) this.events.push(...published);
-    if (!this.legacyStreamedSinceCanonical && this.streamedRounds.size === 0) {
+    if (
+      !this.legacyStreamedSinceCanonical &&
+      this.streamedRoundLengths.size === 0
+    ) {
       this.canonicalStreamOffset = this.streamOffset;
     }
     this.initialized = true;
@@ -714,7 +825,7 @@ class VirtualSubagentTarget {
       }
       if (
         !this.legacyStreamedSinceCanonical &&
-        this.streamedRounds.size === 0
+        this.streamedRoundLengths.size === 0
       ) {
         this.canonicalStreamOffset = this.streamOffset;
       }
@@ -781,7 +892,8 @@ class VirtualSubagentTarget {
           this.canonicalThroughTimestamp,
         );
         target.streamOffset = Math.min(
-          !this.legacyStreamedSinceCanonical && this.streamedRounds.size === 0
+          !this.legacyStreamedSinceCanonical &&
+            this.streamedRoundLengths.size === 0
             ? this.streamOffset
             : this.canonicalStreamOffset,
           bounds.stream,

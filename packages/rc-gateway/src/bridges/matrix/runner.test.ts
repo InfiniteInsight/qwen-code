@@ -989,4 +989,58 @@ describe('MatrixBridge, prompts dispatched off the sync loop (#159)', () => {
     await waitFor(() => h.sent.length === 1);
     expect(JSON.stringify(h.sent[0].content)).toContain('9 seconds');
   });
+
+  it('advances/clears cursor on 412 replay_truncated in MatrixBridge (#504)', async () => {
+    await rooms.bind('!r:h', 'sess_q');
+    const cursorsStore = await CursorStore.open(join(dir, 'cursors.json'));
+    await cursorsStore.setLastEventId('tok_m', 'sess_q', 5);
+    const seenCursors: Array<number | undefined> = [];
+    const ac = new AbortController();
+    const client = {
+      register: async () => ({ ok: true, status: 200 }),
+      heartbeat: async () => ({ ok: true, status: 200 }),
+      subscribeEvents: async (
+        _s: string,
+        _cb: (ev: { id?: number; type?: string }) => void,
+        _sig?: AbortSignal,
+        last?: number,
+        onReplayTruncated?: (earliest?: number) => void | Promise<void>,
+      ) => {
+        seenCursors.push(last);
+        if (seenCursors.length === 1) {
+          await onReplayTruncated?.(25);
+          return;
+        }
+        ac.abort();
+      },
+    } as unknown as BridgeClient;
+    const rest = {
+      sendMessage: async () => ({ ok: true, status: 200, eventId: '$x' }),
+      joinRoom: async () => ({ ok: true, status: 200 }),
+    } as unknown as MatrixInbound;
+    const bridge = new MatrixBridge({
+      client,
+      rest,
+      rooms,
+      cursors: cursorsStore,
+      tokenId: 'tok_m',
+      botUserId: '@qwenbot:home.example.com',
+      baseUrl: 'http://127.0.0.1:4170',
+      runInbound: (sig) =>
+        new Promise<void>((r) => {
+          if (sig.aborted) {
+            r();
+            return;
+          }
+          sig.addEventListener('abort', () => r(), { once: true });
+        }),
+      sleep: async () => {},
+    });
+
+    await bridge.start(ac.signal);
+    expect(seenCursors).toEqual([5, 24]);
+    await cursorsStore['inFlight'];
+    await cursorsStore['queued'];
+    expect(cursorsStore.get('tok_m', 'sess_q')?.lastEventId).toBe(24);
+  });
 });

@@ -1723,7 +1723,6 @@ export class BridgeClient implements Client {
         const planned = (item.content ?? []).filter((block) => {
           if (!isSessionAttachmentReference(block)) return true;
           if (serializedAttachmentIds.has(block.attachmentId)) {
-            degraded += 1;
             return false;
           }
           serializedAttachmentIds.add(block.attachmentId);

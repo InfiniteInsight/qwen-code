@@ -5,8 +5,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { writeFileAtomic } from '../atomicWrite.js';
 
 /** Max stored task length (design: "spawning prompt, truncated to 2k chars"). */
 const TASK_MAX_CHARS = 2000;
@@ -57,6 +57,8 @@ interface PersistShape {
  * the cost tables keyed by sessionId (one source of truth).
  */
 export class AgentRegistry {
+  private writeChain: Promise<void> = Promise.resolve();
+
   private constructor(
     private readonly filePath: string,
     private records: AgentRecord[],
@@ -182,11 +184,18 @@ export class AgentRegistry {
     return orphaned;
   }
 
-  private async persist(): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true });
-    const body: PersistShape = { agents: this.records };
-    await writeFile(this.filePath, JSON.stringify(body, null, 2), {
-      mode: 0o600,
-    });
+  private persist(): Promise<void> {
+    const next = this.writeChain.then(() =>
+      writeFileAtomic(
+        this.filePath,
+        () => {
+          const body: PersistShape = { agents: this.records };
+          return JSON.stringify(body, null, 2);
+        },
+        { mode: 0o600 },
+      ),
+    );
+    this.writeChain = next.catch(() => {});
+    return next;
   }
 }

@@ -339,29 +339,50 @@ export function createReportOutcome(
   options: ReportOutcomeOptions,
 ): (sessionId: string, outcome: SessionRecoveryOutcome) => void {
   const { walDir, ownerEvents, audit, notifier } = options;
+  const sessionFallbackIds = new Map<string, number>();
 
   /** Append a marker frame through the shared WAL and publish it on the
    * owner stream. A WAL failure must not suppress the audit row or the
-   * push — the session's state is still reported (§4's durability is
+   * push -- the session's state is still reported (§4's durability is
    * best-effort relative to the notify path). */
   const appendMarker = (
     sessionId: string,
     type: 'session_interrupted' | 'session_recovered',
     data: Record<string, unknown>,
   ): void => {
-    if (!walDir) return;
+    let id: number;
+    let wal: ReturnType<typeof getSharedWal> | undefined;
+    if (walDir) {
+      try {
+        wal = getSharedWal(walDir, sessionId);
+        id = (wal.latestId() ?? 0) + 1;
+      } catch {
+        const nextId = (sessionFallbackIds.get(sessionId) ?? 0) + 1;
+        sessionFallbackIds.set(sessionId, nextId);
+        id = nextId;
+      }
+    } else {
+      const nextId = (sessionFallbackIds.get(sessionId) ?? 0) + 1;
+      sessionFallbackIds.set(sessionId, nextId);
+      id = nextId;
+    }
+    const frame: WalFrame = {
+      id,
+      v: 1,
+      type,
+      data,
+    };
+    if (wal) {
+      try {
+        wal.append(frame);
+      } catch {
+        // Durability loss only -- publish, audit + push still run.
+      }
+    }
     try {
-      const wal = getSharedWal(walDir, sessionId);
-      const frame: WalFrame = {
-        id: (wal.latestId() ?? 0) + 1,
-        v: 1,
-        type,
-        data,
-      };
-      wal.append(frame);
       ownerEvents?.publish({ type: 'session_event', sessionId, event: frame });
     } catch {
-      // Durability loss only — audit + push still run.
+      // Best-effort publish.
     }
   };
 

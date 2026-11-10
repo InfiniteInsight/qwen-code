@@ -88,6 +88,7 @@ export function createDaemonTranscriptState(
   opts: DaemonTranscriptReducerOptions = {},
 ): DaemonTranscriptState {
   const state: DaemonTranscriptState = {
+    ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
     blocks: [],
     blockIndexById: createIndex(),
     toolBlockByCallId: createIndex(),
@@ -512,12 +513,24 @@ function applyDaemonTranscriptEvent(
     // into transcript projection as structured non-chat blocks.
     case 'session.approval_mode.changed':
       // PR-E sidechannel: mirror the new approval mode onto state so
-      // renderers don't have to walk events.
+      // renderers don't have to walk events. Ignore workspace-broadcast
+      // events that originated from a peer session.
+      if (next.sessionId !== undefined && event.sessionId !== next.sessionId) {
+        break;
+      }
+      if (next.sessionId === undefined && !event.persisted) {
+        next.sessionId = event.sessionId;
+      }
       next.approvalMode = event.next;
       break;
     case 'session.metadata.changed':
     case 'session.artifact.changed':
     case 'session.source.changed':
+      if (next.sessionId === undefined) {
+        next.sessionId = event.sessionId;
+      }
+      // Intentional no-op against `blocks[]`.
+      break;
     case 'session.available_commands':
       // Intentional no-op against `blocks[]`.
       break;
@@ -1840,6 +1853,7 @@ function cloneTranscriptState(
 ): DaemonTranscriptState {
   const next: DaemonTranscriptState = {
     ...state,
+    ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
     now: opts.now ?? Date.now(),
     maxBlocks: opts.maxBlocks ?? state.maxBlocks,
     maxRetainedBytes: opts.maxRetainedBytes ?? state.maxRetainedBytes,

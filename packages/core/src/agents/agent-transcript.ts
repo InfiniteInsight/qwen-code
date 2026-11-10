@@ -748,7 +748,10 @@ export function readTranscriptMessagesSync(
     if (
       record.type === 'assistant' &&
       typeof record.agentRunId === 'string' &&
-      typeof record.agentRound === 'number'
+      typeof record.agentRound === 'number' &&
+      record.message?.parts?.some(
+        (part) => typeof part.text === 'string' && part.text.length > 0,
+      )
     ) {
       completedRounds.add(`${record.agentRunId}:${record.agentRound}`);
     }
@@ -1056,6 +1059,13 @@ export function attachJsonlTranscriptWriter(
       ...(event.text ? [{ text: event.text }] : []),
     ];
     if (parts.length === 0 && !event.usageMetadata) return;
+    if (parts.length > 0) {
+      if (streamFlushTimer !== null) {
+        clearTimeout(streamFlushTimer);
+        streamFlushTimer = null;
+      }
+      flushStreamText();
+    }
     append({
       ...baseFields('assistant'),
       message: { role: 'model', parts },
@@ -1063,7 +1073,9 @@ export function attachJsonlTranscriptWriter(
       agentRunId: event.runId ?? streamRunId,
       agentRound: event.round,
     });
-    truncateStreamFile();
+    if (parts.length > 0) {
+      truncateStreamFile();
+    }
   };
 
   const sessionReadiness = new Map<string, boolean>();
@@ -1128,6 +1140,11 @@ export function attachJsonlTranscriptWriter(
   };
 
   const onToolCall = (event: AgentToolCallEvent) => {
+    if (streamFlushTimer !== null) {
+      clearTimeout(streamFlushTimer);
+      streamFlushTimer = null;
+    }
+    flushStreamText();
     append({
       ...baseFields('assistant'),
       message: {

@@ -689,7 +689,7 @@ export class SessionWal {
     // ones in this file are simply its newest `keep` frames, by position. Ids
     // cannot be used for this: fork and rewind markers land below the current
     // end, so file order is not id order.
-    const keep = Math.min(this.frames.length, decoded.length);
+    const keep = Math.min(this.activeFrameCount, decoded.length);
     if (keep >= decoded.length) {
       return;
     }

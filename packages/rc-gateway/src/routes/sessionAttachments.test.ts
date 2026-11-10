@@ -195,6 +195,53 @@ describe('POST /session/:id/attachments', () => {
     });
   });
 
+  it('gateJsonBody allows requests with trailing slashes to bypass express.json (#523)', async () => {
+    let jsonParsed = false;
+    const dummyJson: express.RequestHandler = (req, _res, next) => {
+      jsonParsed = true;
+      next();
+    };
+    const gated = gateJsonBody(dummyJson);
+
+    // POST .../attachments/ with trailing slash should bypass express.json
+    jsonParsed = false;
+    let nextCalled = false;
+    const req1 = {
+      method: 'POST',
+      path: '/session/11111111-1111-1111-1111-111111111111/attachments/',
+    } as express.Request;
+    gated(req1, {} as express.Response, () => {
+      nextCalled = true;
+    });
+    expect(nextCalled).toBe(true);
+    expect(jsonParsed).toBe(false);
+
+    // PUT .../chunks/0/ with trailing slash should bypass express.json
+    jsonParsed = false;
+    nextCalled = false;
+    const req2 = {
+      method: 'PUT',
+      path: '/session/11111111-1111-1111-1111-111111111111/attachment-uploads/up-1/chunks/0/',
+    } as express.Request;
+    gated(req2, {} as express.Response, () => {
+      nextCalled = true;
+    });
+    expect(nextCalled).toBe(true);
+    expect(jsonParsed).toBe(false);
+
+    // Ordinary route should NOT bypass express.json
+    jsonParsed = false;
+    nextCalled = false;
+    const req3 = {
+      method: 'POST',
+      path: '/session/11111111-1111-1111-1111-111111111111/other/',
+    } as express.Request;
+    gated(req3, {} as express.Response, () => {
+      nextCalled = true;
+    });
+    expect(jsonParsed).toBe(true);
+  });
+
   it('refuses a missing name with 400 and never reaches the daemon', async () => {
     const fake = fakeDaemon();
     const base = await mountGateway(fake.daemon);
@@ -864,11 +911,17 @@ describe('createRawAttachmentBody with a resolved limit', () => {
  */
 describe('resumable attachment uploads (#130)', () => {
   const CHUNK = ATTACHMENT_UPLOAD_CHUNK_BYTES;
-  const BASE = '/session/s-1/attachment-uploads';
+  const SID = '11111111-1111-1111-1111-111111111111';
+  const BASE = `/session/${SID}/attachment-uploads`;
 
   interface Mounted {
     base: string;
-    calls: Array<{ sessionId: string; bytes: Buffer; name: string; mime: string }>;
+    calls: Array<{
+      sessionId: string;
+      bytes: Buffer;
+      name: string;
+      mime: string;
+    }>;
     rows: Array<Record<string, unknown>>;
     clock: { now: number };
     failNext: { err?: unknown };
@@ -938,7 +991,10 @@ describe('resumable attachment uploads (#130)', () => {
       ups.chunk,
     );
     app.get('/session/:id/attachment-uploads/:uploadId', ups.status);
-    app.post('/session/:id/attachment-uploads/:uploadId/complete', ups.complete);
+    app.post(
+      '/session/:id/attachment-uploads/:uploadId/complete',
+      ups.complete,
+    );
     app.delete('/session/:id/attachment-uploads/:uploadId', ups.cancel);
     const server: Server = await new Promise((resolve) => {
       const s = app.listen(0, '127.0.0.1', () => resolve(s));
@@ -952,7 +1008,12 @@ describe('resumable attachment uploads (#130)', () => {
     m: Mounted,
     method: string,
     url: string,
-    init: { json?: unknown; body?: BodyInit; actor?: string; type?: string } = {},
+    init: {
+      json?: unknown;
+      body?: BodyInit;
+      actor?: string;
+      type?: string;
+    } = {},
   ): Promise<{ status: number; body: Record<string, unknown> }> => {
     const headers: Record<string, string> = {};
     if (init.actor) headers['x-actor'] = init.actor;
@@ -1014,7 +1075,7 @@ describe('resumable attachment uploads (#130)', () => {
       { name: '', mimeType: 'image/jpeg', size: 10 },
     ]) {
       const res = await call(m, 'POST', BASE, { json });
-      expect(res.status, JSON.stringify(json)).toBe(400);
+      expect(res.status).toBe(400);
       expect(res.body['code']).toBe('invalid_upload');
     }
   });
@@ -1106,16 +1167,15 @@ describe('resumable attachment uploads (#130)', () => {
     expect(m.calls[0]!.bytes.toString()).toBe('{"a":1}');
   });
 
-  it('answers 404 for an upload that does not exist, is another session\'s or another caller\'s', async () => {
+  it("answers 404 for an upload that does not exist, is another session's or another caller's", async () => {
     const m = await mountResumable();
     const id = String((await begin(m, 10)).body['uploadId']);
     const bytes = new Uint8Array(10);
     expect((await put(m, 'nope', 0, bytes)).status).toBe(404);
     expect((await call(m, 'GET', `${BASE}/nope`)).status).toBe(404);
-    expect(
-      (await call(m, 'POST', `${BASE}/nope/complete`)).status,
-    ).toBe(404);
-    const other = '/session/s-2/attachment-uploads';
+    expect((await call(m, 'POST', `${BASE}/nope/complete`)).status).toBe(404);
+    const other =
+      '/session/22222222-2222-2222-2222-222222222222/attachment-uploads';
     expect((await call(m, 'GET', `${other}/${id}`)).status).toBe(404);
     expect((await put(m, id, 0, bytes, 'tok-b')).status).toBe(404);
     expect(
@@ -1164,7 +1224,7 @@ describe('resumable attachment uploads (#130)', () => {
       size: file.length,
     });
     expect(m.calls).toHaveLength(1);
-    expect(m.calls[0]!.sessionId).toBe('s-1');
+    expect(m.calls[0]!.sessionId).toBe(SID);
     expect(m.calls[0]!.name).toBe('IMG_9.jpg');
     expect(m.calls[0]!.mime).toBe('image/jpeg');
     expect(m.calls[0]!.bytes.equals(file)).toBe(true);
@@ -1186,7 +1246,7 @@ describe('resumable attachment uploads (#130)', () => {
     }
     expect(m.calls).toHaveLength(1);
     expect(m.rows).toEqual([
-      { action: 'attachment_uploaded', actorTokenId: 'tok-a', target: 's-1' },
+      { action: 'attachment_uploaded', actorTokenId: 'tok-a', target: SID },
     ]);
     // A page that lost the answer can still read it back.
     const st = await call(m, 'GET', `${BASE}/${id}`);
@@ -1215,7 +1275,10 @@ describe('resumable attachment uploads (#130)', () => {
     const m = await mountResumable();
     const id = String((await begin(m, 4)).body['uploadId']);
     await put(m, id, 0, new Uint8Array(4));
-    m.failNext.err = refusal(415, { errorKind: 'unsupported_type', error: 'no' });
+    m.failNext.err = refusal(415, {
+      errorKind: 'unsupported_type',
+      error: 'no',
+    });
     const res = await call(m, 'POST', `${BASE}/${id}/complete`);
     expect(res.status).toBe(415);
     expect(res.body['code']).toBe('unsupported_type');
@@ -1257,6 +1320,8 @@ describe('resumable attachment uploads (#130)', () => {
     const third = await begin(m, 10);
     expect(third.status).toBe(429);
     expect(third.body['code']).toBe('attachment_upload_capacity_exceeded');
+    // Stage chunk bytes for b so staged bytes are accounted for.
+    await put(m, String(b.body['uploadId']), 0, new Uint8Array(40));
     // Freeing one makes room, and the byte budget is the second gate.
     await call(m, 'DELETE', `${BASE}/${String(a.body['uploadId'])}`);
     const big = await begin(m, 61);
@@ -1267,9 +1332,48 @@ describe('resumable attachment uploads (#130)', () => {
   it('frees the staging budget once an upload completes', async () => {
     const m = await mountResumable({ maxStagedBytes: 50 });
     const id = String((await begin(m, 50)).body['uploadId']);
-    expect((await begin(m, 1)).status).toBe(429);
     await put(m, id, 0, new Uint8Array(50));
+    expect((await begin(m, 1)).status).toBe(429);
     await call(m, 'POST', `${BASE}/${id}/complete`);
     expect((await begin(m, 50)).status).toBe(201);
+  });
+
+  it('rejects begin when sessionId is invalid (#522)', async () => {
+    const m = await mountResumable();
+    const res = await call(
+      m,
+      'POST',
+      '/session/invalid-session-id/attachment-uploads',
+      {
+        json: { name: 'IMG_1.jpg', mimeType: 'image/jpeg', size: 100 },
+      },
+    );
+    expect(res.status).toBe(400);
+    expect(res.body['code']).toBe('invalid_session_id');
+  });
+
+  it('allows multiple zero-byte begin calls without exhausting maxStagedBytes (#522)', async () => {
+    // maxStagedBytes is 100. 4 uploads begin with size 40 each (declared 160 > 100),
+    // but 0 bytes staged. All 4 must succeed because actual staged bytes is 0.
+    const m = await mountResumable({ maxUploads: 5, maxStagedBytes: 100 });
+    for (let i = 0; i < 4; i++) {
+      const res = await begin(m, 40);
+      expect(res.status).toBe(201);
+    }
+  });
+
+  it('enforces maxStagedBytes when receiving chunk bytes in PUT (#522)', async () => {
+    const m = await mountResumable({ maxStagedBytes: 100 });
+    const up1 = String((await begin(m, 80)).body['uploadId']);
+    const up2 = String((await begin(m, 80)).body['uploadId']);
+
+    // Staging 80 bytes for up1 succeeds (80 <= 100)
+    const put1 = await put(m, up1, 0, new Uint8Array(80));
+    expect(put1.status).toBe(200);
+
+    // Staging 80 bytes for up2 fails because 80 + 80 = 160 > 100
+    const put2 = await put(m, up2, 0, new Uint8Array(80));
+    expect(put2.status).toBe(429);
+    expect(put2.body['code']).toBe('attachment_upload_capacity_exceeded');
   });
 });

@@ -832,6 +832,82 @@ describe('AppContainer State Management', () => {
     },
   );
 
+  it('skips local follow-up suggestions and speculation when attached to a daemon (#509)', async () => {
+    vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+    vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+    vi.spyOn(mockConfig, 'getSdkMode').mockReturnValue(false);
+    vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
+      getMcpClientManager: () => ({
+        getDiscoveryState: () => MCPDiscoveryState.COMPLETED,
+      }),
+    } as unknown as ReturnType<Config['getToolRegistry']>);
+    const getHistoryTail = vi.fn(() => []);
+    vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
+      initialize: vi.fn().mockResolvedValue(undefined),
+      setTools: vi.fn().mockResolvedValue(undefined),
+      isInitialized: () => false,
+      getHistoryTail,
+    } as unknown as LlmClient);
+    mockSettings.merged.ui!.enableSpeculation = true;
+    generatePromptSuggestionMock.mockResolvedValue({
+      suggestion: 'Run the tests',
+    });
+    const stream = {
+      submitQuery: vi.fn(),
+      initError: null,
+      pendingHistoryItems: [],
+      thought: null,
+      cancelOngoingRequest: vi.fn(),
+      retryLastPrompt: vi.fn(),
+      streamingResponseLengthRef: { current: 0 },
+      isReceivingContent: false,
+      clearPendingState: vi.fn(),
+    };
+    let setStreaming!: (state: StreamingState) => void;
+    mockedUseLlmStream.mockImplementation(() => {
+      const [streamingState, setStreamingState] = useState(
+        StreamingState.Responding,
+      );
+      setStreaming = setStreamingState;
+      return { ...stream, streamingState };
+    });
+    const fakeDaemonDriver: DaemonSessionDriver = {
+      async *events() {},
+      async prompt() {
+        return {};
+      },
+      async cancel() {},
+      async respondToSessionPermission() {
+        return true;
+      },
+    };
+    render(
+      <DaemonStreamContext.Provider value={fakeDaemonDriver}>
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />
+      </DaemonStreamContext.Provider>,
+    );
+    try {
+      await flushConfigInitialization();
+      expect(capturedUIState.streamingState).toBe(StreamingState.Responding);
+      await act(async () => {
+        setStreaming(StreamingState.Idle);
+      });
+      await vi.waitFor(() =>
+        expect(capturedUIState.streamingState).toBe(StreamingState.Idle),
+      );
+      expect(generatePromptSuggestionMock).not.toHaveBeenCalled();
+      expect(startSpeculationMock).not.toHaveBeenCalled();
+      expect(getHistoryTail).not.toHaveBeenCalled();
+    } finally {
+      cleanup();
+    }
+  });
+
   describe('speculative tool results', () => {
     it('renders error envelopes as failed tools', () => {
       expect(

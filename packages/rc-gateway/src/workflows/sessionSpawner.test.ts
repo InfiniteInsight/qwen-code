@@ -462,4 +462,93 @@ describe('SessionSpawner', () => {
     const out = await spawner.spawn({ prompt: 'say hi', systemContext: '' });
     expect(out.text).toBe('some answer');
   });
+
+  it('passes lastEventId on schema retry attempts so ring-buffered prior turns are skipped', async () => {
+    const ringBuffer: Array<{ id: number; type: string; data?: unknown }> = [];
+    const subscribeLastEventIds: Array<number | undefined> = [];
+    let turnIndex = 0;
+    const daemon = {
+      createOrAttachSession: async () => ({ sessionId: 's-retry' }),
+      subscribeEvents: (
+        _sessionId: string,
+        opts?: { signal?: AbortSignal; lastEventId?: number },
+      ) => {
+        subscribeLastEventIds.push(opts?.lastEventId);
+        const currentTurn = turnIndex;
+        return (async function* () {
+          // Replay anything in the ring buffer after opts.lastEventId
+          for (const f of ringBuffer) {
+            if (opts?.lastEventId === undefined || f.id > opts.lastEventId) {
+              yield f;
+            }
+          }
+          // Wait briefly for prompt() to emit the new turn's frames
+          await sleep(5);
+          const newFrames =
+            currentTurn === 0
+              ? [
+                  { id: 1, ...chunkFrame('not valid json') },
+                  { id: 2, ...TURN_COMPLETE },
+                ]
+              : [
+                  { id: 3, ...chunkFrame('{"answer":"recovered"}') },
+                  { id: 4, ...TURN_COMPLETE },
+                ];
+          for (const f of newFrames) {
+            ringBuffer.push(f);
+            if (opts?.lastEventId === undefined || f.id > opts.lastEventId) {
+              yield f;
+            }
+          }
+        })();
+      },
+      prompt: async () => {
+        turnIndex += 1;
+        return { stopReason: 'end_turn' };
+      },
+      closeSession: async () => {},
+    } as unknown as SessionDaemon;
+
+    const dir = await mkdtemp(join(tmpdir(), 'wf-spawner-'));
+    const registry = await makeRegistry(dir);
+    const spawner = new SessionSpawner({
+      daemon,
+      registry,
+      runId: 'run-retry',
+      spawnedByTokenId: 'tk',
+    });
+    const out = await spawner.spawn({
+      prompt: 'answer',
+      systemContext: '',
+      schema: ANSWER_SCHEMA,
+    });
+    expect(out.structured).toEqual({ answer: 'recovered' });
+    expect(subscribeLastEventIds).toEqual([undefined, 2]);
+    expect(registry.list({ workflowRunId: 'run-retry' })[0]?.status).toBe(
+      'completed',
+    );
+  });
+
+  it('marks agent as cancelled when prompt rejects with AbortError', async () => {
+    const abortErr = new Error('The operation was aborted');
+    abortErr.name = 'AbortError';
+    const { daemon, state } = makeFakeDaemon({
+      promptError: abortErr,
+    });
+    const dir = await mkdtemp(join(tmpdir(), 'wf-spawner-'));
+    const registry = await makeRegistry(dir);
+    const spawner = new SessionSpawner({
+      daemon,
+      registry,
+      runId: 'run-abort',
+      spawnedByTokenId: 'tk',
+    });
+    await expect(
+      spawner.spawn({ prompt: 'say hi', systemContext: '' }),
+    ).rejects.toThrow('The operation was aborted');
+    expect(state.closed).toEqual(['s-1']);
+    expect(registry.list({ workflowRunId: 'run-abort' })[0]?.status).toBe(
+      'cancelled',
+    );
+  });
 });

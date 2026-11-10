@@ -29803,6 +29803,65 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('does NOT overwrite live peer session currentApprovalMode or planExecutionMode when persisted (#513)', async () => {
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const agent = new FakeAgent({
+          extMethodImpl: (method, params) => {
+            if (method === 'qwen/control/session/approval_mode') {
+              const control = params as { mode: string; planMode?: boolean };
+              return Promise.resolve({
+                previous: 'default',
+                current: control.planMode ? 'plan' : control.mode,
+                planExecutionMode: control.planMode ? control.mode : undefined,
+              });
+            }
+            return Promise.resolve({});
+          },
+        });
+        new AgentSideConnection(() => agent as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        persistApprovalMode: async () => {},
+      });
+      const a = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const b = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      await bridge.setSessionApprovalMode(
+        b.sessionId,
+        ApprovalMode.YOLO,
+        { persist: false, planMode: true },
+        undefined,
+      );
+      await bridge.setSessionApprovalMode(
+        a.sessionId,
+        ApprovalMode.AUTO_EDIT,
+        { persist: true },
+        undefined,
+      );
+      const statusB = bridge
+        .getDaemonStatusSnapshot()
+        .sessions.find((s) => s.sessionId === b.sessionId);
+      expect(statusB?.currentApprovalMode).toBe('plan');
+      expect(statusB?.planExecutionMode).toBe('yolo');
+      await bridge.shutdown();
+    });
+
     it('does NOT broadcast to peers when persisted is false', async () => {
       // Symmetric coverage: ephemeral changes affect only the
       // requesting session and must not surface on peer SSE buses, or

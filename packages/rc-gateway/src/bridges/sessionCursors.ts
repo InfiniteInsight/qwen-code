@@ -70,6 +70,38 @@ export class SubscriptionCursors {
   }
 
   /**
+   * Reset or advance the cursor for `sessionId` when the gateway responds 412
+   * `replay_truncated` because the stored `Last-Event-ID` is older than the WAL
+   * horizon (#504). When `earliestAvailableId` is a positive integer, advance
+   * to `earliestAvailableId - 1` so the next subscribe replays from the oldest
+   * retained frame (`id >= earliestAvailableId`); otherwise clear the cursor so
+   * the next subscribe attaches live without `Last-Event-ID`.
+   */
+  resetOnTruncation(
+    sessionId: string,
+    earliestAvailableId?: number,
+    stream?: AbortSignal,
+  ): void {
+    if (stream && this.owner.get(stream)?.signal.aborted) return;
+    if (
+      typeof earliestAvailableId === 'number' &&
+      Number.isFinite(earliestAvailableId) &&
+      earliestAvailableId >= 1
+    ) {
+      const next = Math.floor(earliestAvailableId) - 1;
+      this.lastEventId.set(sessionId, next);
+      if (this.cursors && this.tokenId) {
+        void this.cursors.setLastEventId(this.tokenId, sessionId, next);
+      }
+      return;
+    }
+    this.lastEventId.delete(sessionId);
+    if (this.cursors && this.tokenId) {
+      void this.cursors.delete(this.tokenId, sessionId);
+    }
+  }
+
+  /**
    * Drop every tracked session that is not in `bound`: abort its stream and
    * remove its cursor from memory and the store. Returns the released ids.
    */

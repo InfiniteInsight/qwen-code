@@ -585,10 +585,20 @@ class SessionEventsHub {
     if (this.state.lastOutId !== CONSERVATIVE_EPOCH.lastOutId) {
       return this.state.lastOutId;
     }
-    // Never relayed: the numbering is still the daemon's own (the first frame
-    // anchors at offset 0), so the first watcher's cursor is a daemon cursor,
-    // exactly as the WAL-dark relay forwarded it: 0 replays the daemon's ring
-    // into the WAL, a load watermark resumes after it, none is live only.
+    // Never relayed: if the WAL already holds synthetic gateway-only markers
+    // (such as an unstamped child_forked at id 1), firstCursor is in the
+    // gateway's WAL numbering and must not be forwarded as a positive daemon
+    // cursor when the daemon's counter is still at 0.
+    if (
+      getSharedWal(this.deps.walDir, this.deps.sessionId).latestId() !== null
+    ) {
+      return firstCursor !== undefined ? 0 : undefined;
+    }
+    // Empty WAL and never relayed: the numbering is still the daemon's own
+    // (the first frame anchors at offset 0), so the first watcher's cursor is
+    // a daemon cursor, exactly as the WAL-dark relay forwarded it: 0 replays
+    // the daemon's ring into the WAL, a load watermark resumes after it, none
+    // is live only.
     return firstCursor;
   }
 

@@ -335,6 +335,132 @@ function resultTextOf(update: Record<string, unknown>): string | undefined {
     : undefined;
 }
 
+function isAgentToolUpdate(
+  toolName: string,
+  rawInput: Record<string, unknown>,
+  rawOutput: Record<string, unknown>,
+): boolean {
+  const lower = toolName.toLowerCase();
+  return (
+    lower === 'agent' ||
+    lower === 'task' ||
+    typeof rawInput['subagent_type'] === 'string' ||
+    rawOutput['type'] === 'task_execution'
+  );
+}
+
+function mapToolStatusToTaskStatus(
+  status: ToolCallStatus,
+  runInBackground: boolean,
+  explicitStatus: unknown,
+): 'running' | 'completed' | 'failed' | 'cancelled' | 'background' {
+  if (
+    explicitStatus === 'running' ||
+    explicitStatus === 'completed' ||
+    explicitStatus === 'failed' ||
+    explicitStatus === 'cancelled' ||
+    explicitStatus === 'background'
+  ) {
+    return explicitStatus;
+  }
+  switch (status) {
+    case ToolCallStatus.Success:
+      return runInBackground ? 'background' : 'completed';
+    case ToolCallStatus.Error:
+      return 'failed';
+    case ToolCallStatus.Canceled:
+      return 'cancelled';
+    default:
+      return runInBackground ? 'background' : 'running';
+  }
+}
+
+function resolveResultDisplay(
+  update: Record<string, unknown>,
+  meta: Record<string, unknown>,
+  toolName: string,
+  title: string | undefined,
+  status: ToolCallStatus,
+  prevResultDisplay: IndividualToolCallDisplay['resultDisplay'],
+): IndividualToolCallDisplay['resultDisplay'] {
+  const rawInput = asRecord(update['rawInput']);
+  const rawOutput = asRecord(update['rawOutput']);
+  const textResult = resultTextOf(update);
+
+  if (isAgentToolUpdate(toolName, rawInput, rawOutput)) {
+    const prevTask =
+      typeof prevResultDisplay === 'object' &&
+      prevResultDisplay !== null &&
+      (prevResultDisplay as { type?: unknown }).type === 'task_execution'
+        ? (prevResultDisplay as unknown as Record<string, unknown>)
+        : undefined;
+    const subagentName =
+      (typeof rawOutput['subagentName'] === 'string' &&
+        rawOutput['subagentName']) ||
+      (typeof rawInput['name'] === 'string' && rawInput['name']) ||
+      (typeof rawInput['subagent_type'] === 'string' &&
+        rawInput['subagent_type']) ||
+      (typeof meta['subagentType'] === 'string' && meta['subagentType']) ||
+      (typeof prevTask?.['subagentName'] === 'string' &&
+        (prevTask['subagentName'] as string)) ||
+      'agent';
+    const rawDesc =
+      (typeof rawOutput['taskDescription'] === 'string' &&
+        rawOutput['taskDescription']) ||
+      (typeof rawInput['description'] === 'string' &&
+        rawInput['description']) ||
+      (typeof prevTask?.['taskDescription'] === 'string' &&
+        (prevTask['taskDescription'] as string)) ||
+      (title ? title.replace(/^(Task|Agent):\s*/i, '') : '');
+    const taskPrompt =
+      (typeof rawOutput['taskPrompt'] === 'string' &&
+        rawOutput['taskPrompt']) ||
+      (typeof rawInput['prompt'] === 'string' && rawInput['prompt']) ||
+      (typeof prevTask?.['taskPrompt'] === 'string' &&
+        (prevTask['taskPrompt'] as string)) ||
+      '';
+    const runInBackground =
+      rawInput['run_in_background'] === true ||
+      rawOutput['executionMode'] === 'background' ||
+      prevTask?.['executionMode'] === 'background' ||
+      prevTask?.['status'] === 'background';
+    const taskStatus = mapToolStatusToTaskStatus(
+      status,
+      runInBackground,
+      rawOutput['status'],
+    );
+    const nextTask: Record<string, unknown> = {
+      ...(prevTask ?? {}),
+      ...(rawOutput['type'] === 'task_execution' ? rawOutput : {}),
+      type: 'task_execution',
+      subagentName,
+      taskDescription: rawDesc,
+      taskPrompt,
+      status: taskStatus,
+      ...(textResult !== undefined
+        ? { result: textResult }
+        : prevTask?.['result'] !== undefined
+          ? { result: prevTask['result'] }
+          : {}),
+    };
+    if (prevTask && JSON.stringify(prevTask) === JSON.stringify(nextTask)) {
+      return prevResultDisplay;
+    }
+    return nextTask as unknown as IndividualToolCallDisplay['resultDisplay'];
+  }
+
+  if (
+    rawOutput['type'] === 'todo_list' ||
+    rawOutput['type'] === 'plan_summary' ||
+    rawOutput['type'] === 'findings_list' ||
+    typeof rawOutput['fileDiff'] === 'string'
+  ) {
+    return rawOutput as unknown as IndividualToolCallDisplay['resultDisplay'];
+  }
+
+  return textResult ?? prevResultDisplay;
+}
+
 /** Upsert a tool-call display from a `tool_call` / `tool_call_update` frame. */
 function upsertTool(
   tools: IndividualToolCallDisplay[],
@@ -347,8 +473,10 @@ function upsertTool(
     typeof update['title'] === 'string' && update['title'].length > 0
       ? (update['title'] as string)
       : undefined;
+  const prev = tools.find((t) => t.callId === callId);
   const name =
     (typeof meta['toolName'] === 'string' && (meta['toolName'] as string)) ||
+    prev?.name ||
     title ||
     'tool';
   const description =
@@ -356,18 +484,25 @@ function upsertTool(
     (update['rawInput'] !== undefined
       ? JSON.stringify(update['rawInput'])
       : name);
-  const result = resultTextOf(update);
+  const status = resolveToolStatus(update, meta, prev?.status);
+  const resultDisplay = resolveResultDisplay(
+    update,
+    meta,
+    name,
+    title,
+    status,
+    prev?.resultDisplay,
+  );
 
-  const prev = tools.find((t) => t.callId === callId);
   const next: IndividualToolCallDisplay = {
     callId,
     name,
     description: title ?? prev?.description ?? description,
-    status: resolveToolStatus(update, meta, prev?.status),
+    status,
     // The reducer never builds the imperative onConfirm closure; the hook fills
     // confirmationDetails when a permission_request targets this call.
     confirmationDetails: prev?.confirmationDetails,
-    resultDisplay: result ?? prev?.resultDisplay,
+    resultDisplay,
     renderOutputAsMarkdown: true,
   };
   if (
@@ -942,7 +1077,12 @@ export function projectReplaySnapshot(
     state: {
       ...state,
       ownClientId: opts.ownClientId,
-      lastEventId: frames.length > 0 ? (opts.lastEventId ?? maxId) : undefined,
+      lastEventId:
+        maxId !== undefined
+          ? Math.max(opts.lastEventId ?? 0, maxId)
+          : opts.lastEventId !== undefined && opts.lastEventId > 0
+            ? opts.lastEventId
+            : undefined,
     },
     committed,
   };

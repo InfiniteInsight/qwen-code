@@ -910,14 +910,19 @@ export class DaemonSessionClient {
 
   /** Stop lifecycle work while preserving recovery; use cancel() for a user stop. */
   async interrupt(): Promise<void> {
-    await this.client.cancel(this.sessionId, this.clientId, {
-      cancelReason: 'interrupted',
-    });
+    await this.withClientIdSelfHeal(() =>
+      this.client.cancel(this.sessionId, this.clientId, {
+        cancelReason: 'interrupted',
+      }),
+    );
   }
 
   async cancel(): Promise<void> {
     const cancelling =
-      this.cancelling ?? this.client.cancel(this.sessionId, this.clientId);
+      this.cancelling ??
+      this.withClientIdSelfHeal(() =>
+        this.client.cancel(this.sessionId, this.clientId),
+      );
     this.cancelling = cancelling;
     try {
       await cancelling;
@@ -984,7 +989,9 @@ export class DaemonSessionClient {
   }
 
   setModel(modelId: string): Promise<SetModelResult> {
-    return this.client.setSessionModel(this.sessionId, modelId, this.clientId);
+    return this.withClientIdSelfHeal(() =>
+      this.client.setSessionModel(this.sessionId, modelId, this.clientId),
+    );
   }
 
   /**
@@ -997,10 +1004,12 @@ export class DaemonSessionClient {
     mode: DaemonApprovalMode,
     opts?: { persist?: boolean; planMode?: boolean },
   ): Promise<DaemonApprovalModeResult> {
-    return this.client.setSessionApprovalMode(this.sessionId, mode, {
-      ...opts,
-      clientId: this.clientId,
-    });
+    return this.withClientIdSelfHeal(() =>
+      this.client.setSessionApprovalMode(this.sessionId, mode, {
+        ...opts,
+        clientId: this.clientId,
+      }),
+    );
   }
 
   setConfigOption(
@@ -1008,10 +1017,12 @@ export class DaemonSessionClient {
     value: ReasoningSelection,
     opts?: { persist?: boolean },
   ): Promise<DaemonSessionConfigOptionResult> {
-    return this.client.setSessionConfigOption(this.sessionId, configId, value, {
-      clientId: this.clientId,
-      persist: opts?.persist,
-    });
+    return this.withClientIdSelfHeal(() =>
+      this.client.setSessionConfigOption(this.sessionId, configId, value, {
+        clientId: this.clientId,
+        persist: opts?.persist,
+      }),
+    );
   }
 
   getRewindSnapshots(): Promise<{
@@ -1024,12 +1035,14 @@ export class DaemonSessionClient {
     promptId: string,
     opts?: { rewindFiles?: boolean },
   ): Promise<DaemonRewindResult> {
-    return this.client.rewindSession(this.sessionId, promptId, {
-      clientId: this.clientId,
-      ...(opts?.rewindFiles !== undefined
-        ? { rewindFiles: opts.rewindFiles }
-        : {}),
-    });
+    return this.withClientIdSelfHeal(() =>
+      this.client.rewindSession(this.sessionId, promptId, {
+        clientId: this.clientId,
+        ...(opts?.rewindFiles !== undefined
+          ? { rewindFiles: opts.rewindFiles }
+          : {}),
+      }),
+    );
   }
 
   fork(directive: string): Promise<DaemonForkSessionResult> {
@@ -1090,17 +1103,19 @@ export class DaemonSessionClient {
       content?: PromptContentBlock[];
     },
   ): Promise<DaemonMidTurnMessageResult> {
-    return this.client.enqueueMidTurnMessage(this.sessionId, message, {
-      ...(opts?.signal ? { signal: opts.signal } : {}),
-      ...(opts?.eventDetailMode !== undefined
-        ? { eventDetailMode: opts.eventDetailMode }
-        : {}),
-      ...(opts?.messageId ? { messageId: opts.messageId } : {}),
-      ...(opts?.content && opts.content.length > 0
-        ? { content: opts.content }
-        : {}),
-      ...(this.clientId ? { clientId: this.clientId } : {}),
-    });
+    return this.withClientIdSelfHeal(() =>
+      this.client.enqueueMidTurnMessage(this.sessionId, message, {
+        ...(opts?.signal ? { signal: opts.signal } : {}),
+        ...(opts?.eventDetailMode !== undefined
+          ? { eventDetailMode: opts.eventDetailMode }
+          : {}),
+        ...(opts?.messageId ? { messageId: opts.messageId } : {}),
+        ...(opts?.content && opts.content.length > 0
+          ? { content: opts.content }
+          : {}),
+        ...(this.clientId ? { clientId: this.clientId } : {}),
+      }),
+    );
   }
 
   /**
@@ -1108,17 +1123,21 @@ export class DaemonSessionClient {
    * See `DaemonClient.sendMidTurnMessagesNow`.
    */
   sendMidTurnMessagesNow(): Promise<DaemonSendMidTurnMessagesNowResult> {
-    return this.client.sendMidTurnMessagesNow(this.sessionId, {
-      ...(this.clientId ? { clientId: this.clientId } : {}),
-    });
+    return this.withClientIdSelfHeal(() =>
+      this.client.sendMidTurnMessagesNow(this.sessionId, {
+        ...(this.clientId ? { clientId: this.clientId } : {}),
+      }),
+    );
   }
 
   removeMidTurnMessage(
     messageId: string,
   ): Promise<DaemonRemoveMidTurnMessageResult> {
-    return this.client.removeMidTurnMessage(this.sessionId, messageId, {
-      ...(this.clientId ? { clientId: this.clientId } : {}),
-    });
+    return this.withClientIdSelfHeal(() =>
+      this.client.removeMidTurnMessage(this.sessionId, messageId, {
+        ...(this.clientId ? { clientId: this.clientId } : {}),
+      }),
+    );
   }
 
   /**
@@ -1339,11 +1358,13 @@ export class DaemonSessionClient {
     requestId: string,
     response: PermissionResponse,
   ): Promise<boolean> {
-    return await this.client.respondToSessionPermission(
-      this.sessionId,
-      requestId,
-      response,
-      this.clientId,
+    return await this.withClientIdSelfHeal(() =>
+      this.client.respondToSessionPermission(
+        this.sessionId,
+        requestId,
+        response,
+        this.clientId,
+      ),
     );
   }
 

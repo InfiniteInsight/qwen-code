@@ -399,6 +399,100 @@ describe('sendPrompt client registration recovery', () => {
     expect(await fresh).toEqual({ stopReason: 'end_turn' });
   });
 
+  it('syncs healed clientId to connection and restarts event stream in submitPrompt and continueSession (#514)', async () => {
+    const promptClientIds: Array<string | null> = [];
+    const continueClientIds: Array<string | null> = [];
+    let resumeCount = 0;
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/resume')) {
+        resumeCount += 1;
+        return new Response(
+          JSON.stringify({
+            sessionId: 'session-a',
+            clientId: `client-healed-${resumeCount}`,
+            attached: true,
+            workspaceCwd: '/workspace',
+            state: {},
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith('/prompt')) {
+        promptClientIds.push(
+          new Headers(init?.headers).get('X-Qwen-Client-Id'),
+        );
+        return new Response(
+          JSON.stringify(
+            promptClientIds.length === 1
+              ? { code: 'invalid_client_id', error: 'unknown client' }
+              : { promptId: 'submitted-prompt', lastEventId: 0 },
+          ),
+          { status: promptClientIds.length === 1 ? 400 : 202 },
+        );
+      }
+      if (url.endsWith('/continue')) {
+        continueClientIds.push(
+          new Headers(init?.headers).get('X-Qwen-Client-Id'),
+        );
+        return new Response(
+          JSON.stringify(
+            continueClientIds.length === 1
+              ? { code: 'invalid_client_id', error: 'unknown client' }
+              : { accepted: true, promptId: 'continued-prompt' },
+          ),
+          { status: continueClientIds.length === 1 ? 400 : 200 },
+        );
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: {
+        sessionId: 'session-a',
+        clientId: 'client-initial',
+        attached: true,
+        workspaceCwd: '/workspace',
+      },
+    });
+    const connection: DaemonConnectionState = {
+      status: 'connected',
+      sessionId: 'session-a',
+      clientId: 'client-initial',
+      workspaceCwd: '/workspace',
+      currentModel: 'model-a',
+      context: {
+        v: 1,
+        sessionId: 'session-a',
+        workspaceCwd: '/workspace',
+        state: {},
+        recovery: {
+          canContinue: true,
+          outcome: 'interrupted',
+          reason: 'interrupted',
+        },
+      },
+    };
+    const restartEventStream = vi.fn();
+    const h = createActionsHarness({ connection, restartEventStream });
+    h.sessionRef.current = session;
+
+    const submitResult = await h.actions.submitPrompt('Queued prompt');
+    expect(submitResult).toEqual({ promptId: 'submitted-prompt' });
+    expect(promptClientIds).toEqual(['client-initial', 'client-healed-1']);
+    expect(h.getConnection().clientId).toBe('client-healed-1');
+    expect(restartEventStream).toHaveBeenCalledWith('session-a');
+
+    const continuePromise = h.actions.continueSession();
+    await vi.waitFor(() =>
+      expect(continueClientIds).toEqual(['client-healed-1', 'client-healed-2']),
+    );
+    expect(h.getConnection().clientId).toBe('client-healed-2');
+    const active = h.activePromptsRef.current.get('session-a');
+    active?.resolve?.({ stopReason: 'end_turn' });
+    await continuePromise;
+  });
+
   it.each(['session-b', 'session-a'])(
     'does not publish a recovered client to a replacement SDK instance for %s',
     async (replacementSessionId) => {

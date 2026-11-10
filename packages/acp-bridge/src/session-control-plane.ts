@@ -6238,11 +6238,14 @@ export function createSessionControlPlane(
             entry.sessionId,
           );
           for (const peer of byId.values()) {
-            if (peer.sessionId === entry.sessionId) {
+            if (
+              peer.sessionId === entry.sessionId ||
+              peer.currentApprovalMode !== undefined ||
+              peer.planExecutionMode !== undefined
+            ) {
               continue;
             }
             peer.currentApprovalMode = response.current;
-            peer.planExecutionMode = undefined;
           }
         }
         succeeded = true;

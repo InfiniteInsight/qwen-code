@@ -280,6 +280,60 @@ describe('DiscordBridge runner', () => {
     expect(cursors[1]).toBe(9); // reconnect resumes from the last seen id
   });
 
+  it('advances/resets cursor on 412 replay_truncated instead of re-sending the stale cursor forever (#504)', async () => {
+    await channels.bind('chan_1', 'g1', 'sess_q');
+    const cursorsStore = await CursorStore.open(join(dir, 'cursors.json'));
+    await cursorsStore.setLastEventId('tok_d', 'sess_q', 12);
+    const ac = new AbortController();
+    const cursors: Array<number | undefined> = [];
+    let call = 0;
+    const h = harness({
+      cursors: cursorsStore,
+      tokenId: 'tok_d',
+      sleep: () => new Promise<void>((r) => setTimeout(r, 1)),
+    });
+    (
+      h.bridge as unknown as {
+        cfg: {
+          client: {
+            subscribeEvents: (
+              s: string,
+              cb: (ev: { id?: number; type?: string }) => void,
+              sig?: AbortSignal,
+              last?: number,
+              onReplayTruncated?: (earliest?: number) => void | Promise<void>,
+            ) => Promise<void>;
+          };
+        };
+      }
+    ).cfg.client.subscribeEvents = async (
+      _s,
+      _cb,
+      _sig,
+      last,
+      onReplayTruncated,
+    ) => {
+      cursors.push(last);
+      call++;
+      if (call === 1) {
+        await onReplayTruncated?.(100);
+        return;
+      }
+      if (call === 2) {
+        await onReplayTruncated?.(undefined);
+        return;
+      }
+      ac.abort();
+    };
+
+    void h.bridge.start(ac.signal);
+    await waitFor(() => call >= 3);
+    expect(cursors).toEqual([12, 99, undefined]);
+    await cursorsStore['inFlight'];
+    await cursorsStore['queued'];
+    expect(cursorsStore.get('tok_d', 'sess_q')).toBeUndefined();
+  });
+
   it('deliverEvent renders a permission_request to every bound channel', async () => {
     await channels.bind('chan_1', 'g1', 'sess_q');
     await channels.bind('chan_2', 'g1', 'sess_q');

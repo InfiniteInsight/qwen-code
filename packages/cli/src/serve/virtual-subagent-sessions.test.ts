@@ -1954,3 +1954,111 @@ it('refreshes cached target status on getTarget, emits terminal events on update
   abort.abort();
   await iterator.return?.();
 });
+
+it('emits unstreamed suffix delta from canonical ROUND_TEXT when .stream is truncated before tail chunks are polled (#510)', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-tail-delta-'));
+  tempDirs.push(dir);
+  const outputFile = path.join(dir, 'agent-tail.jsonl');
+  const emitter = new AgentEventEmitter();
+  const { cleanup } = attachJsonlTranscriptWriter(emitter, outputFile, {
+    agentId: 'agent-tail',
+    sessionId: 'parent-session',
+    cwd: '/workspace',
+    version: '1.0.0',
+    initialUserPrompt: 'turn 1 prompt',
+  });
+
+  const runtime = {
+    workspaceId: 'workspace-tail-510',
+    workspaceCwd: '/workspace',
+    sessionRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+    env: { mode: 'parent-process', overlayKeys: [] },
+    bridge: {
+      getSessionTasksStatus: async () => ({
+        v: 1 as const,
+        sessionId: 'parent-session',
+        now: Date.now(),
+        tasks: [
+          {
+            kind: 'agent' as const,
+            id: 'agent-tail',
+            label: 'tail agent',
+            description: 'tail agent',
+            status: 'running' as const,
+            startTime: 1_000,
+            runtimeMs: 100,
+            outputFile,
+            isBackgrounded: true,
+            toolUseId: 'call-tail',
+          },
+        ],
+      }),
+    },
+  } as unknown as WorkspaceRuntime;
+
+  try {
+    const sessions = new VirtualSubagentSessions();
+    const resolved = await sessions.resolve(
+      runtime,
+      'parent-session',
+      'call-tail',
+    );
+    const loaded = await sessions.load(runtime, resolved!.sessionId);
+    const abort = new AbortController();
+    const stream = await sessions.subscribe(runtime, resolved!.sessionId, {
+      signal: abort.signal,
+      lastEventId: loaded!.lastEventId,
+    });
+    const iterator = stream![Symbol.asyncIterator]();
+    expect((await iterator.next()).value?.type).toBe('replay_complete');
+
+    emitter.emit(AgentEventType.START, {
+      subagentId: 'agent-tail',
+      name: 'general-purpose',
+      model: 'test-model',
+      tools: ['*'],
+      timestamp: 10,
+    });
+
+    // Early chunk (>= 64 KiB so it flushes immediately to .jsonl.stream) is polled by VirtualSubagentTarget.
+    const prefix = `Hello prefix ${'p'.repeat(64 * 1024)} `;
+    emitter.emit(AgentEventType.STREAM_TEXT, {
+      subagentId: 'agent-tail',
+      round: 0,
+      text: prefix,
+      thought: false,
+      timestamp: 11,
+    });
+    await activeTarget(sessions).refreshLive();
+    const firstChunk = await iterator.next();
+    expect(JSON.stringify(firstChunk.value)).toContain('Hello prefix');
+
+    // Tail chunk is emitted right before ROUND_TEXT truncates .stream, before VirtualSubagentTarget polls again.
+    const tail = 'TAIL_DELTA_510';
+    emitter.emit(AgentEventType.STREAM_TEXT, {
+      subagentId: 'agent-tail',
+      round: 0,
+      text: tail,
+      thought: false,
+      timestamp: 12,
+    });
+    emitter.emit(AgentEventType.ROUND_TEXT, {
+      subagentId: 'agent-tail',
+      round: 0,
+      text: `${prefix}${tail}`,
+      thoughtText: '',
+      timestamp: 13,
+    });
+
+    await activeTarget(sessions).refreshLive();
+    const tailChunk = await iterator.next();
+    const payload = JSON.stringify(tailChunk.value);
+    expect(payload).toContain('TAIL_DELTA_510');
+    expect(payload).not.toContain('Hello prefix');
+
+    abort.abort();
+    await iterator.return?.();
+  } finally {
+    cleanup();
+  }
+});

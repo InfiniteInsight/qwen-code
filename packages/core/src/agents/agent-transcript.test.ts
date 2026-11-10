@@ -721,6 +721,29 @@ describe('agent-transcript', () => {
       });
     });
 
+    it('flushes pending stream chunks on TOOL_CALL and preserves stream chunks across usage-only ROUND_TEXT (#510)', () => {
+      const { emitter, cleanup } = start([
+        streamText('thinking before tool', true, 1),
+      ]);
+      expect(exists('.stream')).toBe(false);
+
+      // TOOL_CALL flushes pending stream text before writing the tool call record.
+      toolCall('c1', 'read_file', { file_path: '/x.txt' }, 'read x')(emitter);
+      expect(exists('.stream')).toBe(true);
+      expect(lines('.stream')).toHaveLength(1);
+
+      // Usage-only ROUND_TEXT (parts: []) must not truncate .stream or mark the round completed.
+      roundText('', { round: 1, usageMetadata: usage(), timestamp: 2 })(
+        emitter,
+      );
+      expect(exists('.stream')).toBe(true);
+      expect(readTranscriptMessagesSync(jsonlPath, true)).toMatchObject({
+        liveThought: 'thinking before tool',
+      });
+
+      cleanup();
+    });
+
     it('drops ROUND_TEXT with no text, thought, or usage', () => {
       write([roundText('')]);
       expect(exists()).toBe(false);
