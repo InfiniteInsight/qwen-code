@@ -132,6 +132,8 @@ export type CatalogRow = Partial<DaemonSessionSummary> & {
   source: CatalogSource;
   /** First user message, joined from the transcript (#132). */
   preview?: string;
+  /** The session that spawned this one (`create_sub_session`); disk rows only. */
+  spawnedBy?: string;
 };
 
 export interface CatalogMemberStatus {
@@ -502,6 +504,7 @@ function diskRow(item: SessionListItem, workspace: string): CatalogRow {
       ? { titleSource: item.titleSource }
       : {}),
     ...(item.preview ? { preview: item.preview } : {}),
+    ...(item.spawnedBy ? { spawnedBy: item.spawnedBy } : {}),
     ...(item.archived ? { isArchived: true } : {}),
     workspace,
     source: 'disk',

@@ -47,6 +47,29 @@ export function parentOf(records: ForkRecord[] | null): string | null {
   return null;
 }
 
+/**
+ * Extract the id of the session that SPAWNED this one (`create_sub_session`)
+ * from its head records: the first `{ type: 'system', subtype:
+ * 'parent_session' }` record whose `systemPayload.parentSessionId` is a
+ * string. Distinct from {@link parentOf}: a fork's `forkedFrom` is NOT a
+ * spawn, and the two never mix. Returns null for a root, a fork, a missing
+ * transcript, or a marker with a non-string id.
+ */
+export function spawnedByOf(records: ForkRecord[] | null): string | null {
+  if (!records) return null;
+  for (const rec of records) {
+    if (rec['type'] !== 'system' || rec['subtype'] !== 'parent_session') {
+      continue;
+    }
+    const payload = rec['systemPayload'];
+    if (payload && typeof payload === 'object') {
+      const sid = (payload as Record<string, unknown>)['parentSessionId'];
+      if (typeof sid === 'string') return sid;
+    }
+  }
+  return null;
+}
+
 export interface WalkLineageOpts {
   /** Reads a session's parsed transcript records; null = transcript absent. */
   readRecords: (id: string) => Promise<ForkRecord[] | null>;

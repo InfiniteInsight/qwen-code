@@ -686,3 +686,64 @@ describe('listSessionsAcross (archive state)', () => {
     expect(sessions[0].archived).toBeUndefined();
   });
 });
+
+describe('listSessions spawnedBy (#255)', () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'rc-spawned-'));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const marker = (parent: string) =>
+    JSON.stringify({
+      type: 'system',
+      subtype: 'parent_session',
+      systemPayload: { parentSessionId: parent },
+    });
+  const filler = (n: number) => JSON.stringify({ type: 'user', n });
+
+  it('lists a sub-session with spawnedBy and no parentSessionId', async () => {
+    await writeFile(join(dir, `${ID(1)}.jsonl`), marker('P') + '\n');
+    const { sessions } = await listSessions(dir);
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].spawnedBy).toBe('P');
+    expect('parentSessionId' in sessions[0]).toBe(false);
+  });
+
+  it('lists a fork with parentSessionId and no spawnedBy', async () => {
+    await writeFile(
+      join(dir, `${ID(1)}.jsonl`),
+      JSON.stringify({ forkedFrom: { sessionId: 'F' }, type: 'user' }) + '\n',
+    );
+    const { sessions } = await listSessions(dir);
+    expect(sessions[0].parentSessionId).toBe('F');
+    expect('spawnedBy' in sessions[0]).toBe(false);
+  });
+
+  it('finds parent_session within the first 8 records only', async () => {
+    const at = async (id: string, index: number) => {
+      const lines: string[] = [];
+      for (let i = 0; i < index; i++) lines.push(filler(i));
+      lines.push(marker('P'));
+      await writeFile(join(dir, `${id}.jsonl`), lines.join('\n') + '\n');
+    };
+    await at(ID(1), 7); // line 8
+    await at(ID(2), 8); // line 9
+    const { sessions } = await listSessions(dir);
+    const byId = new Map(sessions.map((s) => [s.sessionId, s]));
+    expect(byId.get(ID(1))?.spawnedBy).toBe('P');
+    expect(byId.get(ID(2))?.spawnedBy).toBeUndefined();
+  });
+
+  it('still finds the marker after an unparseable first line, without inventing a fork parent', async () => {
+    await writeFile(
+      join(dir, `${ID(1)}.jsonl`),
+      'not json\n' + marker('P') + '\n',
+    );
+    const { sessions } = await listSessions(dir);
+    expect(sessions[0].spawnedBy).toBe('P');
+    expect('parentSessionId' in sessions[0]).toBe(false);
+  });
+});

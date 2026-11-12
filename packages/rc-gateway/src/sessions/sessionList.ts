@@ -8,13 +8,18 @@ import { open, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ForkRecord } from './forkTranscript.js';
 import { isValidSessionId } from './chatsPath.js';
-import { parentOf } from './lineage.js';
+import { parentOf, spawnedByOf } from './lineage.js';
 
 /** One node in a flat workspace session listing. */
 export interface SessionListItem {
   sessionId: string;
   /** The fork parent, when this session is a fork. Omitted for a root. */
   parentSessionId?: string;
+  /**
+   * The session that spawned this one with `create_sub_session` (a "subagent
+   * thread"). Omitted for a root or a fork; a fork reports `parentSessionId`.
+   */
+  spawnedBy?: string;
   /** Human title (core `custom_title`), when set. Omitted otherwise. */
   title?: string;
   /** How the title was set: 'manual' | 'auto'. Omitted when there is no title. */
@@ -53,6 +58,16 @@ export const MAX_LIST_SESSIONS = 500;
 
 /** Default cap on bytes read while looking for a transcript's first newline. */
 const DEFAULT_MAX_FIRST_LINE_BYTES = 1024 * 1024;
+
+/** One JSONL line to a record: null when it is not a JSON object. */
+function parseRecordLine(line: string): ForkRecord | null {
+  try {
+    const obj = JSON.parse(line) as unknown;
+    return obj && typeof obj === 'object' ? (obj as ForkRecord) : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Reads ONLY the first JSONL record of `<chatsDir>/<id>.jsonl` — the
@@ -108,12 +123,61 @@ export async function readFirstRecord(
     }
     const line = Buffer.concat(chunks).toString('utf8').trim();
     if (!line) return null;
-    try {
-      const obj = JSON.parse(line) as unknown;
-      return obj && typeof obj === 'object' ? (obj as ForkRecord) : null;
-    } catch {
-      return null;
+    return parseRecordLine(line);
+  } finally {
+    await handle.close();
+  }
+}
+
+/** How many leading records {@link readHeadRecords} returns at most. */
+const HEAD_RECORDS = 8;
+/** Bytes {@link readHeadRecords} reads at most. */
+const HEAD_MAX_BYTES = 64 * 1024;
+
+/**
+ * Reads the first {@link HEAD_RECORDS} JSONL lines of `<chatsDir>/<id>.jsonl`
+ * (within {@link HEAD_MAX_BYTES}) so a listing can find the `parent_session`
+ * marker, which core writes near the start. Same line parsing as
+ * {@link readFirstRecord}. The result keeps line positions: a line that is not
+ * a JSON object becomes `{}`, so `records[0]` is always the first line (a
+ * garbled first line must not hand `parentOf` a later record). A final line
+ * cut off by the byte bound is dropped. Returns null for a missing or empty
+ * file; other open/read errors propagate.
+ */
+async function readHeadRecords(
+  chatsDir: string,
+  id: string,
+): Promise<ForkRecord[] | null> {
+  let handle;
+  try {
+    handle = await open(join(chatsDir, `${id}.jsonl`), 'r');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+  try {
+    const buf = Buffer.allocUnsafe(HEAD_MAX_BYTES);
+    let total = 0;
+    while (total < HEAD_MAX_BYTES) {
+      const { bytesRead } = await handle.read(
+        buf,
+        total,
+        HEAD_MAX_BYTES - total,
+        null,
+      );
+      if (bytesRead === 0) break;
+      total += bytesRead;
     }
+    const lines = buf.subarray(0, total).toString('utf8').split('\n');
+    // The last segment is an unterminated line: a cut-off one when the byte
+    // bound was hit, otherwise just the empty string after the final newline.
+    if (total === HEAD_MAX_BYTES || lines[lines.length - 1].trim() === '') {
+      lines.pop();
+    }
+    const records = lines
+      .slice(0, HEAD_RECORDS)
+      .map((l) => parseRecordLine(l.trim()) ?? {});
+    return records.length > 0 ? records : null;
   } finally {
     await handle.close();
   }
@@ -326,6 +390,8 @@ export async function readFirstUserMessage(
 export interface SessionEntry {
   sessionId: string;
   parentSessionId: string | null;
+  /** The spawning session (`create_sub_session`), when this is a sub-session. */
+  spawnedBy?: string;
   /** Human title (core `custom_title`), when set. */
   title?: string;
   /** How the title was set: 'manual' | 'auto'. */
@@ -358,6 +424,7 @@ export function assembleListing(entries: SessionEntry[]): SessionListItem[] {
     items.set(e.sessionId, {
       sessionId: e.sessionId,
       ...(isRoot ? {} : { parentSessionId: e.parentSessionId as string }),
+      ...(e.spawnedBy ? { spawnedBy: e.spawnedBy } : {}),
       ...(e.title ? { title: e.title } : {}),
       ...(e.title && e.titleSource ? { titleSource: e.titleSource } : {}),
       forks: [],
@@ -417,18 +484,22 @@ async function readEntry(
   updatedAt: string,
 ): Promise<SessionEntry> {
   let parent: string | null;
+  let spawnedBy: string | null;
   try {
-    const first = await readFirstRecord(chatsDir, id);
-    parent = parentOf(first ? [first] : null);
+    const head = await readHeadRecords(chatsDir, id);
+    parent = parentOf(head);
+    spawnedBy = spawnedByOf(head);
   } catch {
-    // Unreadable first line (e.g. EACCES) -> list it as a root, don't drop.
+    // Unreadable head (e.g. EACCES) -> list it as a root, don't drop.
     parent = null;
+    spawnedBy = null;
   }
   const info = await readSessionTitleInfo(chatsDir, id);
   const preview = await readFirstUserMessage(chatsDir, id);
   return {
     sessionId: id,
     parentSessionId: parent,
+    ...(spawnedBy ? { spawnedBy } : {}),
     ...(info ? { title: info.title, titleSource: info.titleSource } : {}),
     updatedAt,
     ...(preview ? { preview } : {}),
