@@ -9840,6 +9840,11 @@ export function registerSessionRoutes(
           ...(session.updatedAt !== undefined
             ? { updatedAt: session.updatedAt }
             : {}),
+          // The create_sub_session parent, so a client can hide a sub-session
+          // whose transcript is not written yet. Absent for top-level sessions.
+          ...(session.parentSessionId !== undefined
+            ? { parentSessionId: session.parentSessionId }
+            : {}),
         }));
       assertRuntimeOpen?.();
       lastExposedCatalogVersions.set(bridge, catalogVersion);

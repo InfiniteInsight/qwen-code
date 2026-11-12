@@ -1999,6 +1999,11 @@ export interface DaemonSessionLiveState {
    * treat it as recency for ordering only.
    */
   updatedAt?: string;
+  /**
+   * The `create_sub_session` parent of this session. Absent for a top-level
+   * session and when talking to an older daemon.
+   */
+  parentSessionId?: string;
 }
 
 export interface DaemonWorkspaceSessionLiveState {
