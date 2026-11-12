@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   mkdtemp,
   mkdir,
+  open,
   rm,
   writeFile,
   utimes,
@@ -18,6 +19,7 @@ import { join } from 'node:path';
 import {
   assembleListing,
   readFirstRecord,
+  readHeadRecords,
   readFirstUserMessage,
   readSessionTitle,
   readSessionTitleInfo,
@@ -745,5 +747,60 @@ describe('listSessions spawnedBy (#255)', () => {
     const { sessions } = await listSessions(dir);
     expect(sessions[0].spawnedBy).toBe('P');
     expect('parentSessionId' in sessions[0]).toBe(false);
+  });
+
+  it('still lists a fork whose first record is over 64 KiB (100 KiB)', async () => {
+    const big = JSON.stringify({
+      forkedFrom: { sessionId: 'F' },
+      type: 'user',
+      pad: 'x'.repeat(100 * 1024),
+    });
+    await writeFile(join(dir, `${ID(1)}.jsonl`), big + '\n' + filler(1) + '\n');
+    const { sessions } = await listSessions(dir);
+    expect(sessions[0].parentSessionId).toBe('F');
+    expect('spawnedBy' in sessions[0]).toBe(false);
+  });
+
+  it('drops a first line over the 1 MiB bound (a root) instead of a partial record', async () => {
+    await writeFile(
+      join(dir, `${ID(1)}.jsonl`),
+      JSON.stringify({ pad: 'x'.repeat(1100 * 1024) }) + '\n',
+    );
+    expect(await readHeadRecords(dir, ID(1))).toBeNull();
+  });
+
+  it('drops a line cut off by the 64 KiB bound after the first line', async () => {
+    const lines = [filler(0), marker('P') + ' '.repeat(80 * 1024)];
+    await writeFile(join(dir, `${ID(1)}.jsonl`), lines.join('\n'));
+    const recs = await readHeadRecords(dir, ID(1));
+    expect(recs).toHaveLength(1);
+  });
+
+  it('stops reading once 8 records are in hand', async () => {
+    const head = Array.from({ length: 8 }, (_, i) => filler(i)).join('\n');
+    // Far more than the bound follows the 8th line.
+    await writeFile(
+      join(dir, `${ID(1)}.jsonl`),
+      head + '\n' + 'y'.repeat(300 * 1024),
+    );
+    const probe = await open(join(dir, `${ID(1)}.jsonl`), 'r');
+    const proto = Object.getPrototypeOf(probe) as { read: unknown };
+    await probe.close();
+    const read = vi.spyOn(
+      proto as { read: (...a: unknown[]) => Promise<{ bytesRead: number }> },
+      'read',
+    );
+    try {
+      const recs = await readHeadRecords(dir, ID(1), { chunkSize: 1024 });
+      expect(recs).toHaveLength(8);
+      const bytes = (
+        await Promise.all(read.mock.results.map((r) => r.value))
+      ).reduce((n, r) => n + r.bytesRead, 0);
+      // The 8 short lines fit in the first chunk; no further read happens.
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(bytes).toBe(1024);
+    } finally {
+      read.mockRestore();
+    }
   });
 });

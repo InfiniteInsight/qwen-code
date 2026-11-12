@@ -131,23 +131,34 @@ export async function readFirstRecord(
 
 /** How many leading records {@link readHeadRecords} returns at most. */
 const HEAD_RECORDS = 8;
-/** Bytes {@link readHeadRecords} reads at most. */
+/** Bytes {@link readHeadRecords} reads at most BEYOND the first line. */
 const HEAD_MAX_BYTES = 64 * 1024;
+/** Bytes per read in {@link readHeadRecords}; a short head costs one read. */
+const HEAD_CHUNK_BYTES = 16 * 1024;
 
 /**
  * Reads the first {@link HEAD_RECORDS} JSONL lines of `<chatsDir>/<id>.jsonl`
- * (within {@link HEAD_MAX_BYTES}) so a listing can find the `parent_session`
- * marker, which core writes near the start. Same line parsing as
- * {@link readFirstRecord}. The result keeps line positions: a line that is not
- * a JSON object becomes `{}`, so `records[0]` is always the first line (a
- * garbled first line must not hand `parentOf` a later record). A final line
- * cut off by the byte bound is dropped. Returns null for a missing or empty
- * file; other open/read errors propagate.
+ * so a listing can find the `parent_session` marker, which core writes near
+ * the start. Same line parsing as {@link readFirstRecord}.
+ *
+ * Reads chunk by chunk and STOPS once {@link HEAD_RECORDS} complete lines are
+ * in hand, so a long transcript costs about one chunk. Bounds: the first line
+ * may be up to {@link DEFAULT_MAX_FIRST_LINE_BYTES} (the bound
+ * `readFirstRecord` always had, so a fork with a large first record still
+ * lists its parent); after it, at most {@link HEAD_MAX_BYTES} more. A line cut
+ * off by a bound is dropped.
+ *
+ * The result keeps line positions: a line that is not a JSON object becomes
+ * `{}`, so `records[0]` is always the first line (a garbled first line must
+ * not hand `parentOf` a later record). Returns null for a missing or empty
+ * file, or a first line over the bound; other open/read errors propagate.
  */
-async function readHeadRecords(
+export async function readHeadRecords(
   chatsDir: string,
   id: string,
+  opts: { chunkSize?: number } = {},
 ): Promise<ForkRecord[] | null> {
+  const chunkSize = opts.chunkSize ?? HEAD_CHUNK_BYTES;
   let handle;
   try {
     handle = await open(join(chatsDir, `${id}.jsonl`), 'r');
@@ -156,24 +167,36 @@ async function readHeadRecords(
     throw err;
   }
   try {
-    const buf = Buffer.allocUnsafe(HEAD_MAX_BYTES);
+    const chunks: Buffer[] = [];
+    const buf = Buffer.allocUnsafe(chunkSize);
     let total = 0;
-    while (total < HEAD_MAX_BYTES) {
+    let limit = DEFAULT_MAX_FIRST_LINE_BYTES;
+    let newlines = 0;
+    let eof = false;
+    while (total < limit && newlines < HEAD_RECORDS) {
       const { bytesRead } = await handle.read(
         buf,
-        total,
-        HEAD_MAX_BYTES - total,
+        0,
+        Math.min(buf.length, limit - total),
         null,
       );
-      if (bytesRead === 0) break;
+      if (bytesRead === 0) {
+        eof = true;
+        break;
+      }
+      const slice = buf.subarray(0, bytesRead);
+      chunks.push(Buffer.from(slice));
+      for (let at = slice.indexOf(0x0a); at !== -1; ) {
+        if (newlines === 0) limit = total + at + 1 + HEAD_MAX_BYTES;
+        newlines++;
+        at = slice.indexOf(0x0a, at + 1);
+      }
       total += bytesRead;
     }
-    const lines = buf.subarray(0, total).toString('utf8').split('\n');
-    // The last segment is an unterminated line: a cut-off one when the byte
-    // bound was hit, otherwise just the empty string after the final newline.
-    if (total === HEAD_MAX_BYTES || lines[lines.length - 1].trim() === '') {
-      lines.pop();
-    }
+    const lines = Buffer.concat(chunks).toString('utf8').split('\n');
+    // The last segment is unterminated: complete only at EOF, otherwise cut
+    // off by a bound or by the early stop (the complete lines precede it).
+    if (!eof || lines[lines.length - 1].trim() === '') lines.pop();
     const records = lines
       .slice(0, HEAD_RECORDS)
       .map((l) => parseRecordLine(l.trim()) ?? {});
