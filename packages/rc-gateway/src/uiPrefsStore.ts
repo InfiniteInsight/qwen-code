@@ -14,6 +14,12 @@ import { isValidTimeZone } from './policy/conditions.js';
  */
 export const DEFAULT_STAMP_ZONE = 'America/New_York';
 
+/**
+ * Whether subagent threads are hidden in the conversation list when the device
+ * has saved nothing. Hidden by default, so a fresh device gets the quieter list.
+ */
+export const DEFAULT_HIDE_THREADS = true;
+
 /** Longest zone name accepted. The IANA database tops out well under this. */
 const MAX_ZONE_LENGTH = 64;
 
@@ -24,6 +30,12 @@ export interface UiPrefs {
    * always reaches `Intl.DateTimeFormat` without throwing.
    */
   stampZone?: string;
+  /**
+   * Whether this device hides subagent threads in the conversation list, or
+   * absent for "use the default" (hide). Stored per token for the same reason as
+   * the zone: the choice belongs to the reader's device, not the gateway.
+   */
+  hideThreads?: boolean;
 }
 
 interface PersistShape {
@@ -93,6 +105,25 @@ export class UiPrefsStore {
     this.byToken[tokenId] = rec;
     await this.persist();
     return true;
+  }
+
+  /**
+   * Set (or clear) the token's hide-threads choice; persists. `undefined` removes
+   * the field so the record reads "use the default". The caller validates the
+   * type; the store only persists.
+   */
+  async setHideThreads(
+    tokenId: string,
+    value: boolean | undefined,
+  ): Promise<void> {
+    const rec = { ...this.byToken[tokenId] };
+    if (value === undefined) {
+      delete rec.hideThreads;
+    } else {
+      rec.hideThreads = value;
+    }
+    this.byToken[tokenId] = rec;
+    await this.persist();
   }
 
   /** Temp-and-rename (#165): a crash mid-write keeps the old file whole. */

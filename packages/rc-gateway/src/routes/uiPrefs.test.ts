@@ -80,14 +80,104 @@ describe('GET /rc/ui-prefs', () => {
     expect(status).toBe(200);
     // The client is told what it will actually see, so it never has to
     // reproduce the default to render correctly.
-    expect(json).toEqual({ stampZone: DEFAULT_STAMP_ZONE, saved: false });
+    expect(json).toEqual({
+      stampZone: DEFAULT_STAMP_ZONE,
+      saved: false,
+      hideThreads: true,
+    });
   });
 
   it('marks the zone saved once the token has chosen one', async () => {
     await mount({ id: 'tok_a' });
     await put({ stampZone: 'Asia/Tokyo' });
     const { json } = await get();
-    expect(json).toEqual({ stampZone: 'Asia/Tokyo', saved: true });
+    expect(json).toEqual({
+      stampZone: 'Asia/Tokyo',
+      saved: true,
+      hideThreads: true,
+    });
+  });
+
+  it('GET answers hideThreads true when unset', async () => {
+    await mount({ id: 'tok_a' });
+    const { status, json } = await get();
+    expect(status).toBe(200);
+    expect(json).toMatchObject({ hideThreads: true });
+  });
+
+  it('PUT { hideThreads: false } then GET answers false and keeps stampZone', async () => {
+    await mount({ id: 'tok_a' });
+    await put({ stampZone: 'Asia/Tokyo' });
+    const put1 = await put({ hideThreads: false });
+    expect(put1.status).toBe(200);
+    expect(put1.json).toMatchObject({
+      stampZone: 'Asia/Tokyo',
+      hideThreads: false,
+    });
+    const { json } = await get();
+    expect(json).toMatchObject({ stampZone: 'Asia/Tokyo', hideThreads: false });
+  });
+
+  it('PUT { stampZone } alone keeps a saved hideThreads', async () => {
+    await mount({ id: 'tok_a' });
+    await put({ hideThreads: false });
+    const { status, json } = await put({ stampZone: 'Europe/Berlin' });
+    expect(status).toBe(200);
+    expect(json).toMatchObject({
+      stampZone: 'Europe/Berlin',
+      hideThreads: false,
+    });
+    expect(store.get('tok_a').hideThreads).toBe(false);
+  });
+
+  it('PUT { hideThreads: "yes" } is 400 invalid_hide_threads', async () => {
+    await mount({ id: 'tok_a' });
+    const { status, json } = await put({ hideThreads: 'yes' });
+    expect(status).toBe(400);
+    expect(json).toMatchObject({ code: 'invalid_hide_threads' });
+    expect(store.get('tok_a')).toEqual({});
+  });
+
+  it('a bad hideThreads never half-applies a valid stampZone in the same PUT', async () => {
+    await mount({ id: 'tok_a' });
+    const { status, json } = await put({
+      stampZone: 'Asia/Tokyo',
+      hideThreads: 'yes',
+    });
+    expect(status).toBe(400);
+    expect(json).toMatchObject({ code: 'invalid_hide_threads' });
+    expect(store.get('tok_a')).toEqual({});
+  });
+
+  it('a bad stampZone never half-applies a valid hideThreads in the same PUT', async () => {
+    await mount({ id: 'tok_a' });
+    const { status, json } = await put({
+      stampZone: 'Mars/Olympus_Mons',
+      hideThreads: false,
+    });
+    expect(status).toBe(400);
+    expect(json).toMatchObject({ code: 'invalid_zone' });
+    expect(store.get('tok_a')).toEqual({});
+  });
+
+  it('PUT naming neither field is 400 invalid_zone with the combined message', async () => {
+    await mount({ id: 'tok_a' });
+    const { status, json } = await put({});
+    expect(status).toBe(400);
+    expect(json).toEqual({
+      error: 'stampZone or hideThreads is required',
+      code: 'invalid_zone',
+    });
+  });
+
+  it('two tokens keep separate hideThreads values', async () => {
+    await mount({ id: 'phone' });
+    await put({ hideThreads: false });
+    await put({ hideThreads: true }, 'laptop');
+    await put({ hideThreads: null }, 'laptop');
+    expect(store.get('phone').hideThreads).toBe(false);
+    expect((await get('laptop')).json).toMatchObject({ hideThreads: true });
+    expect((await get('phone')).json).toMatchObject({ hideThreads: false });
   });
 });
 
@@ -96,7 +186,11 @@ describe('PUT /rc/ui-prefs', () => {
     await mount({ id: 'tok_a' });
     const { status, json } = await put({ stampZone: 'Asia/Tokyo' });
     expect(status).toBe(200);
-    expect(json).toEqual({ stampZone: 'Asia/Tokyo', saved: true });
+    expect(json).toEqual({
+      stampZone: 'Asia/Tokyo',
+      saved: true,
+      hideThreads: true,
+    });
     expect(audit.calls.map((c) => c.action)).toEqual(['ui_prefs_set']);
     expect(audit.calls[0].detail).toEqual({ stampZone: 'Asia/Tokyo' });
   });
@@ -107,7 +201,11 @@ describe('PUT /rc/ui-prefs', () => {
 
     const { status, json } = await put({ stampZone: null });
     expect(status).toBe(200);
-    expect(json).toEqual({ stampZone: DEFAULT_STAMP_ZONE, saved: false });
+    expect(json).toEqual({
+      stampZone: DEFAULT_STAMP_ZONE,
+      saved: false,
+      hideThreads: true,
+    });
   });
 
   it('rejects a missing stampZone key rather than treating it as a clear', async () => {
@@ -140,7 +238,11 @@ describe('PUT /rc/ui-prefs', () => {
     // The rejected write must not blank what was already saved.
     expect(store.get('tok_a').stampZone).toBe('Asia/Tokyo');
     const after = await get();
-    expect(after.json).toEqual({ stampZone: 'Asia/Tokyo', saved: true });
+    expect(after.json).toEqual({
+      stampZone: 'Asia/Tokyo',
+      saved: true,
+      hideThreads: true,
+    });
   });
 
   it('does not audit a write that was rejected', async () => {
@@ -158,7 +260,11 @@ describe('per-token keying', () => {
     // A second paired token on the same gateway sees the default, not the
     // phone's choice — which is the whole reason this is keyed per token.
     const other = await get('laptop');
-    expect(other.json).toEqual({ stampZone: DEFAULT_STAMP_ZONE, saved: false });
+    expect(other.json).toEqual({
+      stampZone: DEFAULT_STAMP_ZONE,
+      saved: false,
+      hideThreads: true,
+    });
 
     // And writing as the laptop leaves the phone's record alone.
     await put({ stampZone: 'Europe/Berlin' }, 'laptop');
@@ -166,6 +272,10 @@ describe('per-token keying', () => {
     expect(store.get('laptop').stampZone).toBe('Europe/Berlin');
 
     const back = await get('phone');
-    expect(back.json).toEqual({ stampZone: 'Asia/Tokyo', saved: true });
+    expect(back.json).toEqual({
+      stampZone: 'Asia/Tokyo',
+      saved: true,
+      hideThreads: true,
+    });
   });
 });

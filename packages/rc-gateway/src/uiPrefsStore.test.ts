@@ -175,4 +175,35 @@ describe('UiPrefsStore', () => {
   it('the default is a real zone, since every unstamped row renders in it', async () => {
     expect(isValidTimeZone(DEFAULT_STAMP_ZONE)).toBe(true);
   });
+
+  it('setHideThreads persists false and reads it back after reopen', async () => {
+    const path = tempPath();
+    const store = await UiPrefsStore.open(path);
+    await store.setHideThreads('tokA', false);
+    expect(store.get('tokA').hideThreads).toBe(false);
+
+    const reopened = await UiPrefsStore.open(path);
+    expect(reopened.get('tokA').hideThreads).toBe(false);
+  });
+
+  it('setHideThreads(undefined) clears it', async () => {
+    const path = tempPath();
+    const store = await UiPrefsStore.open(path);
+    await store.setHideThreads('tokA', false);
+    await store.setHideThreads('tokA', undefined);
+    expect('hideThreads' in store.get('tokA')).toBe(false);
+
+    const reopened = await UiPrefsStore.open(path);
+    expect('hideThreads' in reopened.get('tokA')).toBe(false);
+  });
+
+  it('setHideThreads keeps the token saved stamp zone', async () => {
+    const store = await UiPrefsStore.open(tempPath());
+    await store.setStampZone('tokA', 'Asia/Tokyo');
+    await store.setHideThreads('tokA', true);
+    expect(store.get('tokA')).toEqual({
+      stampZone: 'Asia/Tokyo',
+      hideThreads: true,
+    });
+  });
 });
