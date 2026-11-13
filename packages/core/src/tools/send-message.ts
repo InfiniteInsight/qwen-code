@@ -277,16 +277,16 @@ class SendMessageInvocation extends BaseToolInvocation<
       }
 
       if (entry.status === 'paused') {
-        const resumed = await this.config.resumeBackgroundAgent(
+        const outcome = await this.config.resumeBackgroundAgentWithOutcome(
           this.params.task_id,
           this.params.message,
         );
-        if (!resumed) {
+        if (!outcome.resumed) {
           return {
-            llmContent: `Error: Background task "${this.params.task_id}" could not be resumed.`,
-            returnDisplay: 'Task could not be resumed.',
+            llmContent: `Error: Background task "${this.params.task_id}" could not be resumed (${outcome.code}): ${outcome.reason}`,
+            returnDisplay: `Task could not be resumed: ${outcome.reason}`,
             error: {
-              message: `Task could not be resumed: ${this.params.task_id}`,
+              message: `Task could not be resumed: ${this.params.task_id} (${outcome.code}): ${outcome.reason}`,
               type: ToolErrorType.SEND_MESSAGE_NOT_RUNNING,
             },
           };

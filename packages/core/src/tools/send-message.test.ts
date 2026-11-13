@@ -281,7 +281,7 @@ describe('SendMessageTool — team mode', () => {
 describe('SendMessageTool — background-task mode', () => {
   let registry: BackgroundTaskRegistry;
   let tool: SendMessageTool;
-  let resumeBackgroundAgent: ReturnType<typeof vi.fn>;
+  let resumeBackgroundAgentWithOutcome: ReturnType<typeof vi.fn>;
   let reviveCompletedBackgroundAgent: ReturnType<typeof vi.fn>;
   const COMPLETED = {
     status: 'completed',
@@ -290,7 +290,7 @@ describe('SendMessageTool — background-task mode', () => {
 
   beforeEach(() => {
     registry = new BackgroundTaskRegistry();
-    resumeBackgroundAgent = vi.fn();
+    resumeBackgroundAgentWithOutcome = vi.fn();
     reviveCompletedBackgroundAgent = vi.fn();
     tool = new SendMessageTool({
       getBackgroundTaskRegistry: () => registry,
@@ -298,7 +298,7 @@ describe('SendMessageTool — background-task mode', () => {
         ({
           getTeamFile: () => ({ members: [{ name: 'qa-reviewer' }] }),
         }) as ReturnType<Config['getTeamManager']>,
-      resumeBackgroundAgent,
+      resumeBackgroundAgentWithOutcome,
       reviveCompletedBackgroundAgent,
     } as unknown as Config);
   });
@@ -418,16 +418,44 @@ describe('SendMessageTool — background-task mode', () => {
 
   it('resumes a paused task and injects the message as continuation input', async () => {
     register({ status: 'paused' });
-    resumeBackgroundAgent.mockResolvedValue(registry.get('agent-1'));
+    resumeBackgroundAgentWithOutcome.mockResolvedValue({
+      resumed: true,
+      task: registry.get('agent-1'),
+    });
 
     const result = await send('pick up from the TODO list');
 
-    expect(resumeBackgroundAgent).toHaveBeenCalledWith(
+    expect(resumeBackgroundAgentWithOutcome).toHaveBeenCalledWith(
       'agent-1',
       'pick up from the TODO list',
     );
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('resumed');
+  });
+
+  // #259 / rule #211: the model is told why, not just "could not be resumed".
+  it('passes the reason a paused task could not be resumed to the model', async () => {
+    register({ status: 'paused' });
+    resumeBackgroundAgentWithOutcome.mockResolvedValue({
+      resumed: false,
+      code: 'capacity_full',
+      reason:
+        'Cannot start background agent: maximum concurrent background agents (4) reached. Stop an existing agent first.',
+    });
+
+    const result = await send('keep going');
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
+    expect(result.llmContent).toBe(
+      'Error: Background task "agent-1" could not be resumed (capacity_full): ' +
+        'Cannot start background agent: maximum concurrent background agents (4) reached. Stop an existing agent first.',
+    );
+    expect(result.error?.message).toContain(
+      'maximum concurrent background agents (4) reached',
+    );
+    expect(result.returnDisplay).toContain(
+      'maximum concurrent background agents (4) reached',
+    );
   });
 
   it('continues a completed task on its resident runtime', async () => {
@@ -442,7 +470,7 @@ describe('SendMessageTool — background-task mode', () => {
 
     expect(continueResident).toHaveBeenCalledWith('now refactor the helper');
     expect(reviveCompletedBackgroundAgent).not.toHaveBeenCalled();
-    expect(resumeBackgroundAgent).not.toHaveBeenCalled();
+    expect(resumeBackgroundAgentWithOutcome).not.toHaveBeenCalled();
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('existing runtime');
     expect(result.returnDisplay).toContain('Continued');
@@ -472,7 +500,7 @@ describe('SendMessageTool — background-task mode', () => {
       'agent-1',
       'now refactor the helper',
     );
-    expect(resumeBackgroundAgent).not.toHaveBeenCalled();
+    expect(resumeBackgroundAgentWithOutcome).not.toHaveBeenCalled();
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('revived');
     expect(result.returnDisplay).toContain('Revived');
@@ -502,7 +530,7 @@ describe('SendMessageTool — background-task mode', () => {
       'Background task transcript is missing.',
     );
     expect(reviveCompletedBackgroundAgent).not.toHaveBeenCalled();
-    expect(resumeBackgroundAgent).not.toHaveBeenCalled();
+    expect(resumeBackgroundAgentWithOutcome).not.toHaveBeenCalled();
   });
 
   it('includes task description in success display', async () => {

@@ -196,9 +196,51 @@ interface CurrentForkRuntime {
   executionToolNames: string[];
 }
 
+/**
+ * Why a resume did not start the agent. Each code is one failure path of the
+ * resume service, so a caller can tell the user what went wrong instead of a
+ * bare "could not be resumed".
+ */
+export type BackgroundAgentResumeRefusalCode =
+  /** No entry with that id is registered in this session. */
+  | 'agent_not_found'
+  /** The entry exists but is not paused (running, completed, cancelled...). */
+  | 'not_paused'
+  /** The entry carries a `resumeBlockedReason`, or resume found one. */
+  | 'resume_blocked'
+  /** The entry has no sidecar metadata path to resume from. */
+  | 'metadata_missing'
+  /** The sidecar metadata file could not be read. */
+  | 'metadata_unreadable'
+  /** The entry has no transcript path to resume from. */
+  | 'transcript_missing'
+  /** The background-agent concurrency cap refused the restart. */
+  | 'capacity_full'
+  /** Building or starting the resumed runtime threw. */
+  | 'resume_failed';
+
+export type BackgroundAgentResumeOutcome =
+  | { resumed: true; task: AgentTask }
+  | {
+      resumed: false;
+      code: BackgroundAgentResumeRefusalCode;
+      /** A sentence naming the cause, fit to show a user or a model. */
+      reason: string;
+      /** The registered entry after the refusal, when there is one. */
+      task?: AgentTask;
+    };
+
 interface ResumeOperation {
   continuationInputs: AgentExternalInput[];
-  promise: Promise<AgentTask | undefined>;
+  promise: Promise<BackgroundAgentResumeOutcome>;
+}
+
+function resumeRefused(
+  code: BackgroundAgentResumeRefusalCode,
+  reason: string,
+  task?: AgentTask,
+): BackgroundAgentResumeOutcome {
+  return { resumed: false, code, reason, ...(task ? { task } : {}) };
 }
 
 interface RestorePausedEntryOptions {
@@ -686,10 +728,31 @@ export class BackgroundAgentResumeService {
     return recovered;
   }
 
+  /**
+   * Resume a paused background agent. Returns the running entry, the entry
+   * itself when it is not paused (kept for existing callers), or `undefined`
+   * when the resume failed; {@link resumeBackgroundAgentWithOutcome} says why.
+   */
   async resumeBackgroundAgent(
     agentId: string,
     initialInput?: AgentExternalInput,
   ): Promise<AgentTask | undefined> {
+    const outcome = await this.resumeBackgroundAgentWithOutcome(
+      agentId,
+      initialInput,
+    );
+    if (outcome.resumed) return outcome.task;
+    return outcome.code === 'not_paused' ? outcome.task : undefined;
+  }
+
+  /**
+   * Resume a paused background agent and report the outcome: the running
+   * entry, or the refusal code and a reason naming the cause.
+   */
+  async resumeBackgroundAgentWithOutcome(
+    agentId: string,
+    initialInput?: AgentExternalInput,
+  ): Promise<BackgroundAgentResumeOutcome> {
     const normalizedInput =
       typeof initialInput === 'string' ? initialInput.trim() : initialInput;
     const existingOperation = this.resumeOperations.get(agentId);
@@ -705,7 +768,9 @@ export class BackgroundAgentResumeService {
 
     const operation: ResumeOperation = {
       continuationInputs: normalizedInput ? [normalizedInput] : [],
-      promise: Promise.resolve(undefined),
+      promise: Promise.resolve(
+        resumeRefused('resume_failed', 'Resume did not start.'),
+      ),
     };
     operation.promise = this.resumeBackgroundAgentInternal(
       agentId,
@@ -1058,31 +1123,57 @@ export class BackgroundAgentResumeService {
   private async resumeBackgroundAgentInternal(
     agentId: string,
     operation: ResumeOperation,
-  ): Promise<AgentTask | undefined> {
+  ): Promise<BackgroundAgentResumeOutcome> {
     const registry = this.config.getBackgroundTaskRegistry();
     const existing = registry.get(agentId);
-    if (!existing || existing.status !== 'paused') {
-      return existing;
+    if (!existing) {
+      return resumeRefused(
+        'agent_not_found',
+        `No background agent "${agentId}" is registered in this session.`,
+      );
+    }
+    if (existing.status !== 'paused') {
+      return resumeRefused(
+        'not_paused',
+        `Background agent "${agentId}" is ${existing.status}, not paused.`,
+        existing,
+      );
     }
     if (existing.resumeBlockedReason) {
-      return undefined;
+      return resumeRefused(
+        'resume_blocked',
+        existing.resumeBlockedReason,
+        existing,
+      );
     }
 
     const metaPath = existing.metaPath;
     const outputFile = existing.outputFile;
-    if (!metaPath || !outputFile) {
-      return undefined;
+    if (!metaPath) {
+      return resumeRefused(
+        'metadata_missing',
+        `Background agent "${agentId}" has no saved metadata to resume from.`,
+        existing,
+      );
+    }
+    if (!outputFile) {
+      return resumeRefused(
+        'transcript_missing',
+        `Background agent "${agentId}" has no saved transcript to resume from.`,
+        existing,
+      );
     }
 
     const meta = readAgentMeta(metaPath);
     if (!meta) {
-      return undefined;
+      return resumeRefused(
+        'metadata_unreadable',
+        `The saved metadata of background agent "${agentId}" could not be read.`,
+        existing,
+      );
     }
     if (meta.isolation === 'container' || meta.executionBackend !== undefined) {
-      this.restorePausedEntry(agentId, {
-        resumeBlockedReason: CONTAINER_EXECUTION_BLOCKED_REASON,
-      });
-      return undefined;
+      return this.refuseBlocked(agentId, CONTAINER_EXECUTION_BLOCKED_REASON);
     }
 
     const bgAbortController = new AbortController();
@@ -1110,8 +1201,12 @@ export class BackgroundAgentResumeService {
         lastError: errorMessage,
         lastUpdatedAt: new Date().toISOString(),
       });
-      this.restorePausedEntry(agentId, { error: errorMessage });
-      return undefined;
+      // `register` throws only when the concurrency cap refuses the slot.
+      return resumeRefused(
+        'capacity_full',
+        errorMessage,
+        this.restorePausedEntry(agentId, { error: errorMessage }),
+      );
     }
 
     let cleanupOwnedMonitorNotifications: (() => void) | undefined;
@@ -1158,8 +1253,7 @@ export class BackgroundAgentResumeService {
           lastError: undefined,
           lastUpdatedAt: new Date().toISOString(),
         });
-        this.restorePausedEntry(agentId, { resumeBlockedReason: reason });
-        return undefined;
+        return this.refuseBlocked(agentId, reason);
       }
 
       const currentForkRuntime = target.isFork
@@ -1170,10 +1264,7 @@ export class BackgroundAgentResumeService {
           lastError: undefined,
           lastUpdatedAt: new Date().toISOString(),
         });
-        this.restorePausedEntry(agentId, {
-          resumeBlockedReason: CURRENT_FORK_RUNTIME_BLOCKED_REASON,
-        });
-        return undefined;
+        return this.refuseBlocked(agentId, CURRENT_FORK_RUNTIME_BLOCKED_REASON);
       }
 
       const parentApprovalMode = normalizeApprovalMode(
@@ -1264,9 +1355,9 @@ export class BackgroundAgentResumeService {
           lastError: undefined,
           lastUpdatedAt: new Date().toISOString(),
         });
-        this.restorePausedEntry(agentId, { resumeBlockedReason: reason });
+        const refusal = this.refuseBlocked(agentId, reason);
         cleanupPreparedRuntime();
-        return undefined;
+        return refusal;
       }
       if (target.isFork && !recovery.forkBootstrap) {
         const reason = LEGACY_FORK_RESUME_BLOCKED_REASON;
@@ -1274,9 +1365,9 @@ export class BackgroundAgentResumeService {
           lastError: undefined,
           lastUpdatedAt: new Date().toISOString(),
         });
-        this.restorePausedEntry(agentId, { resumeBlockedReason: reason });
+        const refusal = this.refuseBlocked(agentId, reason);
         cleanupPreparedRuntime();
-        return undefined;
+        return refusal;
       }
       const forkResumeCapabilityReminder = target.isFork
         ? await this.buildForkResumeCapabilityReminder(
@@ -1826,7 +1917,7 @@ export class BackgroundAgentResumeService {
       );
       runtimeLifecycleOwned = true;
       currentTurnPromise.catch(reportUnexpectedBackgroundError);
-      return entry;
+      return { resumed: true, task: entry };
     } catch (error) {
       cleanupPreparedRuntime();
       const errorMessage =
@@ -1846,8 +1937,27 @@ export class BackgroundAgentResumeService {
           this.restorePausedEntry(agentId, { error: errorMessage });
         }
       }
-      return undefined;
+      return resumeRefused(
+        'resume_failed',
+        errorMessage,
+        registry.get(agentId),
+      );
     }
+  }
+
+  /**
+   * Restore the paused entry with `reason` as its `resumeBlockedReason` and
+   * report the refusal under that reason.
+   */
+  private refuseBlocked(
+    agentId: string,
+    reason: string,
+  ): BackgroundAgentResumeOutcome {
+    return resumeRefused(
+      'resume_blocked',
+      reason,
+      this.restorePausedEntry(agentId, { resumeBlockedReason: reason }),
+    );
   }
 
   abandonBackgroundAgent(agentId: string): boolean {

@@ -2931,6 +2931,193 @@ describe('BackgroundAgentResumeService', () => {
     await waitForStatus(fgByToolUseId, 'completed');
     expect(registry.get(fgByToolUseId)?.result).toBe('revived output');
   });
+
+  // #259: every failed resume names its cause (rule #211), so the TUI, the
+  // daemon and send_message can say why instead of "could not be resumed".
+  describe('resumeBackgroundAgentWithOutcome', () => {
+    it('reports a resumed agent with its running entry', async () => {
+      const agentId = 'agent-outcome-ok';
+      seedPaused('session-outcome-ok', agentId, 'Resume me');
+      const { service } = createService({ subagent: stubSubagent() });
+
+      const outcome = await service.resumeBackgroundAgentWithOutcome(
+        agentId,
+        'continue',
+      );
+
+      expect(outcome.resumed).toBe(true);
+      expect(outcome.resumed && outcome.task.agentId).toBe(agentId);
+      await waitForStatus(agentId, 'completed');
+    });
+
+    it('refuses an unknown agent with agent_not_found', async () => {
+      const { service } = createService();
+
+      await expect(
+        service.resumeBackgroundAgentWithOutcome('agent-nobody'),
+      ).resolves.toEqual({
+        resumed: false,
+        code: 'agent_not_found',
+        reason:
+          'No background agent "agent-nobody" is registered in this session.',
+      });
+    });
+
+    it('refuses an agent that is not paused with not_paused', async () => {
+      register('agent-outcome-running', 'Running already', {
+        status: 'running',
+        outputFile: path.join(tempDir, 'running.jsonl'),
+      });
+      const { service } = createService();
+
+      const outcome = await service.resumeBackgroundAgentWithOutcome(
+        'agent-outcome-running',
+      );
+
+      expect(outcome).toMatchObject({
+        resumed: false,
+        code: 'not_paused',
+        reason:
+          'Background agent "agent-outcome-running" is running, not paused.',
+      });
+      // The legacy wrapper still hands back the entry for a non-paused agent.
+      await expect(
+        service.resumeBackgroundAgent('agent-outcome-running'),
+      ).resolves.toBe(registry.get('agent-outcome-running'));
+    });
+
+    it('refuses a blocked agent with resume_blocked and its blocked reason', async () => {
+      const agentId = 'agent-outcome-blocked';
+      seedPaused('session-outcome-blocked', agentId, 'Blocked');
+      registry.get(agentId)!.resumeBlockedReason =
+        'Background task worktree isolation cannot be reconstructed after session restore.';
+      const { service, subagentManager } = createService();
+
+      await expect(
+        service.resumeBackgroundAgentWithOutcome(agentId),
+      ).resolves.toMatchObject({
+        resumed: false,
+        code: 'resume_blocked',
+        reason:
+          'Background task worktree isolation cannot be reconstructed after session restore.',
+      });
+      expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
+    });
+
+    it('refuses an agent whose definition is gone with resume_blocked', async () => {
+      const agentId = 'agent-outcome-gone';
+      seedPaused('session-outcome-gone', agentId, 'Definition deleted', {
+        agentType: 'deleted-agent',
+        subagentName: 'deleted-agent',
+      });
+      const { service } = createService();
+
+      await expect(
+        service.resumeBackgroundAgentWithOutcome(agentId),
+      ).resolves.toMatchObject({
+        resumed: false,
+        code: 'resume_blocked',
+        reason: 'Subagent "deleted-agent" is no longer available.',
+      });
+      expect(registry.get(agentId)?.status).toBe('paused');
+    });
+
+    it('refuses an agent without a sidecar with metadata_missing', async () => {
+      register('agent-outcome-no-meta', 'No sidecar', {
+        outputFile: path.join(tempDir, 'no-meta.jsonl'),
+      });
+      const { service } = createService();
+
+      await expect(
+        service.resumeBackgroundAgentWithOutcome('agent-outcome-no-meta'),
+      ).resolves.toMatchObject({
+        resumed: false,
+        code: 'metadata_missing',
+        reason:
+          'Background agent "agent-outcome-no-meta" has no saved metadata to resume from.',
+      });
+    });
+
+    it('refuses an agent without a transcript path with transcript_missing', async () => {
+      const metaPath = seedMeta(
+        'session-outcome-no-transcript',
+        'agent-outcome-no-transcript',
+        'No transcript',
+      );
+      register('agent-outcome-no-transcript', 'No transcript', {
+        metaPath,
+        outputFile: '',
+      });
+      const { service } = createService();
+
+      await expect(
+        service.resumeBackgroundAgentWithOutcome('agent-outcome-no-transcript'),
+      ).resolves.toMatchObject({
+        resumed: false,
+        code: 'transcript_missing',
+        reason:
+          'Background agent "agent-outcome-no-transcript" has no saved transcript to resume from.',
+      });
+    });
+
+    it('refuses an agent whose sidecar cannot be read with metadata_unreadable', async () => {
+      const { metaPath } = seedPaused(
+        'session-outcome-bad-meta',
+        'agent-outcome-bad-meta',
+        'Bad meta',
+      );
+      fs.writeFileSync(metaPath, '{not json', 'utf8');
+      const { service } = createService();
+
+      await expect(
+        service.resumeBackgroundAgentWithOutcome('agent-outcome-bad-meta'),
+      ).resolves.toMatchObject({
+        resumed: false,
+        code: 'metadata_unreadable',
+        reason:
+          'The saved metadata of background agent "agent-outcome-bad-meta" could not be read.',
+      });
+    });
+
+    it('refuses with capacity_full when no background slot is free', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+      register('already-running', 'Already running', {
+        status: 'running',
+        outputFile: path.join(tempDir, 'already-running.jsonl'),
+      });
+      seedPaused('session-outcome-full', 'agent-outcome-full', 'Full');
+      const { service } = createService();
+
+      const outcome =
+        await service.resumeBackgroundAgentWithOutcome('agent-outcome-full');
+
+      expect(outcome).toMatchObject({ resumed: false, code: 'capacity_full' });
+      expect(!outcome.resumed && outcome.reason).toContain(
+        'maximum concurrent background agents (1) reached',
+      );
+      expect(registry.get('agent-outcome-full')?.status).toBe('paused');
+    });
+
+    it('refuses with resume_failed and the error when setup throws', async () => {
+      const agentId = 'agent-outcome-throws';
+      seedPaused('session-outcome-throws', agentId, 'Setup throws');
+      const { service, subagentManager } = createService();
+      subagentManager.createAgentHeadless.mockRejectedValue(
+        new Error('model provider is offline'),
+      );
+
+      await expect(
+        service.resumeBackgroundAgentWithOutcome(agentId),
+      ).resolves.toMatchObject({
+        resumed: false,
+        code: 'resume_failed',
+        reason: 'model provider is offline',
+      });
+      expect(registry.get(agentId)?.status).toBe('paused');
+    });
+  });
 });
 
 function readMetaStatus(metaPath: string): string | undefined {
