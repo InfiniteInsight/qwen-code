@@ -67,10 +67,9 @@ export function startChannelLivenessMonitor(
   let timer: NodeJS.Timeout | undefined;
   let consecutiveTimeouts = 0;
   let nextNonce = 0;
-  let resolveStopped!: (outcome: ProbeOutcome) => void;
-  const stoppedOutcome = new Promise<ProbeOutcome>((resolve) => {
-    resolveStopped = resolve;
-  });
+  // One per probe race in flight. A single monitor-lifetime promise raced by
+  // every probe would keep each probe's outcome reachable until stop().
+  const stopWaiters = new Set<(outcome: ProbeOutcome) => void>();
 
   const isActive = () => !stopped && options.isActive();
   const stop = () => {
@@ -79,7 +78,8 @@ export function startChannelLivenessMonitor(
       clearTimeout(timer);
       timer = undefined;
     }
-    resolveStopped({ kind: 'stopped' });
+    for (const resolve of stopWaiters) resolve({ kind: 'stopped' });
+    stopWaiters.clear();
   };
   const fail = (error: ChannelLivenessFailure) => {
     if (!isActive()) return;
@@ -114,7 +114,13 @@ export function startChannelLivenessMonitor(
         }, CHANNEL_LIVENESS_PROBE_TIMEOUT_MS);
         timer.unref();
       });
+      let stopWaiter!: (outcome: ProbeOutcome) => void;
+      const stoppedOutcome = new Promise<ProbeOutcome>((resolve) => {
+        stopWaiter = resolve;
+        stopWaiters.add(resolve);
+      });
       outcome = await Promise.race([response, timeout, stoppedOutcome]);
+      stopWaiters.delete(stopWaiter);
       if (timer !== undefined) {
         clearTimeout(timer);
         timer = undefined;
