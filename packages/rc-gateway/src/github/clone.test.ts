@@ -1,0 +1,783 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { execFile, execFileSync } from 'node:child_process';
+import { EventEmitter, once } from 'node:events';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  CLONE_GIT_CONFIG_ARGS,
+  CLONE_LINE_MAX,
+  CLONE_MAX_FINISHED,
+  CloneJobs,
+  cloneEnv,
+  describeTimeout,
+} from './clone.js';
+import type { CloneChild, CloneJobStatus, CloneSpawner } from './clone.js';
+
+const TOKEN = 'gho_16C7e42F292c6912E7710c838347Ae178B4a';
+const REF = { owner: 'acme', name: 'widget' };
+const ACCOUNT = 'gh:acme' as const;
+
+function tmp(prefix: string): string {
+  return mkdtempSync(join(tmpdir(), `rc-clone-${prefix}-`));
+}
+
+/** An environment for real git that never reads the owner's config. */
+function gitEnv(): NodeJS.ProcessEnv {
+  const home = tmp('home');
+  const global = join(home, 'gitconfig');
+  writeFileSync(
+    global,
+    '[user]\n\tname = Test\n\temail = test@example.invalid\n[init]\n\tdefaultBranch = main\n',
+  );
+  return {
+    PATH: process.env['PATH'],
+    HOME: home,
+    GIT_CONFIG_GLOBAL: global,
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
+}
+
+function git(env: NodeJS.ProcessEnv, cwd: string, args: string[]): string {
+  return execFileSync('git', args, { cwd, env, encoding: 'utf8' });
+}
+
+/** A bare repo holding `.qwen/settings.json` with one hook. */
+function bareRepo(env: NodeJS.ProcessEnv): string {
+  const work = tmp('work');
+  git(env, work, ['init', '-q']);
+  mkdirSync(join(work, '.qwen'));
+  writeFileSync(
+    join(work, '.qwen', 'settings.json'),
+    JSON.stringify({
+      hooks: {
+        SessionStart: [{ hooks: [{ type: 'command', command: 'echo hi' }] }],
+      },
+    }),
+  );
+  writeFileSync(join(work, 'README.md'), 'hello\n');
+  git(env, work, ['add', '.']);
+  git(env, work, ['commit', '-q', '-m', 'init']);
+  const bare = join(tmp('bare'), 'widget.git');
+  git(env, work, ['clone', '-q', '--bare', work, bare]);
+  return bare;
+}
+
+async function waitDone(
+  jobs: CloneJobs,
+  jobId: string,
+  ms = 10_000,
+): Promise<CloneJobStatus> {
+  const end = Date.now() + ms;
+  for (;;) {
+    const s = jobs.status(jobId);
+    if (!s) throw new Error('job vanished');
+    if (s.state !== 'running') return s;
+    if (Date.now() > end) throw new Error('job still running');
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+function jobIdOf(r: Awaited<ReturnType<CloneJobs['start']>>): string {
+  if (!('jobId' in r)) throw new Error(`refused: ${r.code} ${r.error}`);
+  return r.jobId;
+}
+
+class FakeChild extends EventEmitter implements CloneChild {
+  readonly stdout = new PassThrough();
+  readonly stderr = new PassThrough();
+  readonly signals: string[] = [];
+  /** Called on each kill; exit from here to obey the signal. */
+  onKill?: (signal: string) => void;
+
+  kill(signal: NodeJS.Signals = 'SIGTERM'): boolean {
+    this.signals.push(signal);
+    this.onKill?.(signal);
+    return true;
+  }
+
+  async exit(code: number | null, signal: NodeJS.Signals | null = null) {
+    const ends = [once(this.stdout, 'end'), once(this.stderr, 'end')];
+    this.stdout.end();
+    this.stderr.end();
+    await Promise.all(ends);
+    this.emit('exit', code, signal);
+    this.emit('close', code, signal);
+  }
+}
+
+interface SpawnCall {
+  program: string;
+  args: readonly string[];
+  env: NodeJS.ProcessEnv;
+}
+
+function fakeSpawner(script: (child: FakeChild, call: SpawnCall) => void) {
+  const calls: SpawnCall[] = [];
+  const children: FakeChild[] = [];
+  const fn: CloneSpawner = (program, args, options) => {
+    const child = new FakeChild();
+    const call = { program, args, env: options.env };
+    calls.push(call);
+    children.push(child);
+    setImmediate(() => script(child, call));
+    return child;
+  };
+  return { fn, calls, children };
+}
+
+function freshDest(): string {
+  return join(tmp('dest'), 'widget');
+}
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
+describe('CloneJobs with real git', () => {
+  it('clones a local repo and reports done with its findings', async () => {
+    const env = gitEnv();
+    const bare = bareRepo(env);
+    const jobs = new CloneJobs({ env, urlFor: () => `file://${bare}` });
+    const dest = freshDest();
+    const s = await waitDone(
+      jobs,
+      jobIdOf(
+        await jobs.start({ ref: REF, dest, token: TOKEN, account: ACCOUNT }),
+      ),
+    );
+    expect(s.state).toBe('done');
+    expect(s.exitCode).toBe(0);
+    expect(s.error).toBeUndefined();
+    expect(s.dest).toBe(dest);
+    expect(s.repo).toBe('acme/widget');
+    expect(s.account).toBe(ACCOUNT);
+    expect(s.hasFindings).toBe(true);
+    expect(s.findings?.hooks).toEqual([
+      { event: 'SessionStart', command: 'echo hi' },
+    ]);
+    expect(readFileSync(join(dest, 'README.md'), 'utf8')).toBe('hello\n');
+    expect(s.lines.some((l) => l.startsWith('Cloning into'))).toBe(true);
+  });
+
+  it("the clone's .git/config holds no token and its remote is the plain URL", async () => {
+    const env = gitEnv();
+    const bare = bareRepo(env);
+    const url = `file://${bare}`;
+    const jobs = new CloneJobs({ env, urlFor: () => url });
+    const dest = freshDest();
+    const s = await waitDone(
+      jobs,
+      jobIdOf(
+        await jobs.start({ ref: REF, dest, token: TOKEN, account: ACCOUNT }),
+      ),
+    );
+    expect(s.state).toBe('done');
+    expect(git(env, dest, ['config', 'remote.origin.url']).trim()).toBe(url);
+    const walk = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+        e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)],
+      );
+    const files = walk(join(dest, '.git'));
+    expect(files.length).toBeGreaterThan(0);
+    expect(files.filter((f) => readFileSync(f).includes(TOKEN))).toEqual([]);
+  });
+
+  it('the default URL is the plain https github.com URL, with the token in env only', async () => {
+    const f = fakeSpawner((c) => void c.exit(1));
+    const jobs = new CloneJobs({ spawn: f.fn, env: gitEnv() });
+    const dest = freshDest();
+    await waitDone(
+      jobs,
+      jobIdOf(
+        await jobs.start({ ref: REF, dest, token: TOKEN, account: ACCOUNT }),
+      ),
+    );
+    expect(f.calls).toHaveLength(1);
+    const { program, args, env } = f.calls[0]!;
+    expect(program.endsWith('/git')).toBe(true);
+    expect(args).toEqual([
+      '-c',
+      'credential.helper=',
+      '-c',
+      'credential.https://github.com.helper=!f() { echo username=x-access-token; echo "password=$QWEN_RC_GIT_TOKEN"; }; f',
+      '-c',
+      'http.followRedirects=false',
+      'clone',
+      '--progress',
+      '--',
+      'https://github.com/acme/widget.git',
+      dest,
+    ]);
+    expect(args.join(' ')).not.toContain(TOKEN);
+    expect(env['QWEN_RC_GIT_TOKEN']).toBe(TOKEN);
+    expect(env['GIT_TERMINAL_PROMPT']).toBe('0');
+  });
+
+  it("the owner's credential helpers are not asked, scoped or not", async () => {
+    // A loopback server answering 401 makes git ask for credentials. The
+    // control run proves the owner's helpers would be asked without our -c.
+    const server = createServer((_req, res) => {
+      res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="x"' });
+      res.end();
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const env = gitEnv();
+      const marker = join(env['HOME']!, 'marker');
+      writeFileSync(
+        env['GIT_CONFIG_GLOBAL']!,
+        [
+          '[credential]',
+          `\thelper = "!f() { echo unscoped >> ${marker}; }; f"`,
+          `[credential "http://127.0.0.1:${port}"]`,
+          `\thelper = "!f() { echo scoped >> ${marker}; }; f"`,
+          '',
+        ].join('\n'),
+      );
+      const url = `http://127.0.0.1:${port}/acme/widget.git`;
+
+      // Async: the server answers from this same process.
+      await new Promise<void>((res) => {
+        execFile(
+          'git',
+          ['clone', '--', url, freshDest()],
+          { env: { ...env, GIT_TERMINAL_PROMPT: '0' }, timeout: 10_000 },
+          () => res(),
+        );
+      });
+      expect(readFileSync(marker, 'utf8')).toContain('unscoped');
+      expect(readFileSync(marker, 'utf8')).toContain('scoped');
+      writeFileSync(marker, '');
+
+      const jobs = new CloneJobs({ env, urlFor: () => url });
+      const s = await waitDone(
+        jobs,
+        jobIdOf(
+          await jobs.start({
+            ref: REF,
+            dest: freshDest(),
+            token: TOKEN,
+            account: ACCOUNT,
+          }),
+        ),
+      );
+      expect(s.state).toBe('failed');
+      expect(readFileSync(marker, 'utf8')).toBe('');
+      expect(JSON.stringify(s)).not.toContain(TOKEN);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('the token helper answers github.com and nothing else', () => {
+    const env = cloneEnv(gitEnv(), TOKEN);
+    const fill = (host: string) =>
+      execFileSync(
+        'git',
+        ['-c', 'core.askPass=', ...CLONE_GIT_CONFIG_ARGS, 'credential', 'fill'],
+        {
+          env,
+          input: `protocol=https\nhost=${host}\n\n`,
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'ignore'],
+        },
+      );
+    expect(fill('github.com')).toContain(`password=${TOKEN}`);
+    expect(() => fill('example.com')).toThrow();
+  });
+});
+
+describe('CloneJobs output and failures', () => {
+  it("a failing clone's lines are scrubbed of the token", async () => {
+    const f = fakeSpawner((c) => {
+      c.stderr.write("Cloning into 'widget'...\n");
+      c.stderr.write(
+        `fatal: unable to access 'https://x-access-token:${TOKEN}@github.com/acme/widget.git/': 403 ${TOKEN}\n`,
+      );
+      void c.exit(128);
+    });
+    const jobs = new CloneJobs({ spawn: f.fn, env: gitEnv() });
+    const s = await waitDone(
+      jobs,
+      jobIdOf(
+        await jobs.start({
+          ref: REF,
+          dest: freshDest(),
+          token: TOKEN,
+          account: ACCOUNT,
+        }),
+      ),
+    );
+    expect(s.state).toBe('failed');
+    expect(s.exitCode).toBe(128);
+    expect(s.error).toContain('fatal: unable to access');
+    expect(JSON.stringify(s)).not.toContain(TOKEN);
+    expect(JSON.stringify(s)).not.toContain('x-access-token:');
+  });
+
+  it('a token split across two writes is still masked', async () => {
+    const half = TOKEN.length / 2;
+    const f = fakeSpawner(async (c) => {
+      c.stderr.write(`remote: here ${TOKEN.slice(0, half)}`);
+      await new Promise((r) => setTimeout(r, 20));
+      c.stderr.write(`${TOKEN.slice(half)} there\rReceiving objects: 50%`);
+      await new Promise((r) => setTimeout(r, 20));
+      c.stderr.write(`\rtail ${TOKEN.slice(0, 12)}`);
+      void c.exit(128);
+    });
+    const jobs = new CloneJobs({ spawn: f.fn, env: gitEnv() });
+    const s = await waitDone(
+      jobs,
+      jobIdOf(
+        await jobs.start({
+          ref: REF,
+          dest: freshDest(),
+          token: TOKEN,
+          account: ACCOUNT,
+        }),
+      ),
+    );
+    expect(s.lines).toEqual([
+      'remote: here *** there',
+      'Receiving objects: 50%',
+      'tail ***',
+    ]);
+    const all = JSON.stringify(s);
+    for (let i = 0; i + 6 <= TOKEN.length; i++) {
+      expect(all).not.toContain(TOKEN.slice(i, i + 6));
+    }
+  });
+
+  it('cuts a line longer than the cap and scrubs it first', async () => {
+    const f = fakeSpawner(async (c) => {
+      c.stderr.write('a'.repeat(CLONE_LINE_MAX - 10) + TOKEN);
+      c.stderr.write('b'.repeat(CLONE_LINE_MAX * 2));
+      c.stderr.write('c'.repeat(100) + '\nafter\n');
+      void c.exit(1);
+    });
+    const jobs = new CloneJobs({ spawn: f.fn, env: gitEnv() });
+    const s = await waitDone(
+      jobs,
+      jobIdOf(
+        await jobs.start({
+          ref: REF,
+          dest: freshDest(),
+          token: TOKEN,
+          account: ACCOUNT,
+        }),
+      ),
+    );
+    expect(s.lines).toHaveLength(2);
+    expect(s.lines[0]!.length).toBeLessThanOrEqual(CLONE_LINE_MAX + 10);
+    // Whether the writes arrive as one chunk or three, the token is masked
+    // before the cut.
+    expect(s.lines[0]).toContain('a***');
+    expect(s.lines[0]!.endsWith(' [cut]')).toBe(true);
+    expect(s.lines[1]).toBe('after');
+    expect(JSON.stringify(s)).not.toContain(TOKEN.slice(0, 6));
+  });
+
+  it('keeps the last 50 lines', async () => {
+    const f = fakeSpawner((c) => {
+      for (let i = 0; i < 120; i++)
+        c.stderr.write(`Receiving objects: ${i}%\r`);
+      void c.exit(1);
+    });
+    const jobs = new CloneJobs({ spawn: f.fn, env: gitEnv() });
+    const s = await waitDone(
+      jobs,
+      jobIdOf(
+        await jobs.start({
+          ref: REF,
+          dest: freshDest(),
+          token: TOKEN,
+          account: ACCOUNT,
+        }),
+      ),
+    );
+    expect(s.lines).toHaveLength(50);
+    expect(s.lines[49]).toBe('Receiving objects: 119%');
+    expect(s.error).toBe('Receiving objects: 119%');
+  });
+
+  it('a clone that runs past the timeout is killed and says so', async () => {
+    const f = fakeSpawner((c) => {
+      c.stderr.write("Cloning into 'widget'...\n");
+      c.onKill = (sig) => {
+        if (sig === 'SIGKILL') void c.exit(null, 'SIGKILL');
+      };
+    });
+    const jobs = new CloneJobs({
+      spawn: f.fn,
+      env: gitEnv(),
+      timeoutMs: 60_000,
+      killGraceMs: 30,
+    });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const id = jobIdOf(
+        await jobs.start({
+          ref: REF,
+          dest: freshDest(),
+          token: TOKEN,
+          account: ACCOUNT,
+        }),
+      );
+      // setImmediate is real here, so this waits without moving the clock.
+      while (f.children.length < 1) {
+        await new Promise((r) => setImmediate(r));
+      }
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(f.children[0]!.signals).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(f.children[0]!.signals).toEqual(['SIGTERM']);
+      await vi.advanceTimersByTimeAsync(30);
+      expect(f.children[0]!.signals).toEqual(['SIGTERM', 'SIGKILL']);
+      vi.useRealTimers();
+      const s = await waitDone(jobs, id);
+      expect(s.state).toBe('failed');
+      expect(s.error).toBe('timed out after 1 minute');
+      expect(s.exitCode).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('the default timeout says 10 minutes', () => {
+    expect(describeTimeout(10 * 60 * 1000)).toBe('timed out after 10 minutes');
+    expect(describeTimeout(1500)).toBe('timed out after 1500 ms');
+    expect(describeTimeout(2000)).toBe('timed out after 2 seconds');
+  });
+
+  it('a failed clone never removes its folder and says where it was left', async () => {
+    const dest = freshDest();
+    const f = fakeSpawner((c) => {
+      mkdirSync(dest);
+      writeFileSync(join(dest, 'partial'), 'x');
+      c.stderr.write('fatal: early EOF\n');
+      void c.exit(128);
+    });
+    const jobs = new CloneJobs({ spawn: f.fn, env: gitEnv() });
+    const s = await waitDone(
+      jobs,
+      jobIdOf(
+        await jobs.start({ ref: REF, dest, token: TOKEN, account: ACCOUNT }),
+      ),
+    );
+    expect(s.error).toBe(`fatal: early EOF. The folder was left at ${dest}.`);
+    expect(existsSync(join(dest, 'partial'))).toBe(true);
+  });
+
+  it('a git that cannot be spawned fails with its errno', async () => {
+    const f = fakeSpawner((c) => {
+      c.emit(
+        'error',
+        Object.assign(new Error('spawn git ENOENT'), { code: 'ENOENT' }),
+      );
+    });
+    const jobs = new CloneJobs({ spawn: f.fn, env: gitEnv() });
+    const s = await waitDone(
+      jobs,
+      jobIdOf(
+        await jobs.start({
+          ref: REF,
+          dest: freshDest(),
+          token: TOKEN,
+          account: ACCOUNT,
+        }),
+      ),
+    );
+    expect(s.state).toBe('failed');
+    expect(s.error).toBe('git could not be started (ENOENT).');
+  });
+
+  it('an inspection that throws still ends done, with hasFindings so the page asks', async () => {
+    const f = fakeSpawner((c) => void c.exit(0));
+    const jobs = new CloneJobs({
+      spawn: f.fn,
+      env: gitEnv(),
+      inspect: async () => {
+        throw new Error(`disk on fire ${TOKEN}`);
+      },
+    });
+    const s = await waitDone(
+      jobs,
+      jobIdOf(
+        await jobs.start({
+          ref: REF,
+          dest: freshDest(),
+          token: TOKEN,
+          account: ACCOUNT,
+        }),
+      ),
+    );
+    expect(s.state).toBe('done');
+    expect(s.hasFindings).toBe(true);
+    expect(s.findings).toBeUndefined();
+    expect(s.error).toBe(
+      'The clone finished but its settings could not be inspected: disk on fire ***',
+    );
+  });
+
+  it('a clean clone has hasFindings false', async () => {
+    const f = fakeSpawner((c) => void c.exit(0));
+    const jobs = new CloneJobs({ spawn: f.fn, env: gitEnv() });
+    const s = await waitDone(
+      jobs,
+      jobIdOf(
+        await jobs.start({
+          ref: REF,
+          dest: freshDest(),
+          token: TOKEN,
+          account: ACCOUNT,
+        }),
+      ),
+    );
+    expect(s.state).toBe('done');
+    expect(s.hasFindings).toBe(false);
+    expect(s.findings?.file).toBe(false);
+  });
+});
+
+describe('CloneJobs environment', () => {
+  it('trace and repo-pointing variables never reach git', async () => {
+    const f = fakeSpawner((c) => void c.exit(1));
+    const jobs = new CloneJobs({
+      spawn: f.fn,
+      env: {
+        ...gitEnv(),
+        GIT_TRACE: '1',
+        GIT_TRACE_CURL: '1',
+        GIT_TRACE_PACKET: '1',
+        GIT_CURL_VERBOSE: '1',
+        GIT_DIR: '/x',
+        GIT_WORK_TREE: '/x',
+        GIT_INDEX_FILE: '/x',
+        GIT_CONFIG_PARAMETERS: "'a.b'='c'",
+        GIT_CONFIG_COUNT: '1',
+        GIT_CONFIG_KEY_0: 'credential.helper',
+        GIT_CONFIG_VALUE_0: 'store',
+        KEEP_ME: 'yes',
+      },
+    });
+    await waitDone(
+      jobs,
+      jobIdOf(
+        await jobs.start({
+          ref: REF,
+          dest: freshDest(),
+          token: TOKEN,
+          account: ACCOUNT,
+        }),
+      ),
+    );
+    const env = f.calls[0]!.env;
+    expect(
+      Object.keys(env).filter(
+        (k) =>
+          k.startsWith('GIT_TRACE') ||
+          k.startsWith('GIT_CONFIG_KEY_') ||
+          k.startsWith('GIT_CONFIG_VALUE_') ||
+          [
+            'GIT_CURL_VERBOSE',
+            'GIT_DIR',
+            'GIT_WORK_TREE',
+            'GIT_INDEX_FILE',
+            'GIT_CONFIG_PARAMETERS',
+            'GIT_CONFIG_COUNT',
+          ].includes(k),
+      ),
+    ).toEqual([]);
+    expect(env['KEEP_ME']).toBe('yes');
+    expect(env['GIT_CONFIG_NOSYSTEM']).toBe('1');
+  });
+
+  it("a parent process's GIT_TRACE does not reach git by default", async () => {
+    vi.stubEnv('GIT_TRACE', '1');
+    vi.stubEnv('GIT_CURL_VERBOSE', '1');
+    const f = fakeSpawner((c) => void c.exit(1));
+    const jobs = new CloneJobs({ spawn: f.fn });
+    await waitDone(
+      jobs,
+      jobIdOf(
+        await jobs.start({
+          ref: REF,
+          dest: freshDest(),
+          token: TOKEN,
+          account: ACCOUNT,
+        }),
+      ),
+    );
+    expect(f.calls[0]!.env['GIT_TRACE']).toBeUndefined();
+    expect(f.calls[0]!.env['GIT_CURL_VERBOSE']).toBeUndefined();
+    expect(f.calls[0]!.env['QWEN_RC_GIT_TOKEN']).toBe(TOKEN);
+  });
+});
+
+describe('CloneJobs refusals and bounds', () => {
+  it('a third concurrent clone is refused with too_many_clones', async () => {
+    const f = fakeSpawner(() => {
+      // never exits on its own
+    });
+    const jobs = new CloneJobs({ spawn: f.fn, env: gitEnv() });
+    const start = () =>
+      jobs.start({
+        ref: REF,
+        dest: freshDest(),
+        token: TOKEN,
+        account: ACCOUNT,
+      });
+    const [a, b, c] = await Promise.all([start(), start(), start()]);
+    const ids = [a, b, c].filter((r) => 'jobId' in r);
+    expect(ids).toHaveLength(2);
+    expect([a, b, c].find((r) => 'code' in r)).toMatchObject({
+      code: 'too_many_clones',
+    });
+    await vi.waitFor(() => expect(f.children).toHaveLength(2));
+    await f.children[0]!.exit(1);
+    await vi.waitFor(() =>
+      expect(
+        ids.some(
+          (r) => 'jobId' in r && jobs.status(r.jobId)?.state === 'failed',
+        ),
+      ).toBe(true),
+    );
+    expect('jobId' in (await start())).toBe(true);
+    await vi.waitFor(() => expect(f.children).toHaveLength(3));
+    for (const child of f.children.slice(1)) await child.exit(1);
+  });
+
+  it('a non-empty destination is refused before git runs', async () => {
+    const f = fakeSpawner((c) => void c.exit(0));
+    const jobs = new CloneJobs({ spawn: f.fn, env: gitEnv() });
+    const dest = tmp('full');
+    writeFileSync(join(dest, 'x'), 'x');
+    const r = await jobs.start({
+      ref: REF,
+      dest,
+      token: TOKEN,
+      account: ACCOUNT,
+    });
+    expect(r).toMatchObject({ code: 'dest_not_empty' });
+    expect(f.calls).toHaveLength(0);
+    expect(
+      await jobs.start({
+        ref: REF,
+        dest: 'rel/path',
+        token: TOKEN,
+        account: ACCOUNT,
+      }),
+    ).toMatchObject({ code: 'dest_not_absolute' });
+    expect(f.calls).toHaveLength(0);
+  });
+
+  it('a second clone into the same or a nested folder is refused while the first runs', async () => {
+    const f = fakeSpawner(() => {
+      // never exits on its own
+    });
+    const jobs = new CloneJobs({
+      spawn: f.fn,
+      env: gitEnv(),
+      maxConcurrent: 5,
+    });
+    const dest = freshDest();
+    jobIdOf(
+      await jobs.start({ ref: REF, dest, token: TOKEN, account: ACCOUNT }),
+    );
+    for (const d of [dest, `${dest}/`, join(dest, 'inner')]) {
+      const r = await jobs.start({
+        ref: REF,
+        dest: d,
+        token: TOKEN,
+        account: ACCOUNT,
+      });
+      expect(r).toEqual({
+        code: 'dest_not_empty',
+        error: `A clone into ${dest} is already running.`,
+      });
+    }
+    await vi.waitFor(() => expect(f.children).toHaveLength(1));
+    await f.children[0]!.exit(1);
+  });
+
+  it('job ids are random and finished jobs are bounded', async () => {
+    const f = fakeSpawner((c) => void c.exit(1));
+    const jobs = new CloneJobs({ spawn: f.fn, env: gitEnv() });
+    const ids: string[] = [];
+    for (let i = 0; i < CLONE_MAX_FINISHED + 5; i++) {
+      const id = jobIdOf(
+        await jobs.start({
+          ref: REF,
+          dest: freshDest(),
+          token: TOKEN,
+          account: ACCOUNT,
+        }),
+      );
+      expect(id).toMatch(/^[0-9a-f-]{36}$/);
+      await waitDone(jobs, id);
+      ids.push(id);
+    }
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids.slice(0, 5).map((id) => jobs.status(id))).toEqual([
+      null,
+      null,
+      null,
+      null,
+      null,
+    ]);
+    expect(jobs.status(ids[5]!)).not.toBeNull();
+    expect(jobs.status('nope')).toBeNull();
+  });
+
+  it('refuses a ref repoUrl refuses before anything runs', async () => {
+    const f = fakeSpawner((c) => void c.exit(0));
+    const jobs = new CloneJobs({ spawn: f.fn, env: gitEnv() });
+    await expect(
+      jobs.start({
+        ref: { owner: '--upload-pack=x', name: 'y' },
+        dest: freshDest(),
+        token: TOKEN,
+        account: ACCOUNT,
+      }),
+    ).rejects.toThrow('not a GitHub owner/name');
+    expect(f.calls).toHaveLength(0);
+  });
+
+  it('a status is a copy the caller cannot change', async () => {
+    const f = fakeSpawner((c) => {
+      c.stderr.write('one\n');
+      void c.exit(1);
+    });
+    const jobs = new CloneJobs({ spawn: f.fn, env: gitEnv() });
+    const id = jobIdOf(
+      await jobs.start({
+        ref: REF,
+        dest: freshDest(),
+        token: TOKEN,
+        account: ACCOUNT,
+      }),
+    );
+    const s = await waitDone(jobs, id);
+    s.lines.push('two');
+    expect(jobs.status(id)!.lines).toEqual(['one']);
+  });
+});
