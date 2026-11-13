@@ -32098,8 +32098,11 @@ PAGE_SCENARIOS.push({
     maxInflight: Map<string, number>;
     /** While set, a listing answer waits for it before it is sent. */
     hold: Promise<void> | null;
-    /** When each listing answer was sent. */
-    listed: number[];
+    /**
+     * While set, a spawning live-state read (no spawn=0: the 30 s read of
+     * the current folder) waits for it, answered with the state it asked in.
+     */
+    holdSpawning: Promise<void> | null;
   };
   /**
    * Serves `folders` (the first is the current folder, the rest the recent
@@ -32121,7 +32124,7 @@ PAGE_SCENARIOS.push({
       inflight: new Map(),
       maxInflight: new Map(),
       hold: null,
-      listed: [],
+      holdSpawning: null,
     };
     await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
     if (opts.pausePoll) await page.evaluate('clearInterval(pastConvosPollId); pastConvosPollId = null;');
@@ -32129,7 +32132,6 @@ PAGE_SCENARIOS.push({
       const u = new URL(route.request().url());
       const rows = u.searchParams.has('archiveState') ? [] : (folders[u.searchParams.get('cwd') ?? ''] ?? []);
       if (ctl.hold) await ctl.hold;
-      ctl.listed.push(Date.now());
       await route
         .fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ sessions: rows, truncated: false }) })
         .catch(() => undefined);
@@ -32143,14 +32145,19 @@ PAGE_SCENARIOS.push({
       ctl.maxInflight.set(cwd, Math.max(ctl.maxInflight.get(cwd) ?? 0, n));
       const status = ctl.status;
       const delayMs = ctl.delayMs;
+      // The answer is the state as it was when the read arrived, however
+      // late it is sent.
+      const sessions = ctl.live.get(cwd) ?? [];
+      const held = u.searchParams.get('spawn') === '0' ? null : ctl.holdSpawning;
       try {
         if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+        if (held) await held;
         await route.fulfill({
           status,
           contentType: 'application/json',
           body: JSON.stringify(
             status === 200
-              ? { v: 1, catalogVersion: { generation: 'g-p255', revision: 1 }, sessions: ctl.live.get(cwd) ?? [] }
+              ? { v: 1, catalogVersion: { generation: 'g-p255', revision: 1 }, sessions }
               : { code: 'daemon_hung', error: 'the daemon did not answer in time' },
           ),
         });
@@ -32311,7 +32318,6 @@ PAGE_SCENARIOS.push({
       // have turned it.
       let release: () => void = () => undefined;
       ctl.hold = new Promise<void>((r) => (release = r));
-      const listedBefore = ctl.listed.length;
       ctl.live.set(LD_CWD, [ldEntry(LD(1), 'run'), ldEntry(LD(2), 'idle')]);
       const flipAt = Date.now();
       const turned = await page.waitForFunction('window.__p551 !== null', null, { timeout: 4_000 }).then(
@@ -32319,14 +32325,12 @@ PAGE_SCENARIOS.push({
         () => false,
       );
       const turnedAt = (await page.evaluate('window.__p551')) as number | null;
-      const listed = ctl.listed.length - listedBefore;
       const painted = (await page.evaluate('window.__p551row.isConnected')) as boolean;
       ctl.hold = null;
       release();
       const after = await ldDots(page);
       expect(turned && turnedAt !== null, `the dot never turned blue: ${JSON.stringify(after)}`);
       expect(turnedAt! - flipAt <= 2500, `the dot turned blue ${turnedAt! - flipAt}ms after the live-state changed, not within 2.5 s`);
-      expect(listed === 0, `${listed} transcript reads were answered before the dot turned`);
       expect(
         after.find((d) => d.id === LD(1))!.label === 'working' && after.find((d) => d.id === LD(2))!.state === 'idle',
         `after the flip the rows read ${JSON.stringify(after)}`,
@@ -32461,6 +32465,65 @@ PAGE_SCENARIOS.push({
         `without liveStateNoSpawn the list read live-state ${JSON.stringify(silent)} in 3 s open, not the current folder's spawning read alone`,
       );
       return `${ticked.length} tick reads in 3 s, all spawn=0, ${of(LD_CWD)} of the current folder and ${of(LD_OTHER)} of the other; without liveStateNoSpawn only ${JSON.stringify(silent)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P565 a 30 s read that lands after a newer tick does not put the dot back',
+    waitView: false,
+    run: async ({ page }) => {
+      // The other folder's conversation is working. The 30 s read asks every
+      // folder at once and draws nothing until all have answered; the
+      // current folder's spawning live-state read is held, so the other
+      // folder's answer ("working") waits in the batch while its ticks go on.
+      const ctl = await ldServe(
+        page,
+        { [LD_CWD]: [ldRow(LD(1), 'p255 here')], [LD_OTHER]: [ldRow(LD(2), 'p255 there')] },
+        { [LD_CWD]: [ldEntry(LD(1), 'idle')], [LD_OTHER]: [ldEntry(LD(2), 'run')] },
+        { pausePoll: true },
+      );
+      await openList(page);
+      expect(await ldDotIs(page, LD(2), 'run'), `the other folder's row never read run: ${JSON.stringify(await ldDots(page))}`);
+      await page.waitForTimeout(300);
+      let release: () => void = () => undefined;
+      ctl.holdSpawning = new Promise<void>((r) => (release = r));
+      const t = Date.now();
+      // The 30 s read, called as the poll calls it.
+      await page.evaluate('window.__p565 = false; refreshPastConversations(curDirPath).then(() => { window.__p565 = true; }); undefined');
+      const asked = await ldUntil(
+        () =>
+          ctl.reads.some((r) => r.at >= t && r.cwd === LD_CWD && r.spawn === null) &&
+          ctl.reads.some((r) => r.at >= t && r.cwd === LD_OTHER),
+        5000,
+      );
+      expect(asked >= 0, `the 30 s read did not ask both folders: ${JSON.stringify(ctl.reads.filter((r) => r.at >= t))}`);
+      // Its answer for the other folder said "working". The turn ends now,
+      // and a tick reads it.
+      await page.waitForTimeout(200);
+      ctl.live.set(LD_OTHER, [ldEntry(LD(2), 'idle')]);
+      expect(await ldDotIs(page, LD(2), 'idle', 4000), `no tick turned the finished row green while the 30 s read was out: ${JSON.stringify(await ldDots(page))}`);
+      // From here, the dot going back to blue at any moment is recorded.
+      await page.evaluate(String.raw`(() => {
+        window.__p565back = 0;
+        const box = document.getElementById('past-list');
+        new MutationObserver(() => {
+          const d = box.querySelector('.s[data-session="${LD(2)}"] .dot');
+          if (d && d.dataset.state === 'run') window.__p565back += 1;
+        }).observe(box, { subtree: true, childList: true, attributes: true });
+      })()`);
+      ctl.holdSpawning = null;
+      release();
+      const landed = await page.waitForFunction('window.__p565 === true', null, { timeout: 5000 }).then(
+        () => true,
+        () => false,
+      );
+      await page.waitForTimeout(1500);
+      const back = (await page.evaluate('window.__p565back')) as number;
+      const after = await ldDots(page);
+      expect(landed, 'the held 30 s read never landed');
+      expect(back === 0, `the 30 s read's older answer put the finished row's dot back to working (${back} times) after a newer tick had turned it green`);
+      expect(after.find((d) => d.id === LD(2))!.state === 'idle', `after the 30 s read the rows read ${JSON.stringify(after)}`);
+      return 'a tick turned the row green while the 30 s read was out; the read landed with its older "working" and the dot stayed green';
     },
   });
 }

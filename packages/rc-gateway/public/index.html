@@ -23363,12 +23363,14 @@
       // one folder's rows still gets exactly those when no recent folder
       // holds any.
       // #255: `sessions` are the listing as read and `live` the live-state map
-      // read beside it (absent: none), kept apart in folderRows.
-      function renderPastConversations(sessions, cwd, truncated, live) {
+      // read beside it (absent: none), kept apart in folderRows, with the
+      // number `liveSeq` of the read that brought it.
+      function renderPastConversations(sessions, cwd, truncated, live, liveSeq) {
         if (typeof cwd === 'string' && cwd) {
           folderRows.set(cwd, {
             raw: Array.isArray(sessions) ? sessions : [],
             live: live || null,
+            liveSeq: liveSeq || 0,
             truncated: Boolean(truncated),
           });
         }
@@ -23847,6 +23849,12 @@
       // refresh's and the 1 s tick's alike. The tick skips a folder that has
       // one out, so a slow daemon never gathers a read a second.
       const liveReadsInFlight = new Map(); // cwd -> reads out
+      // #255: a number taken as each live-state read is sent, kept with the
+      // live map it brought (folderRows' liveSeq), so of two maps for one
+      // folder the one asked for last wins whichever lands last: the 30 s
+      // read waits for every folder before it writes any, and a tick sent
+      // after it can land first.
+      let liveSeqNext = 0;
 
       // Merged before the filter and the pager, so a conversation that exists
       // only in memory is searchable and paginable like any other row. Live-
@@ -23971,6 +23979,7 @@
           // read of their own (startLiveTick), of the snapshot alone; this
           // one still brings a snapshot with every listing, so a new row
           // arrives with its dot.
+          const liveSeq = ++liveSeqNext; // #255: as it is sent
           const [res, states] = await Promise.all([
             fetch('/rc/sessions?cwd=' + encodeURIComponent(cwd), {
               headers: { Authorization: 'Bearer ' + token() } },
@@ -23991,6 +24000,7 @@
           return {
             raw: Array.isArray(body.sessions) ? body.sessions : [],
             live: states,
+            liveSeq,
             truncated: Boolean(body.truncated),
           };
         } catch (e) {
@@ -24018,8 +24028,9 @@
         if (cwd !== curDirPath) return; // superseded by a newer browse
         let mine = null;
         folders.forEach((f, i) => {
-          if (f === cwd) mine = reads[i];
-          else if (reads[i]) folderRows.set(f, reads[i]);
+          const got = reads[i] && newerLive(f, reads[i]); // #255
+          if (f === cwd) mine = got;
+          else if (got) folderRows.set(f, got);
         });
         // #173: a failed read of the current folder is not an empty folder.
         // The last read of it stays on screen, and the failure is said once
@@ -24039,11 +24050,26 @@
             cwd,
             last ? last.truncated : false,
             last ? last.live : null,
+            last ? last.liveSeq : 0,
           );
           return;
         }
         folderReadFailedFor = null;
-        renderPastConversations(mine.raw, cwd, mine.truncated, mine.live);
+        renderPastConversations(
+          mine.raw,
+          cwd,
+          mine.truncated,
+          mine.live,
+          mine.liveSeq,
+        );
+      }
+      // #255: a folder's rows read again keep the live map asked for last:
+      // theirs, or one a tick sent after them brought in while they were
+      // still out (the batch waits for its slowest read).
+      function newerLive(cwd, read) {
+        const held = folderRows.get(cwd);
+        if (!held || (held.liveSeq || 0) <= read.liveSeq) return read;
+        return { ...read, live: held.live, liveSeq: held.liveSeq };
       }
 
       // issue #35: folder browsing is no longer the ONLY refresh trigger. A
@@ -24097,10 +24123,10 @@
         }
         for (const cwd of viewFolders()) {
           // A folder whose listing was never read has no rows to mark.
-          const got = folderRows.get(cwd);
-          if (!got || liveReadsInFlight.has(cwd)) continue;
+          if (!folderRows.has(cwd) || liveReadsInFlight.has(cwd)) continue;
+          const seq = ++liveSeqNext;
           void readLiveStates(cwd, false).then((live) =>
-            liveTickLanded(cwd, got, live),
+            liveTickLanded(cwd, seq, live),
           );
         }
       }
@@ -24111,12 +24137,13 @@
           .sort()
           .join('\n');
       }
-      function liveTickLanded(cwd, got, live) {
-        // Failed: the last live map stays. The folder's rows read again
-        // while this was out: they came with a live map of their own, and
-        // the next tick reads again.
-        if (!live || folderRows.get(cwd) !== got) return;
+      function liveTickLanded(cwd, seq, live) {
+        // Failed: the last live map stays. A map asked for after this one
+        // (a 30 s read sent later) already landed: that one stays.
+        const got = folderRows.get(cwd);
+        if (!live || !got || seq <= (got.liveSeq || 0)) return;
         got.live = live;
+        got.liveSeq = seq;
         const was = liveSessionIds();
         const folders = listFolders();
         pastConvos = withCatalog(mergeFolderRows(folders), folders);
