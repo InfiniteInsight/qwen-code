@@ -147,6 +147,39 @@ describe('channel transport', () => {
   });
 });
 
+/** Collects garbage until every target is gone; returns how many survive. */
+async function survivorsAfterGc(refs: Array<WeakRef<object>>) {
+  v8.setFlagsFromString('--expose_gc');
+  const gc = runInNewContext('gc') as () => void;
+  // deref() keeps its target alive until the current job ends, so collect
+  // in a job that has not dereferenced anything.
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
+  let alive = refs.length;
+  for (let attempt = 0; attempt < 10 && alive > 0; attempt++) {
+    await tick();
+    gc();
+    await tick();
+    alive = refs.filter((ref) => ref.deref() !== undefined).length;
+  }
+  return alive;
+}
+
+/** Resolves once the fake agent has received `count` calls of `method`. */
+function agentCalls(
+  handle: ReturnType<typeof makeChannel>,
+  method: string,
+  count: number,
+): Promise<void> {
+  return vi.waitFor(
+    () => {
+      expect(
+        handle.agent.extMethodCalls.filter((call) => call.method === method),
+      ).toHaveLength(count);
+    },
+    { interval: 5 },
+  );
+}
+
 describe('session requests racing the transport-closed rejection', () => {
   const CONTEXT = SERVE_STATUS_EXT_METHODS.sessionContext;
   const SOURCE = SERVE_CONTROL_EXT_METHODS.sessionSource;
@@ -162,39 +195,6 @@ describe('session requests racing the transport-closed rejection', () => {
   const waiterCount = (bridge: AcpSessionBridge, sessionId: string) =>
     _sessionEntryForTest(bridge, sessionId)?.transportClosedFanout?.waiters
       .size;
-
-  /** Collects garbage until every target is gone; returns how many survive. */
-  async function survivorsAfterGc(refs: Array<WeakRef<object>>) {
-    v8.setFlagsFromString('--expose_gc');
-    const gc = runInNewContext('gc') as () => void;
-    // deref() keeps its target alive until the current job ends, so collect
-    // in a job that has not dereferenced anything.
-    const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
-    let alive = refs.length;
-    for (let attempt = 0; attempt < 10 && alive > 0; attempt++) {
-      await tick();
-      gc();
-      await tick();
-      alive = refs.filter((ref) => ref.deref() !== undefined).length;
-    }
-    return alive;
-  }
-
-  /** Resolves once the fake agent has received `count` calls of `method`. */
-  function agentCalls(
-    handle: ReturnType<typeof makeChannel>,
-    method: string,
-    count: number,
-  ): Promise<void> {
-    return vi.waitFor(
-      () => {
-        expect(
-          handle.agent.extMethodCalls.filter((call) => call.method === method),
-        ).toHaveLength(count);
-      },
-      { interval: 5 },
-    );
-  }
 
   it('settles with the agent reply or the agent error', async () => {
     let fail = false;
@@ -407,6 +407,160 @@ describe('session requests racing the transport-closed rejection', () => {
       expect(handle.killed).toBe(false);
 
       expect(await survivorsAfterGc([ref])).toBe(0);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+});
+
+describe('channel requests racing the channel-unavailable rejection', () => {
+  const TOOLS = SERVE_STATUS_EXT_METHODS.workspaceTools;
+  const TRANSCRIPT = SERVE_STATUS_EXT_METHODS.sessionTranscript;
+  const ARTIFACTS = SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist;
+
+  beforeEach(() => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('settles workspace-scope requests, and rejects them with the workspace channel-closed error when the child exits', async () => {
+    let hang = false;
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        if (method !== TOOLS && method !== TRANSCRIPT) return {};
+        if (hang) return new Promise(() => {});
+        return { v: 1, marker: method };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const page = (sessionId: string) =>
+      bridge.getSessionTranscriptPage({
+        sessionId,
+        direction: 'backward',
+        limit: 1,
+      });
+
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await expect(bridge.getWorkspaceToolsStatus()).resolves.toMatchObject({
+        marker: TOOLS,
+      });
+      await expect(page(session.sessionId)).resolves.toMatchObject({
+        marker: TRANSCRIPT,
+      });
+
+      hang = true;
+      const pending = [
+        bridge.getWorkspaceToolsStatus(),
+        page(session.sessionId),
+      ].map((request) => request.catch((reason: unknown) => reason));
+      await agentCalls(handle, TOOLS, 2);
+      await agentCalls(handle, TRANSCRIPT, 2);
+      handle.crash({ exitCode: 1, signalCode: null });
+
+      for (const error of await Promise.all(pending)) {
+        expect(error).toBeInstanceOf(BridgeChannelClosedError);
+        expect(error).toMatchObject({
+          message: 'agent channel closed mid-request (workspace status)',
+        });
+      }
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('rejects a restore with the restore channel-closed error when the child exits mid-load', async () => {
+    const handle = makeChannel({
+      loadSessionImpl: () => new Promise(() => {}),
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    try {
+      const loading = bridge
+        .loadSession({
+          sessionId: 'persisted-mid-load',
+          workspaceCwd: WS_A,
+          suppressWorktreeContextRestore: true,
+        })
+        .catch((reason: unknown) => reason);
+      await vi.waitFor(
+        () => expect(handle.agent.loadSessionCalls).toHaveLength(1),
+        { interval: 5 },
+      );
+      handle.crash({ exitCode: 1, signalCode: null });
+
+      const error = await loading;
+      expect(error).toBeInstanceOf(BridgeChannelClosedError);
+      expect(error).toMatchObject({
+        message: 'agent channel closed during session/load',
+      });
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('rejects a session create with the newSession channel-closed error when the child exits', async () => {
+    const handle = makeChannel({
+      newSessionImpl: (p, self) =>
+        self.newSessionCalls.length > 1
+          ? new Promise(() => {})
+          : { sessionId: `sess:${p.cwd}` },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const creating = bridge
+        .spawnOrAttach({ workspaceCwd: WS_A, sessionScope: 'thread' })
+        .catch((reason: unknown) => reason);
+      await vi.waitFor(
+        () => expect(handle.agent.newSessionCalls).toHaveLength(2),
+        { interval: 5 },
+      );
+      handle.crash({ exitCode: 1, signalCode: null });
+
+      const error = await creating;
+      expect(error).toBeInstanceOf(BridgeChannelClosedError);
+      expect(error).toMatchObject({
+        message: 'agent channel closed during newSession',
+      });
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('cuts off an artifact write when the child exits instead of waiting out its timeout', async () => {
+    let hang = false;
+    const handle = makeChannel({
+      extMethodImpl: (method) =>
+        method === ARTIFACTS && hang ? new Promise(() => {}) : {},
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      initializeTimeoutMs: 60_000,
+    });
+
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      hang = true;
+      const writing = bridge.addSessionArtifact(
+        session.sessionId,
+        { title: 'cut off', url: 'https://example.com/cut-off' },
+        { clientId: session.clientId },
+      );
+      await agentCalls(handle, ARTIFACTS, 1);
+      handle.crash({ exitCode: 1, signalCode: null });
+
+      const result = await writing;
+      expect(result.changes[0]?.artifact).toMatchObject({
+        retention: 'ephemeral',
+        persistenceWarning: 'persistence_unavailable',
+      });
+      expect(result.warningDetails).toEqual([
+        expect.objectContaining({ code: 'ARTIFACT_PERSISTENCE_UNAVAILABLE' }),
+      ]);
     } finally {
       await bridge.shutdown();
     }
