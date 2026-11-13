@@ -9096,13 +9096,14 @@ export function createSessionControlPlane(
       // so without this allow-list the tombstone would silently drop
       // them. Cleared in the matching `finally` below.
       restoreChannel.client.markRestoreInFlight(req.sessionId);
-      // Restore is a low-frequency one-shot path, so we register a
-      // fresh channel-unavailable race per call instead of going
-      // through `getTransportClosedReject` (which exists to keep
-      // sendPrompt's per-session listener count at 1 over the
-      // session's lifetime). The listener is bound to this restore's
-      // race only — once the race settles, no new awaits attach to
-      // it, so there's no listener leak across restores.
+      // Restore is a low-frequency one-shot path with no session entry
+      // yet, so we register a fresh channel-unavailable race per call
+      // instead of going through `raceTransportClosed`. No new awaits
+      // attach to it once the race settles, but its reactions stay on
+      // `channel.exited` until the channel ends. Until then they keep this
+      // restore's settled race (and its result) reachable and, through the
+      // `.catch` closure below, this restore's closure context, including
+      // the registered session entry even after that session closes.
       const transportClosed = channelUnavailableReject(
         restoreChannel.channel,
         `during session/${action}`,
