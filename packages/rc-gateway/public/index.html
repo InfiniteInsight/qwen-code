@@ -1467,6 +1467,23 @@
         color: var(--g1-warn);
         margin-top: 6px;
       }
+      #github-connect p {
+        margin: 0 0 6px;
+      }
+      #github-connect .gh-warn {
+        color: var(--g1-warn);
+      }
+      #github-connect code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        overflow-wrap: anywhere;
+      }
+      #github-connect a {
+        display: inline-flex;
+        align-items: center;
+        min-height: 44px;
+        color: var(--g1-link, var(--g1-ink-hi));
+        text-decoration: underline;
+      }
       /* #257. Clone from GitHub: a screen over the folder screen (z-index 74),
          under the toasts (76) so a refusal of the conversation's start is
          seen. Findings wrap in full: a command is never cut short. */
@@ -10182,7 +10199,26 @@
         user_lookup_failed: 'GitHub would not say whose token it was',
         store_failed: 'the gateway could not save the token',
         stopped: 'the gateway was shutting down',
+        invalid_response: 'GitHub sent an answer the gateway could not use',
+        invalid_login: 'GitHub named a login the gateway does not accept',
       };
+      const GITHUB_REGISTER_URL = 'https://github.com/settings/applications/new';
+      // gh's failure to list its logins, in words: one it could not even run
+      // (ENOENT: not on the host's PATH) is said as such.
+      function githubGhWords(err) {
+        return /^ENOENT\b/.test(String(err || ''))
+          ? 'gh is not installed on the host'
+          : 'gh could not list its logins: ' + err;
+      }
+      // The friendly words for a GitHub error code named in a failure's
+      // message (oauth/start says "GitHub device code request failed: <code>").
+      function githubCodeWords(body) {
+        const msg = body && typeof body.error === 'string' ? body.error : '';
+        for (const code of Object.keys(GITHUB_FAILED_WORDS)) {
+          if (new RegExp('\\b' + code + '\\b').test(msg)) return GITHUB_FAILED_WORDS[code];
+        }
+        return '';
+      }
       const githubState = {
         accounts: null, // GitHubAccount[] from the last good read
         oauthConfigured: null, // null until the first read says
@@ -10201,6 +10237,9 @@
         forgetting: false,
         notice: '', // a result worth saying: connected, forgotten
         noticeRevoke: false, // the notice links the GitHub applications page
+        configError: '', // why the gateway could not use its client id file
+        storeError: '', // why the gateway refused its OAuth token store
+        notConfiguredWhy: '', // the gateway's own 409 oauth_not_configured line
       };
       let githubSig = '';
       function githubOn() {
@@ -10247,6 +10286,10 @@
           typeof body.oauthConfigPath === 'string' ? body.oauthConfigPath : '';
         githubState.ghError =
           typeof body.ghError === 'string' ? body.ghError : '';
+        githubState.configError =
+          typeof body.oauthConfigError === 'string' ? body.oauthConfigError : '';
+        githubState.storeError =
+          typeof body.oauthStoreError === 'string' ? body.oauthStoreError : '';
         renderGitHub();
         return githubState.accounts;
       }
@@ -10302,8 +10345,22 @@
           if (typeof body.configPath === 'string') {
             githubState.configPath = body.configPath;
           }
+          githubState.notConfiguredWhy = failureDetailLine(res, body);
+        } else if (
+          res.status === 409 &&
+          body &&
+          body.code === 'oauth_store_refused'
+        ) {
+          githubState.oauthConfigured = false;
+          githubState.storeError =
+            typeof body.error === 'string' && body.error
+              ? body.error
+              : failureDetailLine(res, body);
         } else if (!res.ok) {
-          githubState.startError = describeFailure(res, body, did);
+          const words = githubCodeWords(body);
+          githubState.startError =
+            describeFailure(res, body, did) +
+            (words ? '. ' + words.charAt(0).toUpperCase() + words.slice(1) + '.' : '');
         } else if (
           !body ||
           typeof body.flowId !== 'string' ||
@@ -10497,6 +10554,9 @@
           st.forgetting,
           st.notice,
           st.noticeRevoke,
+          st.configError,
+          st.storeError,
+          st.notConfiguredWhy,
         ]);
         if (sig === githubSig) return;
         githubSig = sig;
@@ -10515,7 +10575,7 @@
           note.append(p);
         };
         if (st.loadError) say(st.loadError, true);
-        if (st.ghError) say('gh could not list its logins: ' + st.ghError, true);
+        if (st.ghError) say(githubGhWords(st.ghError), true);
         if (st.startError) say(st.startError, true);
         if (st.ended) say(st.ended, true);
         if (st.notice) {
@@ -10592,11 +10652,37 @@
         // Connect, or why it cannot.
         const conn = $('github-connect');
         conn.textContent = '';
-        if (st.oauthConfigured === false) {
-          conn.textContent =
+        const line = (text, warn) => {
+          const p = document.createElement('p');
+          if (warn) p.className = 'gh-warn';
+          p.append(...(Array.isArray(text) ? text : [text]));
+          conn.append(p);
+          return p;
+        };
+        if (st.storeError) {
+          line(
+            'Connect with GitHub is off: the gateway refused its OAuth token store. gh logins on the host still work.',
+          );
+          line(st.storeError, true);
+          line('Fix that, then restart the gateway.');
+        } else if (st.oauthConfigured === false) {
+          line(
             'OAuth is not set up on this gateway. Register a GitHub OAuth App with device flow on, then put its client ID in ' +
-            st.configPath +
-            '.';
+              st.configPath +
+              '.',
+          );
+          const shape = document.createElement('code');
+          shape.textContent = '{"clientId": "<your app\'s client ID>"}';
+          line(['The file holds ', shape, '.']);
+          line([
+            'Register the app at ',
+            githubLink('', GITHUB_REGISTER_URL, 'github.com/settings/applications/new'),
+          ]).id = 'github-register';
+          line('Then restart the gateway: it reads the file only when it starts.');
+          if (st.configError) {
+            line('The gateway could not use the file it has: ' + st.configError, true);
+          }
+          if (st.notConfiguredWhy) line(st.notConfiguredWhy, true);
         } else {
           const b = githubBtn(
             'github-connect-btn',
@@ -23921,7 +24007,59 @@
         pollTimer: null,
         destSeq: 0,
         picking: false,
+        pending: null, // { jobId, repo, dest, account }: see ghcSavePending
       };
+      // The clone the owner has not answered yet: kept from its 202 until
+      // Start or Cancel on its question, or until its failure was seen and
+      // left, so leaving the screen or reloading the page cannot skip the
+      // question. Ids and paths only, never findings or git's lines.
+      const GH_PENDING_KEY = 'rc.github.pendingClone';
+      function ghcSavePending(p) {
+        ghc.pending = p;
+        try {
+          sessionStorage.setItem(GH_PENDING_KEY, JSON.stringify(p));
+        } catch {
+          /* unavailable: kept in memory for this page only */
+        }
+      }
+      function ghcClearPending() {
+        ghc.pending = null;
+        try {
+          sessionStorage.removeItem(GH_PENDING_KEY);
+        } catch {
+          /* unavailable: nothing was stored */
+        }
+      }
+      function ghcLoadPending() {
+        if (ghc.pending) return ghc.pending;
+        let p = null;
+        try {
+          p = JSON.parse(sessionStorage.getItem(GH_PENDING_KEY) || 'null');
+        } catch {
+          p = null;
+        }
+        if (
+          !p ||
+          typeof p !== 'object' ||
+          typeof p.jobId !== 'string' ||
+          !/^[A-Za-z0-9_-]{1,128}$/.test(p.jobId) ||
+          typeof p.dest !== 'string' ||
+          !p.dest.startsWith('/') ||
+          !ghcParseRepo(p.repo)
+        ) {
+          return null;
+        }
+        ghc.pending = {
+          jobId: p.jobId,
+          repo: ghcParseRepo(p.repo),
+          dest: p.dest,
+          account: typeof p.account === 'string' ? p.account : '',
+        };
+        return ghc.pending;
+      }
+      // What leaving the screen says about a clone not yet answered.
+      const GH_COME_BACK =
+        'Open New conversation, then Clone from GitHub, to see what it brings before starting.';
       function ghcLastAccount() {
         try {
           const v = localStorage.getItem(GH_LAST_ACCOUNT_KEY);
@@ -24018,6 +24156,11 @@
           ghcReset();
           scr.hidden = false;
           $('gh-back').focus({ preventScroll: true });
+          const pending = ghcLoadPending();
+          if (pending) {
+            ghcResume(pending);
+            return;
+          }
           void ghcLoadAccounts();
           void ghcHome().then(() => ghcSyncDest());
           return;
@@ -24033,10 +24176,13 @@
         if (phase === 'running' && job) {
           setStatus(
             'The clone of ' + job.repo + ' keeps running on the host, into ' + job.dest +
-              '. No conversation starts there until you ask.',
+              '. No conversation starts there until you ask. ' + GH_COME_BACK,
           );
         } else if (phase === 'ask' && job) {
-          setStatus('The clone stays at ' + job.dest + '. Nothing was started.');
+          setStatus('The clone stays at ' + job.dest + '. Nothing was started. ' + GH_COME_BACK);
+        } else if (phase === 'ended') {
+          // Its end was seen: a failure or a lost job is not asked about again.
+          ghcClearPending();
         }
         if (refocus && !$('dir-picker').hidden) {
           $('gh-clone-open').focus({ preventScroll: true });
@@ -24071,7 +24217,8 @@
         if (list.length === 0) {
           ghcSetNote(
             note,
-            'No GitHub accounts yet. Connect one under More, Host, GitHub, or log in with gh on the host.',
+            'No GitHub accounts yet. Connect one under More, Host, GitHub, or log in with gh on the host.' +
+              (githubState.ghError ? ' ' + githubGhWords(githubState.ghError) + '.' : ''),
             'ghc-warn',
           );
           $('gh-go').disabled = true;
@@ -24097,8 +24244,8 @@
         const problem =
           a && typeof a.error === 'string' && a.error
             ? a.login + ' is listed as failing by gh (' + a.error + '); a clone with it may fail.'
-            : githubState.ghError
-              ? 'gh could not list its logins: ' + githubState.ghError
+            : a && a.source === 'gh' && githubState.ghError
+              ? githubGhWords(githubState.ghError) + '.'
               : '';
         ghcSetNote($('gh-account-note'), problem, 'ghc-warn');
         if (!ghcParseRepo($('gh-search').value)) {
@@ -24294,7 +24441,10 @@
         if (gen !== ghc.gen) {
           // The screen was left while the gateway was answering.
           if (res && res.status === 202) {
-            setStatus('The clone of ' + repo + ' started on the host, into ' + dest + '.');
+            if (body && typeof body.jobId === 'string') {
+              ghcSavePending({ jobId: body.jobId, repo, dest, account });
+            }
+            setStatus('The clone of ' + repo + ' started on the host, into ' + dest + '. ' + GH_COME_BACK);
           }
           return;
         }
@@ -24309,6 +24459,7 @@
         }
         settle('');
         ghcRememberAccount(account);
+        ghcSavePending({ jobId: body.jobId, repo, dest, account });
         ghc.job = { id: body.jobId, repo, dest };
         ghcRenderRun(
           'Cloning ' + repo + ' into ' + dest,
@@ -24363,6 +24514,7 @@
         if (threw) {
           ghcRunPollNote(failureOf(threw, did) + '. Still trying.');
         } else if (res.status === 404 && body && body.code === 'job_not_found') {
+          ghcClearPending();
           return ghcEnd(
             [
               ['', 'The gateway no longer knows this clone (it probably restarted), so how it ended is unknown.'],
@@ -24418,6 +24570,7 @@
       }
       // Back to the form, with the repo and the folder as they were.
       function ghcRetry() {
+        ghcClearPending();
         ghc.job = null;
         ghc.gen++;
         ghcSetNote($('gh-clone-note'), '');
@@ -24434,6 +24587,12 @@
         const last = out.length ? String(out[out.length - 1]) : '';
         if (last && !err.includes(last)) {
           lines.push(['ghc-line', 'Last line from git: ' + last]);
+        }
+        // The gateway refuses redirects on purpose (the token must not
+        // follow one), so a renamed or moved repo fails like this.
+        const said = [err, ...out.map(String)].join('\n');
+        if (/\b30[12]\b|redirect|repository not found/i.test(said)) {
+          lines.push(['', 'The repo may have been renamed or moved; search for it by its current name.']);
         }
         ghcEnd(lines, [['gh-retry', 'Try again', ghcRetry]]);
       }
@@ -24469,6 +24628,12 @@
                 ? 'sets ' + i.keys.join(', ')
                 : '',
           ],
+        ],
+        ['otherSettings', 'Other settings', (i) => [i.key, i.value]],
+        [
+          'projectExtensions',
+          'Project agents, skills and commands',
+          (i) => [i.file, typeof i.note === 'string' ? i.note : ''],
         ],
       ];
       function ghcText(v) {
@@ -24576,6 +24741,7 @@
         no.id = 'gh-cancel';
         no.textContent = 'Cancel';
         no.onclick = () => {
+          ghcClearPending();
           ghc.job = null;
           ghcEnd(
             [
@@ -24595,11 +24761,31 @@
         ghcReset();
         void ghcLoadAccounts();
       }
+      // Opening the screen with a clone not yet answered follows that clone
+      // again: still running, its run; done, its question (or the start,
+      // under ghcDone's rule); failed, its failure; forgotten by the gateway,
+      // the words for that. The form behind it holds the repo and folder, so
+      // Try again keeps them.
+      function ghcResume(p) {
+        ghc.repo = p.repo;
+        ghc.destTyped = true;
+        $('gh-search').value = p.repo;
+        $('gh-dest').value = p.dest;
+        ghcSetNote($('gh-chosen'), 'Selected repo: ' + p.repo);
+        ghc.job = { id: p.jobId, repo: p.repo, dest: p.dest };
+        ghcRenderRun('Checking the clone of ' + p.repo + ' into ' + p.dest + '…', '');
+        ghcView('running');
+        const pgen = ++ghc.gen;
+        void ghcLoadAccounts();
+        void ghcPoll(pgen);
+      }
       // The conversation, in the clone. The create is the folder screen's own
       // (startConversationIn): when it works, the page moves onto the new
       // conversation and the list shuts, which closes this screen; when it does
       // not, this screen is still up and says so.
       async function ghcStartIn(repo, dest) {
+        // Start was pressed (or the repo brings nothing): answered.
+        ghcClearPending();
         const gen = ++ghc.gen;
         ghc.job = { id: '', repo, dest };
         ghcRenderRun('Cloned ' + repo + ' into ' + dest + '. Starting a conversation there…', '');

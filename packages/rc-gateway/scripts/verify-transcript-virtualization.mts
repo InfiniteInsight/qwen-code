@@ -37,7 +37,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type { Page, Route } from 'playwright';
-import { bootViewer, harnessRuntimeRoot, GITHUB_HARNESS_USER_CODE, HARNESS_HOST_NAME, HOST_ACTION_LABEL, type BootViewerOptions, type Frame, type Viewer } from './lib/viewerHarness.mjs';
+import { bootViewer, harnessRuntimeRoot, GITHUB_HARNESS_DEVICE_CODE, GITHUB_HARNESS_USER_CODE, HARNESS_HOST_NAME, HOST_ACTION_LABEL, type BootViewerOptions, type Frame, type Viewer } from './lib/viewerHarness.mjs';
 import { resolveChatsDir } from '../src/sessions/chatsPath.js';
 import type { StubDaemonOptions } from '../src/testing/stubDaemon.js';
 
@@ -33516,6 +33516,9 @@ PAGE_SCENARIOS.push({
       expect(look['btn'] === 'Waiting for GitHub…' && look['btnDisabled'] === true, `the connect button is ${JSON.stringify([look['btn'], look['btnDisabled']])}`);
       // Control for the leak checks below: they do find the code while it is shown.
       expect((await ghLeaks(page, [GITHUB_HARNESS_USER_CODE])).length === 1, 'the leak check does not see the code while it is shown');
+      // While the flow is pending the user code is on the page, and nothing else is: no token, no device code.
+      const pendingLeaks = await ghLeaks(page, gh.secrets);
+      expect(pendingLeaks.length === 0 && gh.secrets.includes(GITHUB_HARNESS_DEVICE_CODE), `while pending the page holds ${JSON.stringify(pendingLeaks)}`);
       await shot(page, 'p572-github-code-390');
       // A second press while one is pending starts nothing.
       await page.evaluate('connectGitHub(); connectGitHub(); undefined');
@@ -33635,7 +33638,12 @@ PAGE_SCENARIOS.push({
       await ghWaitEntries(page, 1);
       await page.waitForFunction(`document.getElementById('github-connect').textContent.startsWith('OAuth is not set up')`, null, { timeout: 10_000 });
       const said = (await page.textContent('#github-connect')) ?? '';
-      expect(said === want, `the panel reads ${JSON.stringify(said)}`);
+      expect(said.startsWith(want), `the panel reads ${JSON.stringify(said)}`);
+      // The file's shape, where to register the app, and that the gateway reads the file only at start.
+      expect(said.includes(`The file holds {"clientId": "<your app's client ID>"}.`), `the panel does not give the file's shape: ${JSON.stringify(said)}`);
+      expect(said.includes('Then restart the gateway'), `the panel does not say to restart the gateway: ${JSON.stringify(said)}`);
+      const reg = (await page.evaluate(`(() => { const a = document.querySelector('#github-register a'); return a && { href: a.href, target: a.target, rel: a.rel, h: Math.round(a.getBoundingClientRect().height) }; })()`)) as { href: string; target: string; rel: string; h: number } | null;
+      expect(!!reg && reg.href === 'https://github.com/settings/applications/new' && reg.target === '_blank' && reg.rel === 'noopener' && reg.h >= 44, `the register link is ${JSON.stringify(reg)}`);
       expect((await page.$('#github-connect-btn')) === null, 'a Connect button is offered with no client id');
       expect((await ghEntries(page))[0]!.login === 'octocat', 'the gh login is not listed');
       await shot(page, 'p574-github-not-configured-390');
@@ -33650,9 +33658,43 @@ PAGE_SCENARIOS.push({
       await page.waitForSelector('#github-connect-btn', { state: 'visible' });
       await page.click('#github-connect-btn');
       await page.waitForFunction(`document.getElementById('github-connect').textContent.startsWith('OAuth is not set up')`, null, { timeout: 10_000 });
-      expect(((await page.textContent('#github-connect')) ?? '') === want, 'the refused start did not give the same words');
+      const refused = (await page.textContent('#github-connect')) ?? '';
+      expect(refused.startsWith(want), 'the refused start did not give the same words');
+      // The gateway's own 409 words are kept, not dropped.
+      expect(refused.includes('oauth_not_configured (HTTP 409)') && refused.includes('No GitHub OAuth client id is set'), `the refused start lost the gateway's words: ${JSON.stringify(refused)}`);
       expect((await page.$('#github-code')) === null && !gh.requests.some((r) => r.includes('/login/device/code')), 'a flow started with no client id');
-      return `the Connect button is replaced by the words naming ${gh.rcDir}/github-oauth.json; a start the gateway refuses (409 oauth_not_configured) gives the same words; the gh login is still listed`;
+      // Why the gateway could not use its file, a refused token store, and gh not installed, each in words.
+      await page.unroute('**/rc/github/accounts');
+      const cfgErr = `${gh.rcDir}/github-oauth.json is not valid JSON; OAuth connect is off`;
+      await page.route('**/rc/github/accounts', async (route) => {
+        const res = await route.fetch();
+        const body = (await res.json()) as Record<string, unknown>;
+        body['oauthConfigError'] = cfgErr;
+        body['ghError'] = 'ENOENT: gh';
+        await route.fulfill({ response: res, json: body });
+      });
+      await page.evaluate('readGitHubAccounts()');
+      await page.waitForFunction(`document.getElementById('github-connect').textContent.includes('could not use the file')`, null, { timeout: 10_000 });
+      const cfgSaid = (await page.textContent('#github-connect')) ?? '';
+      expect(cfgSaid.includes(`The gateway could not use the file it has: ${cfgErr}`), `the config error reads ${JSON.stringify(cfgSaid)}`);
+      const ghSaid = await ghNote(page);
+      expect(ghSaid.includes('gh is not installed on the host') && !ghSaid.includes('ENOENT'), `gh not installed reads ${JSON.stringify(ghSaid)}`);
+      await page.unroute('**/rc/github/accounts');
+      const storeErr = `github oauth store: ${gh.rcDir}/github-oauth-tokens.json is group/world-writable (mode 0666)`;
+      await page.route('**/rc/github/accounts', async (route) => {
+        const res = await route.fetch();
+        const body = (await res.json()) as Record<string, unknown>;
+        body['oauthConfigured'] = false;
+        body['oauthStoreError'] = storeErr;
+        await route.fulfill({ response: res, json: body });
+      });
+      await page.evaluate('readGitHubAccounts()');
+      await page.waitForFunction(`document.getElementById('github-connect').textContent.includes('refused its OAuth token store')`, null, { timeout: 10_000 });
+      const storeSaid = (await page.textContent('#github-connect')) ?? '';
+      expect(storeSaid.includes(storeErr) && storeSaid.includes('gh logins on the host still work') && (await page.$('#github-connect-btn')) === null, `the refused store reads ${JSON.stringify(storeSaid)}`);
+      expect((await ghEntries(page))[0]!.login === 'octocat', 'the gh login went with the refused store');
+      await page.unroute('**/rc/github/accounts');
+      return `the Connect button is replaced by the words naming ${gh.rcDir}/github-oauth.json, the file's shape, the register link (_blank, noopener, 44px) and the restart; a start the gateway refuses (409 oauth_not_configured) gives the same words plus the gateway's own line; a config error, a refused token store and gh not installed are each said in words; the gh login is still listed`;
     },
   });
 
@@ -33852,7 +33894,63 @@ PAGE_SCENARIOS.push({
       // The other way: Start does start in the clone.
       const again = await page.evaluate(`document.getElementById('gh-again') ? document.getElementById('gh-again').textContent : null`);
       expect(again === 'Clone another repo', `the end offers ${JSON.stringify(again)}`);
-      return `the hook (PreToolUse, its long command wrapped in full), the MCP server (localtool, node ./mcp/server.js) and an approval setting (tools.approvalMode yolo) each listed under its own heading with the repo and folder named; Start and Cancel are 44px; Cancel sent no POST /session, kept ${dest} and said so; the last account used (gh:hubot) was the default; a connected account shows the organisation line verbatim and a gh login does not`;
+      // Leaving mid-clone, or reloading mid-clone, cannot skip the question: opening Clone from
+      // GitHub again follows that clone and asks, with its findings, before anything starts.
+      let holding = true;
+      await page.route('**/rc/github/clone/*', (route) =>
+        route.request().method() === 'GET' && holding
+          ? route.fulfill({ json: { state: 'running', lines: ['Receiving objects: 9%'], repo: 'hubot/hooky', account: 'gh:hubot', startedAt: Date.now() } })
+          : route.continue(),
+      );
+      const startClone = async (to: string) => {
+        rmSync(to, { recursive: true, force: true });
+        await page.waitForFunction(`document.getElementById('gh-account').options.length === 3`, null, { timeout: 10_000 });
+        await page.fill('#gh-search', 'hubot/hooky');
+        await page.fill('#gh-dest', to);
+        await page.click('#gh-go');
+        await page.waitForFunction(`document.getElementById('gh-run-line') && document.getElementById('gh-run-line').textContent === 'Receiving objects: 9%'`, null, { timeout: 10_000 });
+      };
+      const askedFor = async (to: string, how: string) => {
+        await page.waitForSelector('#gh-ask', { state: 'visible', timeout: 15_000 });
+        await page.waitForTimeout(400);
+        const lead2 = await ghcSay(page, 'gh-ask');
+        const heads = (await ghcFindings(page)).map((c) => c.heading);
+        expect(lead2.includes(to) && heads.includes('Hooks') && heads.includes('MCP servers') && heads.includes('Approval settings'), `after ${how} the question reads ${JSON.stringify(lead2.slice(0, 160))} with ${JSON.stringify(heads)}`);
+        expect(sessions.length === 0, `a conversation started after ${how} without the question`);
+      };
+      const stored = () => page.evaluate(`sessionStorage.getItem('rc.github.pendingClone')`) as Promise<string | null>;
+      await page.click('#gh-again');
+      const left = join(ghcProjects(), 'hooky-left');
+      await startClone(left);
+      await page.click('#gh-back');
+      const leaving = (await page.textContent('#status')) ?? '';
+      expect(leaving.includes('keeps running on the host') && leaving.includes('Clone from GitHub'), `leaving mid-clone said ${JSON.stringify(leaving)}`);
+      const kept = JSON.parse((await stored()) ?? 'null') as Record<string, string> | null;
+      expect(!!kept && typeof kept['jobId'] === 'string' && kept['dest'] === left && kept['repo'] === 'hubot/hooky' && Object.keys(kept).sort().join() === 'account,dest,jobId,repo', `the kept clone is ${JSON.stringify(kept)}`);
+      holding = false;
+      await page.click('#gh-clone-open');
+      await askedFor(left, 'leaving the screen');
+      // Back from the question keeps it pending too.
+      await page.click('#gh-back');
+      await page.click('#gh-clone-open');
+      await askedFor(left, 'leaving the question');
+      await page.click('#gh-cancel');
+      expect((await stored()) === null, 'Cancel left the clone pending');
+      await page.click('#gh-again');
+      holding = true;
+      const reloaded = join(ghcProjects(), 'hooky-reload');
+      await startClone(reloaded);
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await page.waitForFunction(`typeof githubOn === 'function' && githubOn()`, null, { timeout: 15_000 });
+      holding = false;
+      await ghcOpen(page);
+      await askedFor(reloaded, 'a reload');
+      await page.click('#gh-start');
+      await page.waitForFunction(`document.getElementById('gh-clone').hidden`, null, { timeout: 15_000 });
+      const made2 = sessions.map((x) => JSON.parse(x) as { cwd?: string });
+      expect(made2.length === 1 && made2[0]!.cwd === reloaded && (await stored()) === null, `Start sent ${JSON.stringify(made2)} and left ${await stored()}`);
+      await page.unroute('**/rc/github/clone/*');
+      return `leaving mid-clone said how to come back and kept only the job's id, repo, folder and account; reopening Clone from GitHub, after leaving or after a reload mid-clone, showed that clone's question with its findings and sent no POST /session until Start, which sent one with the clone's folder; the hook (PreToolUse, its long command wrapped in full), the MCP server (localtool, node ./mcp/server.js) and an approval setting (tools.approvalMode yolo) each listed under its own heading with the repo and folder named; Start and Cancel are 44px; Cancel sent no POST /session, kept ${dest} and said so; the last account used (gh:hubot) was the default; a connected account shows the organisation line verbatim and a gh login does not`;
     },
   });
 
@@ -33939,6 +34037,15 @@ PAGE_SCENARIOS.push({
       await page.evaluate(`(() => { setGhCloneOpen(true); ghcShowAsk({ repo: 'o/n', dest: '/x/n', hasFindings: true, findings: { file: true, hooks: [], newThing: [{ key: 'a.b', value: 'c' }, 'bare string'] } }); })()`);
       const generic = await ghcFindings(page);
       expect(generic.length === 1 && generic[0]!.heading === 'newThing' && generic[0]!.items.length === 2 && generic[0]!.items[0]!.name === 'a.b' && generic[0]!.items[0]!.value === 'c', `an unknown category reads ${JSON.stringify(generic)}`);
+      // The fail-closed categories have headings of their own.
+      await page.evaluate(`ghcShowAsk({ repo: 'o/n', dest: '/x/n', hasFindings: true, findings: { file: true, otherSettings: [{ key: 'context.fileFiltering.respectGitIgnore', value: 'false' }], projectExtensions: [{ file: '.qwen/agents/reviewer.md' }, { file: '.qwen/skills/linked', note: 'a symbolic link, not followed' }] } })`);
+      const failClosed = await ghcFindings(page);
+      expect(
+        failClosed.length === 2 &&
+          failClosed[0]!.heading === 'Other settings' && failClosed[0]!.items[0]!.name === 'context.fileFiltering.respectGitIgnore' && failClosed[0]!.items[0]!.value === 'false' &&
+          failClosed[1]!.heading === 'Project agents, skills and commands' && failClosed[1]!.items[0]!.name === '.qwen/agents/reviewer.md' && failClosed[1]!.items[1]!.value === 'a symbolic link, not followed',
+        `the fail-closed categories read ${JSON.stringify(failClosed)}`,
+      );
       return `an unreadable .qwen/settings.json said ".qwen/settings.json could not be read: ${m![1]!.trim().slice(0, 60)}", asked with Start and Cancel, and started nothing until Start; a stored account the gateway no longer lists fell back to the first; a pasted github.com link was taken as the repo with no search; a done job with no hasFindings, with hasFindings true plus an error, and with hasFindings false plus an error each asked (error shown) and started nothing; a category the page has no heading for is listed under its key`;
     },
   });
@@ -34101,7 +34208,23 @@ PAGE_SCENARIOS.push({
       const atLeave = seen;
       await page.waitForTimeout(2300);
       expect(seen <= atLeave + 1 && !(await page.isVisible('#gh-clone')), `${seen - atLeave} checks went out after the screen was left`);
-      return `a running clone showed its last progress line and said it keeps running on the host; a failed one said "The clone failed", git's exit code 128 and its last line (fatal: harness clone failed), started nothing, offered a 44px Try again that kept the repo and folder, and no fake token was anywhere in the page; a 404 job_not_found said the gateway restarted, the outcome is unknown and named the folder; one loop followed a running clone at about one check a second, and leaving the screen mid-clone stopped it and said the clone keeps running on the host; with no home reported the page asked the folder browser for it`;
+      // A failure that reads like a moved repo (redirects are refused on purpose) says what to do.
+      await page.unroute('**/rc/github/clone/*');
+      await page.evaluate(`(() => { setGhCloneOpen(true); ghcFailed({ state: 'failed', exitCode: 128, lines: ['remote: Repository not found.'] }, { repo: 'octo-four/renamed', dest: '/x/renamed' }); })()`);
+      const moved = await ghcSay(page, 'gh-end');
+      expect(moved.includes('The repo may have been renamed or moved; search for it by its current name.'), `a not-found failure reads ${JSON.stringify(moved)}`);
+      await page.evaluate(`ghcFailed({ state: 'failed', exitCode: 128, lines: ['fatal: harness clone failed'] }, { repo: 'o/n', dest: '/x/n' })`);
+      expect(!(await ghcSay(page, 'gh-end')).includes('renamed or moved'), 'a plain failure got the moved-repo hint');
+      await page.click('#gh-retry');
+      await page.click('#gh-back');
+      // A gateway without githubClone has no Clone from GitHub on the folder screen.
+      await page.evaluate(`caps.remoteControl.githubClone = false; undefined`);
+      if (await page.isVisible('#dir-picker')) await page.keyboard.press('Escape');
+      await openList(page);
+      await page.click('#list-new');
+      await page.waitForSelector('#dir-picker', { state: 'visible' });
+      expect((await page.evaluate(`document.getElementById('gh-clone-entry').hidden`)) === true && !(await page.isVisible('#gh-clone-open')), 'a gateway without githubClone shows Clone from GitHub');
+      return `a moved-repo failure gave the rename hint and a plain one did not; a gateway without githubClone hides Clone from GitHub; a running clone showed its last progress line and said it keeps running on the host; a failed one said "The clone failed", git's exit code 128 and its last line (fatal: harness clone failed), started nothing, offered a 44px Try again that kept the repo and folder, and no fake token was anywhere in the page; a 404 job_not_found said the gateway restarted, the outcome is unknown and named the folder; one loop followed a running clone at about one check a second, and leaving the screen mid-clone stopped it and said the clone keeps running on the host; with no home reported the page asked the folder browser for it`;
     },
   });
 }
