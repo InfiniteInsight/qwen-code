@@ -6,9 +6,10 @@
 
 import * as v8 from 'node:v8';
 import { runInNewContext } from 'node:vm';
-import { RequestError } from '@agentclientprotocol/sdk';
+import { ClientSideConnection, RequestError } from '@agentclientprotocol/sdk';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AcpSessionBridge } from './bridgeTypes.js';
+import { _channelUnavailableWaiterCountForTest } from './channel-transport.js';
 import { makeBridge, makeChannel, WS_A } from './internal/testUtils.js';
 import { _sessionEntryForTest } from './session-control-plane.js';
 import {
@@ -201,6 +202,41 @@ function agentCalls(
     },
     { interval: 5 },
   );
+}
+
+/**
+ * WeakRefs to what the bridge's ACP connections receive from `method`.
+ * Patches the prototype by hand: a vitest spy would record (and so retain)
+ * every result.
+ */
+function captureConnectionReplies(
+  method: 'extMethod' | 'newSession',
+  accept: (args: unknown[]) => boolean = () => true,
+): { refs: Array<WeakRef<object>>; restore: () => void } {
+  const proto = ClientSideConnection.prototype as unknown as Record<
+    string,
+    (...args: unknown[]) => Promise<unknown>
+  >;
+  const original = proto[method]!;
+  const refs: Array<WeakRef<object>> = [];
+  proto[method] = function (this: unknown, ...args: unknown[]) {
+    const reply = original.apply(this, args);
+    if (accept(args)) {
+      void reply.then(
+        (value) => {
+          refs.push(new WeakRef(value as object));
+        },
+        () => {},
+      );
+    }
+    return reply;
+  };
+  return {
+    refs,
+    restore: () => {
+      proto[method] = original;
+    },
+  };
 }
 
 describe('session requests racing the transport-closed rejection', () => {
@@ -584,6 +620,173 @@ describe('channel requests racing the channel-unavailable rejection', () => {
       expect(result.warningDetails).toEqual([
         expect.objectContaining({ code: 'ARTIFACT_PERSISTENCE_UNAVAILABLE' }),
       ]);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('leaves no channel waiter behind after settled workspace-scope requests and artifact writes', async () => {
+    let hold = false;
+    let release!: () => void;
+    const held = new Promise<Record<string, unknown>>((resolve) => {
+      release = () => resolve({ v: 1, held: true });
+    });
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        if (method !== TOOLS) return {};
+        return hold ? held : { v: 1 };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const waiters = () => _channelUnavailableWaiterCountForTest(handle.channel);
+
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await Promise.all(
+        Array.from({ length: 500 }, () => bridge.getWorkspaceToolsStatus()),
+      );
+      for (let i = 0; i < 20; i++) {
+        await bridge.addSessionArtifact(
+          session.sessionId,
+          { title: `artifact ${i}`, url: `https://example.com/${i}` },
+          { clientId: session.clientId },
+        );
+      }
+      expect(waiters()).toBe(0);
+
+      // The count is live, not vacuously zero: a pending request is in it.
+      hold = true;
+      const pending = bridge.getWorkspaceToolsStatus();
+      await vi.waitFor(() => expect(waiters()).toBe(1), { interval: 5 });
+      release();
+      await expect(pending).resolves.toMatchObject({ held: true });
+      expect(waiters()).toBe(0);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('lets the replies of settled workspace-scope requests be collected while the channel lives', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method) =>
+        method === TOOLS || method === TRANSCRIPT
+          ? { v: 1, body: 'x'.repeat(4096) }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    // Only the WeakRef leaves this frame, so the test itself holds no reply.
+    const replyRef = async (
+      request: () => Promise<unknown>,
+    ): Promise<WeakRef<object>> => new WeakRef((await request()) as object);
+
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const refs: Array<WeakRef<object>> = [];
+      for (let i = 0; i < 100; i++) {
+        refs.push(await replyRef(() => bridge.getWorkspaceToolsStatus()));
+        refs.push(
+          await replyRef(() =>
+            bridge.getSessionTranscriptPage({
+              sessionId: session.sessionId,
+              direction: 'backward',
+              limit: 1,
+            }),
+          ),
+        );
+      }
+      // Move the SDK read loop's last-message hold off the tracked replies.
+      await bridge.getSessionContextStatus(session.sessionId);
+      expectOnlyTransportHeld(await survivorsAfterGc(refs));
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('lets settled artifact writes leave nothing on channel.exited', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const persisted = captureConnectionReplies(
+      'extMethod',
+      ([method]) => method === ARTIFACTS,
+    );
+
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      for (let i = 0; i < 50; i++) {
+        await bridge.addSessionArtifact(
+          session.sessionId,
+          { title: `artifact ${i}`, url: `https://example.com/${i}` },
+          { clientId: session.clientId },
+        );
+      }
+      await bridge.getSessionContextStatus(session.sessionId);
+      expect(persisted.refs.length).toBeGreaterThanOrEqual(50);
+      expect(handle.killed).toBe(false);
+      expectOnlyTransportHeld(await survivorsAfterGc(persisted.refs));
+    } finally {
+      persisted.restore();
+      await bridge.shutdown();
+    }
+  });
+
+  it('lets session creates leave nothing on channel.exited', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionClose
+          ? { closed: true }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const created = captureConnectionReplies('newSession');
+
+    try {
+      const anchor = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      for (let i = 0; i < 20; i++) {
+        const session = await bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+        });
+        await bridge.closeSession(session.sessionId);
+      }
+      await bridge.getSessionContextStatus(anchor.sessionId);
+      expect(created.refs).toHaveLength(21);
+      expect(bridge.sessionCount).toBe(1);
+      // The anchor session legitimately keeps its own create response.
+      expectOnlyTransportHeld(await survivorsAfterGc(created.refs.slice(1)));
+    } finally {
+      created.restore();
+      await bridge.shutdown();
+    }
+  });
+
+  it('does not keep a closed restored session reachable while its channel lives', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionClose
+          ? { closed: true }
+          : {},
+    });
+    const channelFactory = vi.fn(async () => handle.channel);
+    const bridge = makeBridge({ channelFactory });
+    // Only the WeakRef leaves this frame, so the test itself holds no entry.
+    const entryRef = (sessionId: string): WeakRef<object> =>
+      new WeakRef(_sessionEntryForTest(bridge, sessionId)!);
+
+    try {
+      const anchor = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.loadSession({
+        sessionId: 'persisted-closed',
+        workspaceCwd: WS_A,
+        suppressWorktreeContextRestore: true,
+      });
+      expect(channelFactory).toHaveBeenCalledOnce();
+      const ref = entryRef('persisted-closed');
+      await bridge.closeSession('persisted-closed');
+      await bridge.getSessionContextStatus(anchor.sessionId);
+      expect(bridge.sessionCount).toBe(1);
+      expect(handle.killed).toBe(false);
+
+      expect(await survivorsAfterGc([ref])).toEqual([]);
     } finally {
       await bridge.shutdown();
     }
