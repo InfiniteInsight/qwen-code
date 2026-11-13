@@ -32774,6 +32774,212 @@ PAGE_SCENARIOS.push({
       return `dot, "3 agents" (${at390.chipW}px, whole) and "tab crashed" beside an ellipsized title in one 64px row at 390 and 1280`;
     },
   });
+
+  // ---- #255: "Hide subagent threads" in the folder drop-down ---------------
+  // A thread is a row a create_sub_session spawned: `spawnedBy` on its row, or
+  // a live-state entry that names a parent. A fork is not one.
+  const htRow = (id: string, title: string, extra: Record<string, unknown> = {}) => ({ ...ldRow(id, title), ...extra });
+  const htThread = (id: string, kind: LdKind) => ({ ...ldEntry(id, kind), parentSessionId: LD(1) });
+  const htIds = (page: Page) =>
+    page.evaluate(`Array.from(document.querySelectorAll('#past-list .srow')).map((w) => w.dataset.session)`) as Promise<string[]>;
+  const htSwitch = (page: Page) =>
+    page.evaluate(String.raw`(() => {
+      const b = document.querySelector('#list-folders [role="menuitemcheckbox"]');
+      if (!b) return null;
+      const lbl = b.querySelector('.lbl');
+      const n = b.querySelector('.n');
+      return { checked: b.getAttribute('aria-checked'), label: lbl ? lbl.textContent : null, count: n ? n.textContent : null, h: Math.round(b.getBoundingClientRect().height) };
+    })()`) as Promise<{ checked: string | null; label: string | null; count: string | null; h: number } | null>;
+  const htOpenMenu = async (page: Page) => {
+    await page.click('#list-folder');
+    await page.waitForSelector('#list-folders:not([hidden])');
+  };
+  /** The same six rows in two folders: two roots, a fork, three threads. */
+  const htFolders = () => ({
+    [LD_CWD]: [
+      htRow(LD(1), 'p255 root one'),
+      htRow(LD(3), 'p255 a fork', { parentSessionId: LD(1) }),
+      htRow(LD(4), 'p255 thread by spawnedBy', { spawnedBy: LD(1) }),
+      htRow(LD(5), 'p255 thread by live parent'),
+    ],
+    [LD_OTHER]: [htRow(LD(2), 'p255 root two'), htRow(LD(6), 'p255 other thread', { spawnedBy: LD(1) })],
+  });
+  const htLive = () => ({
+    [LD_CWD]: [ldEntry(LD(1), 'idle'), htThread(LD(4), 'run'), htThread(LD(5), 'run')],
+    [LD_OTHER]: [],
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P559 by default thread rows are hidden, the menu says how many, and a fork stays',
+    waitView: false,
+    stub: AG_STUB,
+    run: async ({ page }) => {
+      await ldServe(page, htFolders(), htLive(), { pausePoll: true });
+      await openList(page);
+      await page.waitForFunction('uiHideThreads === true', null, { timeout: 10_000 });
+      await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 3`, null, { timeout: 5_000 });
+      const ids = (await htIds(page)).sort();
+      const want = [LD(1), LD(2), LD(3)].sort();
+      expect(JSON.stringify(ids) === JSON.stringify(want), `the list shows ${JSON.stringify(ids)}, not the two roots and the fork ${JSON.stringify(want)}`);
+      // R1: the parent's chip still counts its threads, hidden as they are.
+      expect(await agChipIs(page, LD(1), '2 agents'), `the parent whose threads are hidden does not say "2 agents": ${JSON.stringify(await agChip(page))}`);
+      await htOpenMenu(page);
+      const sw = await htSwitch(page);
+      expect(!!sw, 'the folder menu has no menuitemcheckbox');
+      expect(sw!.checked === 'true', `the switch is aria-checked=${sw!.checked}, not true`);
+      expect(sw!.label === 'Hide subagent threads', `the switch reads ${JSON.stringify(sw!.label)}`);
+      expect(sw!.count === '3 hidden', `the switch counts ${JSON.stringify(sw!.count)}, not "3 hidden"`);
+      expect(sw!.h >= 44, `the switch is ${sw!.h}px tall, under the 44px tap floor`);
+      const counts = (await page.evaluate(
+        `Object.fromEntries(Array.from(document.querySelectorAll('#list-folders [role="menuitemradio"]')).map((b) => [b.dataset.folder, b.querySelector('.n').textContent]))`,
+      )) as Record<string, string>;
+      expect(
+        counts[''] === '3' && counts[LD_CWD] === '2' && counts[LD_OTHER] === '1',
+        `the folder counts are ${JSON.stringify(counts)}, not the rows shown (3, 2, 1)`,
+      );
+      // Arrow keys reach it: it is the last item in the menu.
+      await page.keyboard.press('End');
+      const last = (await page.evaluate(`document.activeElement.getAttribute('role')`)) as string;
+      expect(last === 'menuitemcheckbox', `End focused a ${last}, not the switch`);
+      return 'threads (by spawnedBy and by live-state parent) hidden, the fork and both roots shown; "3 hidden"; counts 3/2/1; the parent still says "2 agents"; End reaches the switch';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P560 unticking shows the threads and the choice survives a reload',
+    waitView: false,
+    run: async ({ page }) => {
+      const puts: string[] = [];
+      page.on('request', (r) => {
+        if (r.method() === 'PUT' && /\/rc\/ui-prefs$/.test(new URL(r.url()).pathname)) puts.push(r.postData() ?? '');
+      });
+      await ldServe(page, htFolders(), htLive(), { pausePoll: true });
+      await openList(page);
+      await page.waitForFunction('uiHideThreads === true', null, { timeout: 10_000 });
+      await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 3`, null, { timeout: 5_000 });
+      try {
+        await htOpenMenu(page);
+        await page.click('#list-folders [role="menuitemcheckbox"]');
+        await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 6`, null, { timeout: 5_000 });
+        expect(puts.length === 1 && JSON.parse(puts[0]!).hideThreads === false, `the PUTs were ${JSON.stringify(puts)}, not one { hideThreads: false }`);
+        const sw = await htSwitch(page);
+        expect(sw!.checked === 'false', `the switch is aria-checked=${sw!.checked} after unticking`);
+        // The menu counts the rows shown, now all six.
+        const all = (await page.evaluate(`document.querySelector('#list-folders [role="menuitemradio"][data-folder=""] .n').textContent`)) as string;
+        expect(all === '6', `All folders counts ${all}, not 6`);
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await ldServe(page, htFolders(), htLive(), { pausePoll: true });
+        await openList(page);
+        await page.waitForFunction('uiHideThreads === false', null, { timeout: 10_000 });
+        await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 6`, null, { timeout: 5_000 });
+        await htOpenMenu(page);
+        const after = await htSwitch(page);
+        expect(after!.checked === 'false', `after a reload the switch is aria-checked=${after!.checked}`);
+        return 'unticking sent { hideThreads: false }, showed all 6 rows (counts 6), and after a reload still 6 with the switch unticked';
+      } finally {
+        // The gateway's store is per token; leave it as found.
+        await page
+          .evaluate(`fetch('/rc/ui-prefs', { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token() }, body: JSON.stringify({ hideThreads: null }) })`)
+          .catch(() => undefined);
+      }
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P561 a live-only thread with no transcript is hidden by its live-state parent',
+    waitView: false,
+    run: async ({ page }) => {
+      // LD(7) is open on the daemon and has no transcript yet: only its
+      // live-state entry says it is a thread.
+      // ldServe waits for every row it was given, so LD(7) is listed at first
+      // and taken out of the listing (the object is read on every request).
+      const folders = { [LD_CWD]: [htRow(LD(1), 'p255 root one'), htRow(LD(7), 'p255 live only')] };
+      await ldServe(page, folders, { [LD_CWD]: [ldEntry(LD(1), 'idle'), htThread(LD(7), 'run')] }, { pausePoll: true });
+      folders[LD_CWD].pop();
+      await page.evaluate(`refreshPastConversations(${JSON.stringify(LD_CWD)})`);
+      await page.waitForFunction(`pastConvos.some((s) => s.liveOnly)`, null, { timeout: 10_000 });
+      await openList(page);
+      await page.waitForFunction('uiHideThreads === true', null, { timeout: 10_000 });
+      const live = (await page.evaluate(`pastConvos.filter((s) => s.liveOnly).map((s) => s.sessionId)`)) as string[];
+      expect(JSON.stringify(live) === JSON.stringify([LD(7)]), `the live-only row is not in the list's rows: ${JSON.stringify(live)}`);
+      await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 1`, null, { timeout: 5_000 });
+      const ids = await htIds(page);
+      expect(JSON.stringify(ids) === JSON.stringify([LD(1)]), `the list shows ${JSON.stringify(ids)}, not the root alone`);
+      await htOpenMenu(page);
+      const sw = await htSwitch(page);
+      expect(sw!.count === '1 hidden', `the switch counts ${JSON.stringify(sw!.count)}, not "1 hidden"`);
+      return 'a live-only row whose live-state names a parent is hidden and counted ("1 hidden"), the root stays';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P562 the thread on screen stays listed while threads are hidden',
+    waitView: false,
+    run: async ({ page }) => {
+      await ldServe(page, htFolders(), htLive(), { pausePoll: true });
+      await openList(page);
+      await page.waitForFunction('uiHideThreads === true', null, { timeout: 10_000 });
+      await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 3`, null, { timeout: 5_000 });
+      // The reader is looking at a thread, as a switch of conversation does.
+      await page.evaluate(`watchedSessionId = ${JSON.stringify(LD(4))}; renderList(); undefined`);
+      const ids = (await htIds(page)).sort();
+      const want = [LD(1), LD(2), LD(3), LD(4)].sort();
+      expect(JSON.stringify(ids) === JSON.stringify(want), `the list shows ${JSON.stringify(ids)}, not the watched thread with the rest ${JSON.stringify(want)}`);
+      await htOpenMenu(page);
+      const sw = await htSwitch(page);
+      expect(sw!.count === '2 hidden', `the switch counts ${JSON.stringify(sw!.count)}, not "2 hidden" (the watched one is shown)`);
+      // Leaving it hides it again.
+      await page.evaluate(`watchedSessionId = null; renderList(); undefined`);
+      expect((await htIds(page)).length === 3, 'with nothing watched the thread was not hidden again');
+      return 'the watched thread is listed with the roots and the fork (and not counted hidden), and goes again when it is no longer on screen';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P563 a gateway whose ui-prefs carry no hideThreads draws no switch and hides nothing',
+    waitView: false,
+    run: async ({ page }) => {
+      await page.route('**/rc/ui-prefs', (route) =>
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ stampZone: 'UTC' }) }),
+      );
+      await ldServe(page, htFolders(), htLive(), { pausePoll: true });
+      await page.evaluate('loadStampZone()');
+      await page.waitForFunction('uiHideThreads === null', null, { timeout: 10_000 });
+      await openList(page);
+      await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 6`, null, { timeout: 5_000 });
+      await htOpenMenu(page);
+      const sw = await htSwitch(page);
+      expect(sw === null, `an old gateway's menu has a switch: ${JSON.stringify(sw)}`);
+      const all = (await page.evaluate(`document.querySelector('#list-folders [role="menuitemradio"][data-folder=""] .n').textContent`)) as string;
+      expect(all === '6', `All folders counts ${all}, not 6`);
+      return 'without hideThreads in the answer: no switch in the menu, all 6 rows listed and counted';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P564 a PUT that fails puts the switch back and says why',
+    waitView: false,
+    run: async ({ page }) => {
+      await page.route('**/rc/ui-prefs', (route) =>
+        route.request().method() === 'PUT'
+          ? route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ code: 'x', error: 'disk full' }) })
+          : route.fallback(),
+      );
+      await ldServe(page, htFolders(), htLive(), { pausePoll: true });
+      await openList(page);
+      await page.waitForFunction('uiHideThreads === true', null, { timeout: 10_000 });
+      await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 3`, null, { timeout: 5_000 });
+      await htOpenMenu(page);
+      await page.click('#list-folders [role="menuitemcheckbox"]');
+      await page.waitForFunction(`document.getElementById('status').textContent.includes('disk full')`, null, { timeout: 5_000 }).catch(() => undefined);
+      const status = (await page.evaluate(`document.getElementById('status').textContent`)) as string;
+      expect(status.includes('disk full'), `the status line reads ${JSON.stringify(status)}, which does not name the cause`);
+      const sw = await htSwitch(page);
+      expect(sw!.checked === 'true', `the switch is aria-checked=${sw!.checked}, not back to true`);
+      expect((await htIds(page)).length === 3, 'the threads came back although the save failed');
+      return `the switch went back to ticked, the 3 rows stayed, the status line reads ${JSON.stringify(status.slice(0, 80))}`;
+    },
+  });
 }
 
 async function runPageSection(): Promise<Result[]> {

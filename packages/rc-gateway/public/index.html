@@ -2552,6 +2552,30 @@
         color: var(--g1-ink-mid);
         font-size: 13px;
       }
+      /* #255. The switch under the folders: the radio rows' look, set off by a
+         rule, ticked the same way. */
+      #list-folders [role='menuitemcheckbox'] {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 44px;
+        margin-top: 4px;
+        padding: 0 10px;
+        border: 0;
+        border-top: 1px solid var(--g1-edge);
+        border-radius: 0 0 8px 8px;
+        background: transparent;
+        color: var(--g1-ink-hi);
+        font-size: 15px;
+        text-align: left;
+      }
+      #list-folders [role='menuitemcheckbox']:hover,
+      #list-folders [role='menuitemcheckbox']:focus {
+        background: var(--g1-on);
+      }
+      #list-folders [role='menuitemcheckbox'][aria-checked='true'] .ck {
+        visibility: visible;
+      }
       /* The folder screen: the folder browser, the recent folders and the
          typed path the New conversation panel held, each at the tap floor. */
       #dir-picker .scr-body,
@@ -7482,6 +7506,11 @@
       // Kept here because the boot read and the view's own attach resolve in
       // either order: whichever lands second is the one that can apply it.
       let stampZone = null;
+      // #255. Whether the list hides subagent threads: the gateway's saved
+      // choice for this device (ui-prefs `hideThreads`, true until changed),
+      // or null while unread and for a gateway that does not carry the key,
+      // which draws no switch and hides nothing.
+      let uiHideThreads = null;
       function applyStampZone() {
         if (transcriptView && stampZone) transcriptView.setStampZone(stampZone);
       }
@@ -7524,6 +7553,13 @@
           });
           if (!res.ok) return; // the view keeps its own default zone
           const prefs = await res.json();
+          // #255: read first, so a gateway with no zone still says it.
+          const hide =
+            typeof prefs.hideThreads === 'boolean' ? prefs.hideThreads : null;
+          if (hide !== uiHideThreads) {
+            uiHideThreads = hide;
+            threadsFollow();
+          }
           if (typeof prefs.stampZone !== 'string' || !prefs.stampZone) return;
           fillStampZones();
           ensureStampZoneOption(prefs.stampZone);
@@ -22663,6 +22699,41 @@
         const one = shownFolder();
         return one ? [one] : listFolders();
       }
+      // #255. A thread is a conversation another one started with
+      // create_sub_session: its row names the parent (`spawnedBy`), or, when it
+      // has no transcript yet, its live-state entry does. A fork is not one.
+      function isThread(s) {
+        return !!s.spawnedBy || !!(s.liveState && s.liveState.parentSessionId);
+      }
+      // Hidden by the switch: never the conversation on screen, whatever it is.
+      function threadHidden(s) {
+        return (
+          uiHideThreads === true &&
+          !!s &&
+          isThread(s) &&
+          s.sessionId !== watchedSessionId
+        );
+      }
+      // The rows the list and the menu's counts speak of: what is not hidden.
+      function convosShown() {
+        return uiHideThreads === true
+          ? pastConvos.filter((s) => !threadHidden(s))
+          : pastConvos;
+      }
+      // How many rows the switch hides in the folder filter's view.
+      function threadsInView() {
+        const one = shownFolder();
+        return pastConvos.filter(
+          (s) => threadHidden(s) && (!one || s.cwd === one),
+        ).length;
+      }
+      // The switch changed, or the gateway's answer for it arrived: redraw
+      // from what is already read.
+      function threadsFollow() {
+        pastPage = 1;
+        renderList();
+        syncFolderMenuCounts();
+      }
 
       // "just now" / "N min ago" / "N h ago" / "N d ago". A skewed clock or a
       // future timestamp must never print a negative count — clamp the raw
@@ -22794,18 +22865,20 @@
           box.appendChild(d);
         };
         // #193: the folder filter first, then the search over what it left.
+        // #255: then the subagent threads, before the search and the paging.
         const one = shownFolder();
-        const inView = one
-          ? pastConvos.filter((s) => s && s.cwd === one)
-          : pastConvos;
+        const unhidden = convosShown();
+        const inView = one ? unhidden.filter((s) => s && s.cwd === one) : unhidden;
         if (inView.length === 0) {
           closeRowMenu(false);
           none(
-            one
-              ? 'No conversations in this folder yet.'
-              : listFolders().length
-                ? 'No conversations in these folders yet.'
-                : 'No folder yet. Use New conversation to pick one.',
+            threadsInView() > 0
+              ? 'Only subagent threads here, and they are hidden.'
+              : one
+                ? 'No conversations in this folder yet.'
+                : listFolders().length
+                  ? 'No conversations in these folders yet.'
+                  : 'No folder yet. Use New conversation to pick one.',
           );
           renderCatalogNotices(box); // #132
           renderLoadMore(pager, true);
@@ -23185,7 +23258,9 @@
       // for any menu and the function that shuts it back onto its button.
       function menuKeys(e, menu, shut) {
         const items = Array.from(
-          menu.querySelectorAll('[role="menuitem"],[role="menuitemradio"]'),
+          menu.querySelectorAll(
+            '[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"]',
+          ),
         );
         const i = items.indexOf(document.activeElement);
         let next = -1;
@@ -23244,7 +23319,7 @@
         menu.textContent = '';
         const one = shownFolder();
         const count = (cwd) =>
-          pastConvos.filter((s) => s && (cwd === '' || s.cwd === cwd)).length;
+          convosShown().filter((s) => s && (cwd === '' || s.cwd === cwd)).length; // #255
         const items = [['', 'All folders']].concat(
           listFolders().map((cwd) => [cwd, isolatedFolder(cwd)]),
         );
@@ -23281,6 +23356,7 @@
           };
           menu.appendChild(b);
         }
+        if (uiHideThreads !== null) menu.appendChild(hideThreadsItem()); // #255
         menu.hidden = false;
         door.setAttribute('aria-expanded', 'true');
         placeFolderMenu();
@@ -23292,9 +23368,10 @@
       // place, keeping the items and the focus where they are.
       function syncFolderMenuCounts() {
         if (!folderMenuShown()) return;
+        syncHideThreadsItem(); // #255
         for (const b of folderMenuEl.querySelectorAll('[role="menuitemradio"]')) {
           const cwd = b.dataset.folder || '';
-          const held = pastConvos.filter(
+          const held = convosShown().filter(
             (s) => s && (cwd === '' || s.cwd === cwd),
           ).length;
           const n = b.querySelector('.n');
@@ -23306,6 +23383,72 @@
               held +
               (held === 1 ? ' conversation' : ' conversations'),
           );
+        }
+      }
+      // #255. The switch under the folders: "Hide subagent threads", ticked by
+      // default, with how many rows it hides in the folder filter's view. It
+      // is drawn only for a gateway whose ui-prefs carry the choice
+      // (uiHideThreads is null otherwise).
+      function hideThreadsItem() {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.id = 'list-hide-threads';
+        b.setAttribute('role', 'menuitemcheckbox');
+        b.tabIndex = -1;
+        const ck = document.createElement('span');
+        ck.className = 'ck';
+        ck.setAttribute('aria-hidden', 'true');
+        ck.textContent = '✓';
+        const lbl = document.createElement('span');
+        lbl.className = 'lbl';
+        lbl.textContent = 'Hide subagent threads';
+        const n = document.createElement('span');
+        n.className = 'n';
+        b.append(ck, lbl, n);
+        b.onclick = () => void setHideThreads(uiHideThreads !== true);
+        paintHideThreadsItem(b);
+        return b;
+      }
+      function paintHideThreadsItem(b) {
+        const on = uiHideThreads === true;
+        b.setAttribute('aria-checked', String(on));
+        const held = on ? threadsInView() : 0;
+        const n = b.querySelector('.n');
+        const text = held > 0 ? held + ' hidden' : '';
+        if (n.textContent !== text) n.textContent = text;
+      }
+      function syncHideThreadsItem() {
+        const b = folderMenuEl && folderMenuEl.querySelector('#list-hide-threads');
+        if (b) paintHideThreadsItem(b);
+      }
+      // Ticks at once and puts it back when the gateway refuses, saying why.
+      async function setHideThreads(next) {
+        const was = uiHideThreads;
+        uiHideThreads = next;
+        threadsFollow();
+        const did = 'saving the hide subagent threads setting';
+        const undo = () => {
+          if (uiHideThreads !== next) return; // a later choice stands
+          uiHideThreads = was;
+          threadsFollow();
+        };
+        try {
+          const res = await fetch('/rc/ui-prefs', {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + token(),
+            },
+            body: JSON.stringify({ hideThreads: next }),
+          });
+          if (!res.ok) {
+            const body = await res.json().catch(() => null);
+            undo();
+            setStatus(describeFailure(res, body, did));
+          }
+        } catch (e) {
+          undo();
+          setStatus(describeFailure(null, null, { did, err: e }));
         }
       }
       // Hung under the folder line and as wide as it less 8px a side, which
@@ -23659,7 +23802,22 @@
           ...(preview ? { preview } : {}),
           cwd: c.workspace,
           ...catalogMarks(c),
+          ...catalogSpawnedBy(c), // #255
         };
+      }
+      // #255. The conversation that started this one with create_sub_session:
+      // a disk row names it `spawnedBy`; a daemon row's `parentSessionId` is
+      // the same thing (the daemon's summary has no fork notion).
+      function catalogSpawnedBy(c) {
+        const by =
+          typeof c.spawnedBy === 'string' && c.spawnedBy
+            ? c.spawnedBy
+            : c.source === 'daemon' &&
+                typeof c.parentSessionId === 'string' &&
+                c.parentSessionId
+              ? c.parentSessionId
+              : '';
+        return by ? { spawnedBy: by } : {};
       }
       const GROUP_SWATCHES = {
         red: '#f85149',
@@ -24918,6 +25076,8 @@
           noteConversationSwitch();
         }
         watchedSessionId = id;
+        // #255: a thread being opened is listed though threads are hidden.
+        if (switching && uiHideThreads === true) renderList();
         // #201: the strip follows the conversation, so A's files come back
         // when A is watched again.
         renderPendingAttachments();
