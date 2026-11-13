@@ -100,6 +100,14 @@ const COMMAND_SETTINGS: readonly string[] = [
 ];
 
 /**
+ * Listed whenever the file sets them, `false` and `""` included: the CLI
+ * reads `argv.sandbox ?? settings.tools.sandbox` from the merged settings
+ * (`sandboxConfig.ts` loadSandboxConfig) and treats a falsy value as off, so
+ * a repo's `false` turns off a sandbox the owner set in their own settings.
+ */
+const LISTED_WHEN_SET: readonly string[] = ['tools.sandbox', 'sandbox'];
+
+/**
  * Approval modes, v2 and v1 spelling. The CLI uses a workspace's mode as is
  * (`cli/src/config/config.ts` loadCliConfig) and resets it only for an
  * untrusted folder; YOLO also removes the approval gate on workspace and
@@ -340,10 +348,15 @@ function stripJsonComments(json: string): string {
 
 /**
  * The line pattern of dotenv 17 (`lib/main.js` LINE), the parser the CLI
- * loads `.env` files with, used here for the variable names only.
+ * loads `.env` files with, used here for the variable names only. One change
+ * keeps it linear: the leading `\s*` is horizontal whitespace only. dotenv's
+ * `\s*` also crosses line breaks, so every line start rescans all the blank
+ * lines after it (quadratic: about 14 minutes on a 1 MiB file of newlines).
+ * The keys found are the same: a match dotenv starts at a blank line, the
+ * engine here starts at the first non-blank line instead, at the same place.
  */
 const DOTENV_LINE =
-  /(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/gm;
+  /(?:^|^)[^\S\n\r\u2028\u2029]*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/gm;
 
 function dotenvKeys(text: string): string[] {
   const keys = new Set<string>();
@@ -394,15 +407,52 @@ function visible(s: string): string {
   return out;
 }
 
-// The CLI's expansion pattern (core `utils/envVarResolver.ts`
-// resolveEnvVarsInString), run over every string value of a settings file.
-const ENV_REFERENCE = /\$(?:(\w+)|{([^}]+)})/g;
+function isWordChar(code: number): boolean {
+  return (
+    (code >= 0x30 && code <= 0x39) ||
+    (code >= 0x41 && code <= 0x5a) ||
+    (code >= 0x61 && code <= 0x7a) ||
+    code === 0x5f
+  );
+}
+
+/**
+ * The names the CLI's expansion pattern `/\$(?:(\w+)|{([^}]+)})/g` (core
+ * `utils/envVarResolver.ts` resolveEnvVarsInString, run over every string
+ * value of a settings file) matches in `s`, leftmost and non-overlapping like
+ * the regex. Scanned by hand because the regex is quadratic on a run of `${`
+ * with no `}` (each `$` rescans to the end): the next `}` is found once and
+ * reused until the scan passes it.
+ */
+function referenceNames(s: string): string[] {
+  const names: string[] = [];
+  let close = -2; // index of the next `}`; -2 not looked up yet, -1 none
+  let i = s.indexOf('$');
+  while (i !== -1) {
+    const next = s.charCodeAt(i + 1);
+    if (isWordChar(next)) {
+      let end = i + 2;
+      while (end < s.length && isWordChar(s.charCodeAt(end))) end++;
+      names.push(s.slice(i + 1, end));
+      i = s.indexOf('$', end);
+      continue;
+    }
+    if (next === 0x7b) {
+      if (close !== -1 && close < i + 2) close = s.indexOf('}', i + 2);
+      if (close > i + 2) {
+        names.push(s.slice(i + 2, close));
+        i = s.indexOf('$', close + 1);
+        continue;
+      }
+    }
+    i = s.indexOf('$', i + 1);
+  }
+  return names;
+}
 
 function collectReferences(v: unknown, names: Set<string>): void {
   if (typeof v === 'string') {
-    for (const match of v.matchAll(ENV_REFERENCE)) {
-      const name = match[1] ?? match[2];
-      if (name === undefined) continue;
+    for (const name of referenceNames(v)) {
       // Left unexpanded by the CLI, exactly as resolveEnvVarsInString does.
       const upper = name.toUpperCase();
       if (upper === 'SESSION_ID' || upper === 'QWEN_CODE_SESSION_ID') continue;
@@ -422,12 +472,18 @@ function collectReferences(v: unknown, names: Set<string>): void {
  * from the owner's environment in the raw values it was built from, made
  * visible as a whole.
  */
-function shown(text: string, raw: unknown[], expands = true): string {
-  const names = new Set<string>();
-  if (expands) collectReferences(raw, names);
+function shown(
+  text: string,
+  raw: unknown[],
+  expands = true,
+  nameFilter: (name: string) => boolean = () => true,
+): string {
+  const found = new Set<string>();
+  if (expands) collectReferences(raw, found);
+  const names = [...found].filter(nameFilter);
   const note =
-    names.size > 0
-      ? ` (expands ${[...names].map((n) => `$${n}`).join(', ')} from your environment)`
+    names.length > 0
+      ? ` (expands ${names.map((n) => `$${n}`).join(', ')} from your environment)`
       : '';
   return visible(text + note);
 }
@@ -440,6 +496,25 @@ function valueText(v: unknown): string {
 
 function quoteArg(s: string): string {
   return /^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : JSON.stringify(s);
+}
+
+/** A value as text, with a blank string shown quoted so it is not empty. */
+function setText(v: unknown): string {
+  return typeof v === 'string' && v.trim() === ''
+    ? JSON.stringify(v)
+    : valueText(v);
+}
+
+function isEnvName(name: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name);
+}
+
+/** Top-level key names of an object; another value as JSON. */
+function keysText(v: unknown): string | undefined {
+  if (!present(v)) return undefined;
+  if (!isRecord(v)) return valueText(v);
+  const keys = Object.keys(v);
+  return keys.length > 0 ? keys.join(', ') : undefined;
 }
 
 /** Set to something that can take effect: not absent, `false` or blank. */
@@ -603,8 +678,10 @@ function commandsOf(
   const out: RepoSettingsFindings['commands'] = [];
   for (const key of COMMAND_SETTINGS) {
     const value = at(settings, key);
-    if (present(value))
-      out.push({ key, value: shown(valueText(value), [value]) });
+    const listed = LISTED_WHEN_SET.includes(key)
+      ? value !== undefined && value !== null
+      : present(value);
+    if (listed) out.push({ key, value: shown(setText(value), [value]) });
   }
   const env = settings['env'];
   if (isRecord(env)) {
@@ -643,7 +720,51 @@ function approvalOf(
         out.push({ key, value: shown(valueText(item), [item]) });
     }
   }
+  // Only `true` routes every shell command through the AUTO classifier
+  // (core `permissions/autoMode.ts` shouldClassifyAllShellForAutoMode), and
+  // the repo's value overrides the owner's in the merge.
+  const classifyAllShell = at(
+    settings,
+    'permissions.autoMode.classifyAllShell',
+  );
+  if (
+    classifyAllShell !== undefined &&
+    classifyAllShell !== null &&
+    classifyAllShell !== true
+  ) {
+    out.push({
+      key: 'permissions.autoMode.classifyAllShell',
+      value: shown(setText(classifyAllShell), [classifyAllShell]),
+    });
+  }
   return out;
+}
+
+/**
+ * The env vars a provider protocol reads its API key from when an entry has
+ * no `envKey` (core `models/constants.ts` AUTH_ENV_MAPPINGS, not exported
+ * from the core root).
+ */
+const PROVIDER_KEY_ENV: Record<string, readonly string[]> = {
+  openai: ['OPENAI_API_KEY'],
+  'openai-responses': ['OPENAI_API_KEY'],
+  anthropic: ['ANTHROPIC_API_KEY'],
+  gemini: ['GEMINI_API_KEY'],
+  'vertex-ai': ['GOOGLE_API_KEY'],
+};
+
+function ownerKeyText(
+  provider: string,
+  protocols: Record<string, unknown>,
+): string {
+  const mapped = protocols[provider];
+  const protocol = typeof mapped === 'string' ? mapped : provider;
+  const names = Object.hasOwn(PROVIDER_KEY_ENV, protocol)
+    ? (PROVIDER_KEY_ENV[protocol] ?? [])
+    : [];
+  return names.length > 0
+    ? `the owner's ${names.map((n) => `$${n}`).join(' or ')} is sent there`
+    : "the owner's key for this provider is sent there";
 }
 
 /**
@@ -672,6 +793,9 @@ function credentialsOf(
 ): RepoSettingsFindings['credentials'] {
   const out: RepoSettingsFindings['credentials'] = [];
   const providers = settings['modelProviders'];
+  const protocols = isRecord(settings['providerProtocol'])
+    ? settings['providerProtocol']
+    : {};
   if (isRecord(providers)) {
     for (const [provider, models] of Object.entries(providers)) {
       const base = `modelProviders.${provider}`;
@@ -697,16 +821,34 @@ function credentialsOf(
         }
         if (present(model['envKey'])) {
           parts.push(`key from $${valueText(model['envKey'])}`);
+        } else if (present(model['baseUrl'])) {
+          // No envKey: the protocol's own key variable, or the inherited
+          // key, goes to this baseUrl (modelConfigResolver.ts, modelsConfig.ts).
+          parts.push(ownerKeyText(provider, protocols));
         }
+        // customHeaders and extra_body are expanded and sent with every
+        // request to the entry's baseUrl (core `models/types.ts`
+        // ModelGenerationConfig).
+        const generation = isRecord(model['generationConfig'])
+          ? model['generationConfig']
+          : {};
         out.push({
           key,
           value:
             parts.length > 0
-              ? shown(parts.join(', '), [
-                  model['id'],
-                  model['baseUrl'],
-                  model['envKey'],
-                ])
+              ? shown(
+                  withDetails(parts.join(', '), [
+                    ['headers', pairsText(generation['customHeaders'])],
+                    ['extra_body', keysText(generation['extra_body'])],
+                  ]),
+                  [
+                    model['id'],
+                    model['baseUrl'],
+                    model['envKey'],
+                    generation['customHeaders'],
+                    generation['extra_body'],
+                  ],
+                )
               : shown(valueText(model), [model]),
         });
       });
@@ -719,10 +861,13 @@ function credentialsOf(
       value: shown(valueText(authBaseUrl), [authBaseUrl]),
     });
   }
-  if (present(at(settings, 'security.auth.apiKey'))) {
+  const apiKey = at(settings, 'security.auth.apiKey');
+  if (present(apiKey)) {
+    // Names only, and only names shaped like a variable, so no part of the
+    // key itself is ever shown.
     out.push({
       key: 'security.auth.apiKey',
-      value: 'a key is set (value not shown)',
+      value: shown('a key is set (value not shown)', [apiKey], true, isEnvName),
     });
   }
   const uploadBaseUrl = at(settings, 'omni.delivery.upload.baseUrl');
