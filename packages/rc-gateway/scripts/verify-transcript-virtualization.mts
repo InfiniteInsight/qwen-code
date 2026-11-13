@@ -32386,7 +32386,7 @@ PAGE_SCENARIOS.push({
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P553 a slow live-state never has two reads in flight for one folder, and a failed tick keeps the dots',
+    name: 'P553 a slow live-state never has two reads in flight for one folder, a failed tick keeps the dots, and a folder that refuses is asked at most once between two 30 s reads',
     waitView: false,
     run: async ({ page }) => {
       const ctl = await ldServe(
@@ -32423,7 +32423,49 @@ PAGE_SCENARIOS.push({
         `the failed read changed the dots: ${JSON.stringify(before)} -> ${JSON.stringify(after)}`,
       );
       expect(statusAfter === status, `the failed tick changed the status line: ${JSON.stringify(status)} -> ${JSON.stringify(statusAfter)}`);
-      return `${sent.length} reads in ${Date.now() - t}ms, at most ${most} in flight; the dots kept ${before.map((d) => d.state).join(' and ')} after the 500; the status line unchanged`;
+      const slowMs = Date.now() - t;
+      // R8: a folder whose live-state refuses (a 403, a 502 that says
+      // live_state_unsupported, live_state_unpooled) is not asked again by
+      // the tick until the next 30 s read; any other failure is asked again.
+      const refuses = (await page.evaluate(String.raw`[
+        liveStateRefuses(403, null),
+        liveStateRefuses(502, { code: 'live_state_unsupported' }),
+        liveStateRefuses(501, { code: 'live_state_unpooled' }),
+        liveStateRefuses(502, { code: 'daemon_unavailable' }),
+        liveStateRefuses(500, { code: 'daemon_hung' }),
+        liveStateRefuses(503, { code: 'workspace_pool_full' }),
+      ]`)) as boolean[];
+      expect(
+        JSON.stringify(refuses) === JSON.stringify([true, true, true, false, false, false]),
+        `liveStateRefuses reads 403, 502 unsupported, 501 unpooled, 502, 500, 503 as ${JSON.stringify(refuses)}`,
+      );
+      ctl.delayMs = 0;
+      ctl.status = 403;
+      await ldUntil(() => (ctl.inflight.get(LD_CWD) ?? 0) === 0, 5000);
+      const t403 = Date.now();
+      await page.waitForTimeout(3500);
+      const ticks403 = ctl.reads.filter((r) => r.at >= t403 && r.spawn === '0').length;
+      expect(ticks403 <= 1, `a folder answering 403 was asked ${ticks403} times by the tick in 3.5 s, not at most once`);
+      // Between two 30 s reads (called as the poll calls them), at most one.
+      const r1 = Date.now();
+      await page.evaluate('refreshPastConversations(curDirPath)');
+      await page.waitForTimeout(3000);
+      const r2 = Date.now();
+      await page.evaluate('refreshPastConversations(curDirPath)');
+      const between = ctl.reads.filter((r) => r.at >= r1 && r.at < r2 && r.spawn === '0').length;
+      expect(between <= 1, `the tick asked the refusing folder ${between} times between two 30 s reads`);
+      const thirty = ctl.reads.filter((r) => r.at >= r1 && r.spawn === null).length;
+      expect(thirty === 2, `the two 30 s reads asked live-state ${thirty} times, not twice`);
+      // Answered again, the next 30 s read lets the tick ask once more.
+      ctl.status = 200;
+      await page.evaluate('refreshPastConversations(curDirPath)');
+      const back = Date.now();
+      await page.waitForTimeout(2500);
+      const resumed = ctl.reads.filter((r) => r.at >= back && r.spawn === '0').length;
+      expect(resumed >= 2, `after a 30 s read answered 200 the tick asked ${resumed} times in 2.5 s, not again every second`);
+      const statusEnd = (await page.evaluate(`document.getElementById('status').textContent`)) as string;
+      expect(statusEnd === status, `the refused ticks changed the status line: ${JSON.stringify(status)} -> ${JSON.stringify(statusEnd)}`);
+      return `${sent.length} reads in ${slowMs}ms, at most ${most} in flight; the dots kept ${before.map((d) => d.state).join(' and ')} after the 500; the status line unchanged; a 403 folder asked ${ticks403} times in 3.5 s of ticks and ${between} between two 30 s reads, ${resumed} in 2.5 s once answered`;
     },
   });
 

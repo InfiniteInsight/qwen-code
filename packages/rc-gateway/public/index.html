@@ -24004,7 +24004,11 @@
               (spawn ? '' : '&spawn=0'),
             { headers: { Authorization: 'Bearer ' + token() } },
           );
-          if (!res.ok) return null;
+          if (!res.ok) {
+            const failBody = await res.json().catch(() => null);
+            if (liveStateRefuses(res.status, failBody)) liveStateRefused.add(cwd); // R8
+            return null;
+          }
           const j = await res.json();
           if (!j || !Array.isArray(j.sessions)) return null;
           const m = new Map();
@@ -24030,6 +24034,23 @@
       // read waits for every folder before it writes any, and a tick sent
       // after it can land first.
       let liveSeqNext = 0;
+      // #255 R8: the folders whose last live-state read was refused in a way
+      // asking again will not change (liveStateRefuses). The 1 s tick skips
+      // them until the next 30 s read, which asks again and keeps or clears
+      // the mark by its own answer.
+      const liveStateRefused = new Set();
+      // A refusal: the token may not read it (403), the daemon has no
+      // live-state route (a 502 live_state_unsupported), or the gateway has
+      // no pool to read without spawning (live_state_unpooled). Any other
+      // failure (a slow or failing daemon) is asked again on the next tick.
+      function liveStateRefuses(status, body) {
+        const code = body && typeof body.code === 'string' ? body.code : '';
+        return (
+          status === 403 ||
+          (status === 502 && code === 'live_state_unsupported') ||
+          code === 'live_state_unpooled'
+        );
+      }
 
       // Merged before the filter and the pager, so a conversation that exists
       // only in memory is searchable and paginable like any other row. Live-
@@ -24203,6 +24224,7 @@
       const folderReadFailures = new Map();
       async function readFolderRows(cwd, spawn) {
         const did = 'reading the conversations in ' + cwd;
+        liveStateRefused.delete(cwd); // #255 R8: asked again here
         try {
           // One tick, both reads. The snapshot rides this poll rather than
           // keeping a timer of its own, so the list and its markers cannot
@@ -24329,9 +24351,10 @@
       // folder asked about. A folder with a live-state read still out is
       // skipped, so a slow daemon never gathers reads. A read that fails
       // keeps the folder's last live map and says nothing: the 30 s read
-      // reports a folder it cannot read. The rows are rebuilt only when the
-      // set of live conversations changed; otherwise only their marks are
-      // painted (paintRowMarks).
+      // reports a folder it cannot read. A folder that refused (R8:
+      // liveStateRefused) is not asked again until the next 30 s read. The
+      // rows are rebuilt only when the set of live conversations changed;
+      // otherwise only their marks are painted (paintRowMarks).
       const LIVE_TICK_MS = 1000;
       let liveTickId = null;
       function liveTickWanted() {
@@ -24358,6 +24381,7 @@
         for (const cwd of viewFolders()) {
           // A folder whose listing was never read has no rows to mark.
           if (!folderRows.has(cwd) || liveReadsInFlight.has(cwd)) continue;
+          if (liveStateRefused.has(cwd)) continue; // #255 R8: until the 30 s read
           const seq = ++liveSeqNext;
           void readLiveStates(cwd, false).then((live) =>
             liveTickLanded(cwd, seq, live),
