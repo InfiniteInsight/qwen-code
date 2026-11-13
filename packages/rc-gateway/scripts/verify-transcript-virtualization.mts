@@ -6367,6 +6367,9 @@ PAGE_SCENARIOS.push({
     // curDirPath is what the page sets when it browses into a folder, and the
     // render is skipped unless it matches the cwd being refreshed. Set here so
     // the call below goes all the way through rather than returning early.
+    // After the load's own browse has landed, as serveList waits: one landing
+    // later puts curDirPath back, and every refresh below returns early.
+    await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
     await page.evaluate(`curDirPath = ${JSON.stringify(CWD)}; refreshPastConversations(${JSON.stringify(CWD)})`);
     await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 2`, null, { timeout: 5_000 }).catch(() => undefined);
     const rows = await readRows();
