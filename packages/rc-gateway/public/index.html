@@ -1477,6 +1477,15 @@
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         overflow-wrap: anywhere;
       }
+      #new-session-note {
+        margin: 6px 4px 0;
+        font-size: 13px;
+        line-height: 1.4;
+        color: var(--g1-warn);
+      }
+      #new-session-note[hidden] {
+        display: none;
+      }
       #github-connect a {
         display: inline-flex;
         align-items: center;
@@ -5927,6 +5936,8 @@
             />
             <button id="new-session" type="button">Start here</button>
           </div>
+          <!-- #257: why a typed path was not started while a clone waits. -->
+          <div id="new-session-note" role="status" hidden></div>
           <!-- #257: hidden on a gateway without caps.remoteControl.githubClone. -->
           <div id="gh-clone-entry" hidden>
             <div class="grp">From GitHub</div>
@@ -23953,6 +23964,9 @@
       // past-conversations refresh (renderDirList, above) fires from that one
       // call site. A programmatic `.value =` ("Use this folder") does NOT
       // fire `change`, so this only reacts to real typing.
+      $('new-session-cwd').addEventListener('input', () => {
+        $('new-session-note').hidden = true; // #257: a new path, a new answer
+      });
       $('new-session-cwd').onchange = () => {
         const p = $('new-session-cwd').value.trim();
         if (p) void browseTo(p);
@@ -24071,11 +24085,24 @@
         return '/' + out.join('/');
       }
       const GH_NOT_ASKED = 'This folder is a clone you have not been asked about yet.';
+      const GH_FULL_PATH =
+        'Type the full path, starting with /, while a clone is waiting to be asked about.';
       // Start here in the folder screen, aimed at a pending clone's folder or
       // one inside it: open that clone's question instead, and say why.
       // True when it did, so the caller starts nothing.
       function ghcPendingCovers(path) {
         const p = ghcLoadPending();
+        // A relative path is resolved on the host (the gateway's folder,
+        // usually home), which may well be the clone: refused while one waits.
+        if (p && typeof path === 'string' && path !== '' && !path.startsWith('/')) {
+          // In its own line too: the field's change event browses the
+          // relative path and its failure takes the status line.
+          const note = $('new-session-note');
+          note.textContent = GH_FULL_PATH;
+          note.hidden = false;
+          setStatus(GH_FULL_PATH);
+          return true;
+        }
         const want = ghcNormPath(path);
         const dest = p ? ghcNormPath(p.dest) : '';
         if (!want || !dest || dest === '/') return false;
@@ -24085,6 +24112,8 @@
         ghc.resumeWhy = GH_NOT_ASKED;
         const box = $('gh-run');
         if (!$('gh-run').hidden && box) {
+          const old = $('gh-why');
+          if (old) old.remove();
           const why = document.createElement('p');
           why.className = 'ghc-warn';
           why.id = 'gh-why';

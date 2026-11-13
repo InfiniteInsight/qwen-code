@@ -33908,7 +33908,8 @@ PAGE_SCENARIOS.push({
         await page.fill('#gh-search', 'hubot/hooky');
         await page.fill('#gh-dest', to);
         await page.click('#gh-go');
-        await page.waitForFunction(`document.getElementById('gh-run-line') && document.getElementById('gh-run-line').textContent === 'Receiving objects: 9%'`, null, { timeout: 10_000 });
+        // This clone's own run view: a hidden one from an earlier clone can hold the same line.
+        await page.waitForFunction(`!document.getElementById('gh-run').hidden && ghc.job && ghc.job.dest === ${JSON.stringify(to)} && document.getElementById('gh-run-line') && document.getElementById('gh-run-line').textContent === 'Receiving objects: 9%'`, null, { timeout: 10_000 });
       };
       const askedFor = async (to: string, how: string) => {
         await page.waitForSelector('#gh-ask', { state: 'visible', timeout: 15_000 });
@@ -33947,6 +33948,21 @@ PAGE_SCENARIOS.push({
       await page.fill('#new-session-cwd', `${left}/sub/../src/`);
       await page.click('#new-session');
       await askedFor(left, 'Start here on a typed path inside the clone');
+      // A relative path is resolved on the host (often to home), so while a clone waits it is refused.
+      await page.click('#gh-back');
+      const rel = `${left.split('/').slice(-2).join('/')}`;
+      await page.fill('#new-session-cwd', rel);
+      await page.click('#new-session');
+      await page.waitForTimeout(400);
+      const relSaid = await ghcSay(page, 'new-session-note');
+      expect(sessions.length === 0 && relSaid.includes('Type the full path, starting with /, while a clone is waiting to be asked about.') && !(await page.isVisible('#gh-clone')), `a relative ${rel} sent ${sessions.length} creates and said ${JSON.stringify(relSaid)}`);
+      // Asked twice while the run view is up, the reason is drawn once.
+      holding = true;
+      await page.evaluate(`ghcPendingCovers(${JSON.stringify(left)}); ghcPendingCovers(${JSON.stringify(left)}); undefined`);
+      const whys = (await page.evaluate(`document.querySelectorAll('#gh-why').length`)) as number;
+      expect(whys === 1, `the reason is drawn ${whys} times`);
+      holding = false;
+      await askedFor(left, 'the reason asked twice');
       // A folder that only shares the name's start is not the clone.
       expect(
         (await page.evaluate(`ghcNormPath(${JSON.stringify(`${left}/./a//b/..`)}) === ${JSON.stringify(`${left}/a`)} && ghcPendingCovers(${JSON.stringify(`${left}-other`)}) === false`)) === true,
@@ -33968,7 +33984,7 @@ PAGE_SCENARIOS.push({
       const made2 = sessions.map((x) => JSON.parse(x) as { cwd?: string });
       expect(made2.length === 1 && made2[0]!.cwd === reloaded && (await stored()) === null, `Start sent ${JSON.stringify(made2)} and left ${await stored()}`);
       await page.unroute('**/rc/github/clone/*');
-      return `leaving mid-clone said how to come back and kept only the job's id, repo, folder and account; New conversation in this folder on the clone, and Start here on a typed path inside it, opened its question with the reason and sent no POST /session; reopening Clone from GitHub, after leaving or after a reload mid-clone, showed that clone's question with its findings and sent no POST /session until Start, which sent one with the clone's folder; the hook (PreToolUse, its long command wrapped in full), the MCP server (localtool, node ./mcp/server.js) and an approval setting (tools.approvalMode yolo) each listed under its own heading with the repo and folder named; Start and Cancel are 44px; Cancel sent no POST /session, kept ${dest} and said so; the last account used (gh:hubot) was the default; a connected account shows the organisation line verbatim and a gh login does not`;
+      return `leaving mid-clone said how to come back and kept only the job's id, repo, folder and account; New conversation in this folder on the clone, and Start here on a typed path inside it, opened its question with the reason (drawn once) and sent no POST /session, and a relative typed path was refused in words; reopening Clone from GitHub, after leaving or after a reload mid-clone, showed that clone's question with its findings and sent no POST /session until Start, which sent one with the clone's folder; the hook (PreToolUse, its long command wrapped in full), the MCP server (localtool, node ./mcp/server.js) and an approval setting (tools.approvalMode yolo) each listed under its own heading with the repo and folder named; Start and Cancel are 44px; Cancel sent no POST /session, kept ${dest} and said so; the last account used (gh:hubot) was the default; a connected account shows the organisation line verbatim and a gh login does not`;
     },
   });
 
