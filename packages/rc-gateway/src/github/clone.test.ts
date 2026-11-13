@@ -1130,3 +1130,94 @@ describe('CloneJobs refusals and bounds', () => {
     expect(jobs.status(id)!.lines).toEqual(['one']);
   });
 });
+
+describe('CloneJobs end hook and stopAll (#257 task 6)', () => {
+  it('calls onEnd once with the final status when a job ends', async () => {
+    const f = fakeSpawner((c) => void c.exit(0));
+    const jobs = new CloneJobs({ spawn: f.fn, env: gitEnv() });
+    const ends: CloneJobStatus[] = [];
+    const id = jobIdOf(
+      await jobs.start({
+        ref: REF,
+        dest: freshDest(),
+        token: TOKEN,
+        account: ACCOUNT,
+        onEnd: (s) => ends.push(s),
+      }),
+    );
+    await waitDone(jobs, id);
+    await vi.waitFor(() => expect(ends).toHaveLength(1));
+    expect(ends[0]).toMatchObject({
+      state: 'done',
+      repo: 'acme/widget',
+      account: ACCOUNT,
+    });
+    expect(typeof ends[0]!.finishedAt).toBe('number');
+  });
+
+  it('an onEnd that throws does not break the job', async () => {
+    const f = fakeSpawner((c) => void c.exit(1));
+    const jobs = new CloneJobs({ spawn: f.fn, env: gitEnv() });
+    const id = jobIdOf(
+      await jobs.start({
+        ref: REF,
+        dest: freshDest(),
+        token: TOKEN,
+        account: ACCOUNT,
+        onEnd: () => {
+          throw new Error('audit down');
+        },
+      }),
+    );
+    expect((await waitDone(jobs, id)).state).toBe('failed');
+    // the slot was given back
+    expect(
+      'jobId' in
+        (await jobs.start({
+          ref: REF,
+          dest: freshDest(),
+          token: TOKEN,
+          account: ACCOUNT,
+        })),
+    ).toBe(true);
+  });
+
+  it('stopAll kills a running clone group, ends it failed with gateway stopped and refuses later starts', async () => {
+    const f = fakeSpawner(() => {
+      // never exits on its own
+    }, true);
+    const jobs = new CloneJobs({
+      spawn: f.fn,
+      killGroup: f.killGroup,
+      processGroups: true,
+      env: gitEnv(),
+    });
+    const ends: CloneJobStatus[] = [];
+    const id = jobIdOf(
+      await jobs.start({
+        ref: REF,
+        dest: freshDest(),
+        token: TOKEN,
+        account: ACCOUNT,
+        onEnd: (s) => ends.push(s),
+      }),
+    );
+    await vi.waitFor(() => expect(f.children).toHaveLength(1));
+    jobs.stopAll();
+    const s = await waitDone(jobs, id);
+    expect(s.state).toBe('failed');
+    expect(s.error).toMatch(/^gateway stopped/);
+    expect(f.children[0]!.groupSignals).toContain('SIGKILL');
+    await vi.waitFor(() => expect(ends).toHaveLength(1));
+    expect(ends[0]!.state).toBe('failed');
+    await expect(
+      jobs.start({
+        ref: REF,
+        dest: freshDest(),
+        token: TOKEN,
+        account: ACCOUNT,
+      }),
+    ).rejects.toThrow('the gateway is stopping');
+    expect(f.calls).toHaveLength(1);
+  });
+});

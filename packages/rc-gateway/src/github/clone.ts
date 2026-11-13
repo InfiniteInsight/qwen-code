@@ -331,6 +331,12 @@ class LineBuffer {
 
 interface Job {
   status: CloneJobStatus;
+  /** Set by `stopAll`; the job ends failed `gateway stopped`. */
+  stopRequested?: boolean;
+  /** While git runs: kills its group and ends the wait on it. */
+  stop?: () => void;
+  /** Called once with the final status when the job ends. */
+  onEnd?: (status: CloneJobStatus) => void;
 }
 
 function errText(e: unknown): string {
@@ -362,6 +368,8 @@ export class CloneJobs {
   private readonly active = new Set<string>();
   /** Clones being checked or running, including those not yet named. */
   private activeCount = 0;
+  /** Set by `stopAll`: no clone starts after it. */
+  private stopped = false;
 
   constructor(deps: CloneJobsDeps = {}) {
     this.spawner = deps.spawn ?? defaultSpawner;
@@ -382,19 +390,22 @@ export class CloneJobs {
    * `maxConcurrent` clones are already running, when a running clone's folder is `dest` or
    * contains it or lies inside it, or when `checkDest` refuses `dest`.
    * Throws only on a ref that `repoUrl` refuses or an empty token, which a
-   * route has already ruled out.
+   * route has already ruled out, or after `stopAll`. `onEnd` is called once
+   * with the final status when the job ends (not for a refusal).
    */
   async start(args: {
     ref: RepoRef;
     dest: string;
     token: string;
     account: GitHubAccountId;
+    onEnd?: (status: CloneJobStatus) => void;
   }): Promise<CloneStartResult> {
     const url = this.urlFor(args.ref);
     const { token } = args;
     if (typeof token !== 'string' || token.length === 0) {
       throw new Error('a clone needs a token');
     }
+    if (this.stopped) throw new Error('the gateway is stopping');
     if (this.activeCount >= this.maxConcurrent) {
       return {
         code: 'too_many_clones',
@@ -433,6 +444,10 @@ export class CloneJobs {
       release();
       return { code: check.code, error: check.error };
     }
+    if (this.stopped) {
+      release();
+      throw new Error('the gateway is stopping');
+    }
     const dest = check.path;
     const jobId = randomUUID();
     const job: Job = {
@@ -444,6 +459,7 @@ export class CloneJobs {
         account: args.account,
         startedAt: this.now(),
       },
+      ...(args.onEnd ? { onEnd: args.onEnd } : {}),
     };
     this.jobs.set(jobId, job);
     void this.run(job, url, dest, token)
@@ -456,11 +472,20 @@ export class CloneJobs {
       })
       .finally(() => {
         job.status.finishedAt = this.now();
+        job.stop = undefined;
         release();
+        const final = this.status(jobId);
         this.finished.push(jobId);
         while (this.finished.length > CLONE_MAX_FINISHED) {
           const old = this.finished.shift();
           if (old !== undefined) this.jobs.delete(old);
+        }
+        if (job.onEnd && final) {
+          try {
+            job.onEnd(final);
+          } catch {
+            // An audit hook that throws must not break the job.
+          }
         }
       });
     return { jobId };
@@ -478,6 +503,20 @@ export class CloneJobs {
     };
   }
 
+  /**
+   * For the gateway's shutdown: refuses every later start, kills the process
+   * group of each running clone, and ends each running job failed with
+   * `gateway stopped`. The folders are left where they are.
+   */
+  stopAll(): void {
+    this.stopped = true;
+    for (const job of this.jobs.values()) {
+      if (job.status.state !== 'running') continue;
+      job.stopRequested = true;
+      job.stop?.();
+    }
+  }
+
   private async run(
     job: Job,
     url: string,
@@ -489,6 +528,11 @@ export class CloneJobs {
     if (!program) {
       job.status.state = 'failed';
       job.status.error = 'git was not found on this host.';
+      return;
+    }
+    if (job.stopRequested) {
+      job.status.state = 'failed';
+      job.status.error = 'gateway stopped';
       return;
     }
 
@@ -589,6 +633,7 @@ export class CloneJobs {
       };
       attach(child.stdout, outBuf);
       attach(child.stderr, errBuf);
+      job.stop = () => finish(undefined, true);
       child.on('error', (err: Error) => {
         const code = (err as NodeJS.ErrnoException).code;
         finish(typeof code === 'string' ? code : 'ERR_SPAWN');
@@ -606,8 +651,14 @@ export class CloneJobs {
       });
     });
 
+    job.stop = undefined;
     if (outcome.code !== null) job.status.exitCode = outcome.code;
-    if (outcome.code === 0 && !outcome.timedOut && !outcome.spawnError) {
+    if (
+      outcome.code === 0 &&
+      !outcome.timedOut &&
+      !outcome.spawnError &&
+      !job.stopRequested
+    ) {
       try {
         const findings = await this.inspect(dest);
         job.status.findings = findings;
@@ -624,7 +675,9 @@ export class CloneJobs {
     }
 
     let error: string;
-    if (outcome.spawnError) {
+    if (job.stopRequested) {
+      error = 'gateway stopped';
+    } else if (outcome.spawnError) {
       error = `git could not be started (${outcome.spawnError}).`;
     } else if (outcome.timedOut) {
       error = describeTimeout(this.timeoutMs);
