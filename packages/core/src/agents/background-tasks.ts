@@ -462,6 +462,26 @@ export interface AgentTask extends TaskBase {
   messages?: readonly BackgroundAgentMessage[];
   /** Live AgentCore reference while the sub-agent runtime is active. */
   core?: AgentCore;
+  /**
+   * Present on an entry mirrored from a daemon-hosted session (a
+   * daemon-attached TUI tab). Resume and abandon act on the daemon's own
+   * agent through it: this process's resume service has no sidecar for a
+   * mirrored entry and would refuse.
+   */
+  remoteControl?: AgentTaskRemoteControl;
+}
+
+/** What a remote resume or abandon answered; a refusal names its cause. */
+export type AgentTaskRemoteActionResult =
+  | { ok: true }
+  | { ok: false; code?: string; reason: string };
+
+/** Daemon-backed controls for an agent the TUI only mirrors. */
+export interface AgentTaskRemoteControl {
+  /** Resume the paused agent; `message` is the first continuation instruction. */
+  resume(message?: string): Promise<AgentTaskRemoteActionResult>;
+  /** Abandon the paused agent; on success it leaves the mirror too. */
+  abandon(): Promise<AgentTaskRemoteActionResult>;
 }
 
 /**
