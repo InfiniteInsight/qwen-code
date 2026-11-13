@@ -1048,11 +1048,18 @@ describe('a fork of a sub-session (#255)', () => {
       'session_sources_snapshot',
       'turn_result',
     ];
-    expect(copied.filter((r) => dropped.includes(r['subtype'] as string))).toEqual([]);
+    expect(
+      copied.filter((r) => dropped.includes(r['subtype'] as string)),
+    ).toEqual([]);
     expect(copied.map((r) => r['uuid'])).toEqual(['u0', 'a0', 'u1', 'a1']);
     // Re-rooted: the first kept record is the root, each next one chains
     // onto the one before, so the whole fork is its live branch.
-    expect(copied.map((r) => r['parentUuid'])).toEqual([null, 'u0', 'a0', 'u1']);
+    expect(copied.map((r) => r['parentUuid'])).toEqual([
+      null,
+      'u0',
+      'a0',
+      'u1',
+    ]);
     expect(activeBranch(copied).records).toHaveLength(4);
     expect(audit.calls[0]?.detail).toMatchObject({ copiedCount: 4 });
 
