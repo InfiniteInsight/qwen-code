@@ -33934,6 +33934,24 @@ PAGE_SCENARIOS.push({
       await page.click('#gh-back');
       await page.click('#gh-clone-open');
       await askedFor(left, 'leaving the question');
+      // The folder screen cannot start in the clone either: browsing to it and starting there,
+      // or typing a path inside it and pressing Start here, opens its question and says why.
+      await page.click('#gh-back');
+      await page.evaluate(`browseTo(${JSON.stringify(left)})`);
+      await page.waitForFunction(`document.getElementById('dir-current').textContent === ${JSON.stringify(left)}`, null, { timeout: 10_000 });
+      await page.click('#dir-use');
+      await askedFor(left, 'New conversation in this folder on the clone');
+      const why = await ghcSay(page, 'gh-ask');
+      expect(why.includes('This folder is a clone you have not been asked about yet.'), `the redirected question does not say why: ${JSON.stringify(why.slice(0, 160))}`);
+      await page.click('#gh-back');
+      await page.fill('#new-session-cwd', `${left}/sub/../src/`);
+      await page.click('#new-session');
+      await askedFor(left, 'Start here on a typed path inside the clone');
+      // A folder that only shares the name's start is not the clone.
+      expect(
+        (await page.evaluate(`ghcNormPath(${JSON.stringify(`${left}/./a//b/..`)}) === ${JSON.stringify(`${left}/a`)} && ghcPendingCovers(${JSON.stringify(`${left}-other`)}) === false`)) === true,
+        'the path check does not normalise or is not slash-safe',
+      );
       await page.click('#gh-cancel');
       expect((await stored()) === null, 'Cancel left the clone pending');
       await page.click('#gh-again');
@@ -33950,7 +33968,7 @@ PAGE_SCENARIOS.push({
       const made2 = sessions.map((x) => JSON.parse(x) as { cwd?: string });
       expect(made2.length === 1 && made2[0]!.cwd === reloaded && (await stored()) === null, `Start sent ${JSON.stringify(made2)} and left ${await stored()}`);
       await page.unroute('**/rc/github/clone/*');
-      return `leaving mid-clone said how to come back and kept only the job's id, repo, folder and account; reopening Clone from GitHub, after leaving or after a reload mid-clone, showed that clone's question with its findings and sent no POST /session until Start, which sent one with the clone's folder; the hook (PreToolUse, its long command wrapped in full), the MCP server (localtool, node ./mcp/server.js) and an approval setting (tools.approvalMode yolo) each listed under its own heading with the repo and folder named; Start and Cancel are 44px; Cancel sent no POST /session, kept ${dest} and said so; the last account used (gh:hubot) was the default; a connected account shows the organisation line verbatim and a gh login does not`;
+      return `leaving mid-clone said how to come back and kept only the job's id, repo, folder and account; New conversation in this folder on the clone, and Start here on a typed path inside it, opened its question with the reason and sent no POST /session; reopening Clone from GitHub, after leaving or after a reload mid-clone, showed that clone's question with its findings and sent no POST /session until Start, which sent one with the clone's folder; the hook (PreToolUse, its long command wrapped in full), the MCP server (localtool, node ./mcp/server.js) and an approval setting (tools.approvalMode yolo) each listed under its own heading with the repo and folder named; Start and Cancel are 44px; Cancel sent no POST /session, kept ${dest} and said so; the last account used (gh:hubot) was the default; a connected account shows the organisation line verbatim and a gh login does not`;
     },
   });
 

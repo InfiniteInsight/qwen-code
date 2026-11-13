@@ -24008,6 +24008,7 @@
         destSeq: 0,
         picking: false,
         pending: null, // { jobId, repo, dest, account }: see ghcSavePending
+        resumeWhy: '', // why the screen opened on its own (Start here on a pending clone)
       };
       // The clone the owner has not answered yet: kept from its 202 until
       // Start or Cancel on its question, or until its failure was seen and
@@ -24056,6 +24057,41 @@
           account: typeof p.account === 'string' ? p.account : '',
         };
         return ghc.pending;
+      }
+      // An absolute path with `.`, `..`, repeated and trailing slashes
+      // resolved, or '' for anything else.
+      function ghcNormPath(p) {
+        if (typeof p !== 'string' || !p.startsWith('/')) return '';
+        const out = [];
+        for (const part of p.split('/')) {
+          if (part === '' || part === '.') continue;
+          if (part === '..') out.pop();
+          else out.push(part);
+        }
+        return '/' + out.join('/');
+      }
+      const GH_NOT_ASKED = 'This folder is a clone you have not been asked about yet.';
+      // Start here in the folder screen, aimed at a pending clone's folder or
+      // one inside it: open that clone's question instead, and say why.
+      // True when it did, so the caller starts nothing.
+      function ghcPendingCovers(path) {
+        const p = ghcLoadPending();
+        const want = ghcNormPath(path);
+        const dest = p ? ghcNormPath(p.dest) : '';
+        if (!want || !dest || dest === '/') return false;
+        if (want !== dest && !want.startsWith(dest + '/')) return false;
+        setStatus(GH_NOT_ASKED);
+        setGhCloneOpen(true);
+        ghc.resumeWhy = GH_NOT_ASKED;
+        const box = $('gh-run');
+        if (!$('gh-run').hidden && box) {
+          const why = document.createElement('p');
+          why.className = 'ghc-warn';
+          why.id = 'gh-why';
+          why.textContent = GH_NOT_ASKED;
+          box.prepend(why);
+        }
+        return true;
       }
       // What leaving the screen says about a clone not yet answered.
       const GH_COME_BACK =
@@ -24126,6 +24162,7 @@
         }
       }
       function ghcReset() {
+        ghc.resumeWhy = '';
         ghc.gen++;
         clearTimeout(ghc.searchTimer);
         clearTimeout(ghc.pollTimer);
@@ -24545,6 +24582,7 @@
         clearTimeout(ghc.pollTimer);
         const box = $('gh-end');
         box.textContent = '';
+        if (ghc.resumeWhy) lines = [['ghc-warn', ghc.resumeWhy], ...lines];
         for (const [cls, text] of lines) {
           const p = document.createElement('p');
           if (cls) p.className = cls;
@@ -24719,6 +24757,7 @@
           el.textContent = text;
           box.append(el);
         };
+        if (ghc.resumeWhy) p(ghc.resumeWhy, 'ghc-warn');
         p(repo + ' was cloned to ' + dest + '.');
         p(
           'It brings settings that can run commands, send data or loosen approval on the host. They take effect when a conversation starts in this folder. Nothing has started yet.',
@@ -27211,6 +27250,9 @@
       // workspace. Needs a write/owner token.
       $('new-session').onclick = async () => {
         if (!token()) return setStatus('pair first');
+        // #257: a folder that is, or is inside, a clone not yet asked about
+        // goes to that clone's question instead of starting.
+        if (ghcPendingCovers($('new-session-cwd').value.trim())) return;
         // #172: a switch asked for, as a resume is, so a row tapped while the
         // create is in flight wins over the create's late answer.
         noteConversationSwitch();
