@@ -33901,11 +33901,45 @@ PAGE_SCENARIOS.push({
       await page.waitForFunction(`document.getElementById('gh-clone').hidden`, null, { timeout: 15_000 });
       const made = sessions.map((s) => JSON.parse(s) as { cwd?: string });
       expect(made.length === 1 && made[0]!.cwd === dest, `the create POST was ${JSON.stringify(made)}`);
+      // The ask rule is hasFindings, and only a plain false with no error starts at once. A done
+      // job that does not say, one whose inspection failed (hasFindings true plus an error) and
+      // one that says false but carries an error are each asked about, with the error shown and
+      // no create sent. The answers are served by the page's route; the clones behind them are real.
+      let fake: Record<string, unknown> = {};
+      await page.route('**/rc/github/clone/*', (route) =>
+        route.request().method() === 'GET' ? route.fulfill({ json: fake }) : route.continue(),
+      );
+      await page.evaluate('setGhCloneOpen(true)');
+      const variants: Array<{ label: string; extra: Record<string, unknown>; shows: string }> = [
+        { label: 'no hasFindings', extra: {}, shows: 'did not list' },
+        { label: 'hasFindings true with an error', extra: { hasFindings: true, error: 'The clone finished but its settings could not be inspected: boom one' }, shows: 'boom one' },
+        { label: 'hasFindings false with an error', extra: { hasFindings: false, error: 'The clone finished but its settings could not be inspected: boom two' }, shows: 'boom two' },
+      ];
+      let n = 0;
+      for (const v of variants) {
+        n++;
+        await page.waitForFunction(`document.getElementById('gh-account').options.length === 1`, null, { timeout: 10_000 });
+        const vdest = join(ghcProjects(), `badsettings-v${n}`);
+        rmSync(vdest, { recursive: true, force: true });
+        fake = { state: 'done', lines: [], repo: 'octo-two/badsettings', dest: vdest, account: 'gh:octo-two', startedAt: Date.now(), ...v.extra };
+        await page.fill('#gh-search', 'octo-two/badsettings');
+        await page.fill('#gh-dest', vdest);
+        const before = sessions.length;
+        await page.click('#gh-go');
+        await page.waitForSelector('#gh-ask', { state: 'visible', timeout: 15_000 });
+        await page.waitForTimeout(500);
+        const asked = await ghcSay(page, 'gh-ask');
+        expect(sessions.length === before, `a done job with ${v.label} started a conversation`);
+        expect(asked.includes(v.shows) && (await page.isVisible('#gh-start')) && (await page.isVisible('#gh-cancel')), `a done job with ${v.label} asks ${JSON.stringify(asked)}`);
+        await page.click('#gh-cancel');
+        await page.click('#gh-again');
+      }
+      await page.unroute('**/rc/github/clone/*');
       // A category the page has no heading for still shows (listed by its key).
       await page.evaluate(`(() => { setGhCloneOpen(true); ghcShowAsk({ repo: 'o/n', dest: '/x/n', hasFindings: true, findings: { file: true, hooks: [], newThing: [{ key: 'a.b', value: 'c' }, 'bare string'] } }); })()`);
       const generic = await ghcFindings(page);
       expect(generic.length === 1 && generic[0]!.heading === 'newThing' && generic[0]!.items.length === 2 && generic[0]!.items[0]!.name === 'a.b' && generic[0]!.items[0]!.value === 'c', `an unknown category reads ${JSON.stringify(generic)}`);
-      return `an unreadable .qwen/settings.json said ".qwen/settings.json could not be read: ${m![1]!.trim().slice(0, 60)}", asked with Start and Cancel, and started nothing until Start; a stored account the gateway no longer lists fell back to the first; a pasted github.com link was taken as the repo with no search; a category the page has no heading for is listed under its key`;
+      return `an unreadable .qwen/settings.json said ".qwen/settings.json could not be read: ${m![1]!.trim().slice(0, 60)}", asked with Start and Cancel, and started nothing until Start; a stored account the gateway no longer lists fell back to the first; a pasted github.com link was taken as the repo with no search; a done job with no hasFindings, with hasFindings true plus an error, and with hasFindings false plus an error each asked (error shown) and started nothing; a category the page has no heading for is listed under its key`;
     },
   });
 

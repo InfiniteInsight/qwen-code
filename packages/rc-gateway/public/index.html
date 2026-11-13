@@ -24440,7 +24440,9 @@
       // git is done. Nothing to ask about: start. Anything else (findings, a
       // failed inspection, or an answer that does not say): ask first.
       function ghcDone(st) {
-        if (st.hasFindings === false) {
+        // Only a plain "nothing to ask" starts at once: an error (the
+        // inspection failed) asks too, whatever hasFindings says.
+        if (st.hasFindings === false && !st.error) {
           void ghcStartIn(st.repo, st.dest);
           return;
         }
