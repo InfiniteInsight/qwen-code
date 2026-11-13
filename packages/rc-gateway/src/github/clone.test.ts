@@ -285,6 +285,8 @@ describe('CloneJobs with real git', () => {
       'http.followRedirects=false',
       '-c',
       'core.askPass=',
+      '-c',
+      'http.sslVerify=true',
       'clone',
       '--progress',
       '--',
@@ -870,6 +872,7 @@ describe('CloneJobs environment', () => {
         GIT_CONFIG_VALUE_0: 'store',
         GIT_ASKPASS: '/x/askpass',
         SSH_ASKPASS: '/x/ssh-askpass',
+        GIT_SSL_NO_VERIFY: '1',
         KEEP_ME: 'yes',
       },
     });
@@ -900,6 +903,7 @@ describe('CloneJobs environment', () => {
             'GIT_CONFIG_COUNT',
             'GIT_ASKPASS',
             'SSH_ASKPASS',
+            'GIT_SSL_NO_VERIFY',
           ].includes(k),
       ),
     ).toEqual([]);

@@ -63,7 +63,9 @@ const TOKEN_HELPER =
  * `insteadOf` rewrite to another host gets no token; redirects are refused
  * outright as well. An empty `core.askPass` stops git from running the
  * owner's askpass (or `SSH_ASKPASS`) when no helper answers, which could
- * otherwise hold the clone on a prompt nobody sees.
+ * otherwise hold the clone on a prompt nobody sees. `http.sslVerify=true`
+ * overrides an owner's config that turns certificate checks off, since the
+ * token is sent over that connection.
  */
 export const CLONE_GIT_CONFIG_ARGS: readonly string[] = [
   '-c',
@@ -74,6 +76,8 @@ export const CLONE_GIT_CONFIG_ARGS: readonly string[] = [
   'http.followRedirects=false',
   '-c',
   'core.askPass=',
+  '-c',
+  'http.sslVerify=true',
 ];
 
 /** The full git argv after the program name. */
@@ -83,8 +87,10 @@ export function cloneArgs(url: string, dest: string): string[] {
 
 /**
  * Variables removed from the child's environment: trace output prints the
- * Basic auth header (base64, which `scrubSecrets` cannot see), and the rest
- * would point git at another repository or inject config.
+ * Basic auth header (base64, which `scrubSecrets` cannot see); askpass
+ * programs would prompt; `GIT_SSL_NO_VERIFY` would send the token over an
+ * unchecked connection; the rest would point git at another repository or
+ * inject config.
  */
 function droppedEnvKey(key: string): boolean {
   return (
@@ -97,6 +103,7 @@ function droppedEnvKey(key: string): boolean {
     key === 'GIT_CONFIG_COUNT' ||
     key === 'GIT_ASKPASS' ||
     key === 'SSH_ASKPASS' ||
+    key === 'GIT_SSL_NO_VERIFY' ||
     key.startsWith('GIT_CONFIG_KEY_') ||
     key.startsWith('GIT_CONFIG_VALUE_')
   );
