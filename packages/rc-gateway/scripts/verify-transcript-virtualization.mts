@@ -32648,9 +32648,18 @@ PAGE_SCENARIOS.push({
     run: async ({ page }) => {
       const asked = agAsked(page);
       const thread = (id: string, kind: LdKind) => ({ ...ldEntry(id, kind), parentSessionId: LD(1) });
+      // LD(4) is a thread by its transcript alone (spawnedBy): an older
+      // daemon's live-state names no parent. Not open at first.
       const ctl = await ldServe(
         page,
-        { [LD_CWD]: [ldRow(LD(1), 'p255 parent'), ldRow(LD(2), 'p255 thread one'), ldRow(LD(3), 'p255 thread two')] },
+        {
+          [LD_CWD]: [
+            ldRow(LD(1), 'p255 parent'),
+            ldRow(LD(2), 'p255 thread one'),
+            ldRow(LD(3), 'p255 thread two'),
+            Object.assign(ldRow(LD(4), 'p255 thread by transcript'), { spawnedBy: LD(1) }),
+          ],
+        },
         { [LD_CWD]: [ldEntry(LD(1), 'idle'), thread(LD(2), 'run'), thread(LD(3), 'run')] },
         { pausePoll: true },
       );
@@ -32669,8 +32678,16 @@ PAGE_SCENARIOS.push({
       expect(painted, 'the row was rebuilt to change its chip, rather than painted in place');
       ctl.live.set(LD_CWD, [ldEntry(LD(1), 'idle'), thread(LD(2), 'idle'), thread(LD(3), 'idle')]);
       expect(await agChipIs(page, LD(1), null, 4_000), `the chip stayed after both threads finished: ${JSON.stringify(await agChip(page))}`);
+      // R7: the transcript's thread opens and works on a daemon whose
+      // live-state names no parent: counted by its row's spawnedBy.
+      const idleThreads = [ldEntry(LD(1), 'idle'), thread(LD(2), 'idle'), thread(LD(3), 'idle')];
+      ctl.live.set(LD_CWD, [...idleThreads, ldEntry(LD(4), 'run')]);
+      expect(await agChipIs(page, LD(1), '1 agent', 4_000), `a working thread known by its spawnedBy alone is not counted: ${JSON.stringify(await agChip(page))}`);
+      // Open and idle, it is not counted.
+      ctl.live.set(LD_CWD, [...idleThreads, ldEntry(LD(4), 'idle')]);
+      expect(await agChipIs(page, LD(1), null, 4_000), `an idle thread known by its spawnedBy is still counted: ${JSON.stringify(await agChip(page))}`);
       expect(!asked.some((a) => a.id === LD(1)), `the idle parent's roster was read: ${JSON.stringify(asked)}`);
-      return 'an idle parent with two working threads says "2 agents" (title "2 threads"), "1 agent" when one finishes, none when both do, painted in place; its roster never read';
+      return 'an idle parent with two working threads says "2 agents" (title "2 threads"), "1 agent" when one finishes, none when both do, painted in place; a working thread known by its spawnedBy alone counts "1 agent", idle none; its roster never read';
     },
   });
 

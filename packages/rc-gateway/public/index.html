@@ -24156,13 +24156,14 @@
       }
       // The threads of `s` that are working now: rows anywhere in the list
       // whose live-state names `s` as their parent and whose dot is not idle.
-      // R6: a fork is never one.
+      // R7: a live row whose live-state names no parent (an older daemon) is
+      // one by its transcript's spawnedBy. R6: a fork is never one.
       function rowThreadCount(s) {
         let n = 0;
         for (const x of pastConvos) {
           const st = x && x.liveState;
           if (!st || x.parentSessionId) continue;
-          if (st.parentSessionId !== s.sessionId) continue;
+          if ((st.parentSessionId || x.spawnedBy) !== s.sessionId) continue;
           if (liveDotState(st) !== 'idle') n += 1;
         }
         return n;
