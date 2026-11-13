@@ -4,9 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as v8 from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import { RequestError } from '@agentclientprotocol/sdk';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { AcpSessionBridge } from './bridgeTypes.js';
 import { makeBridge, makeChannel, WS_A } from './internal/testUtils.js';
+import { _sessionEntryForTest } from './session-control-plane.js';
 import {
   BridgeChannelClosedError,
   BridgeTimeoutError,
@@ -155,6 +159,27 @@ describe('session requests racing the transport-closed rejection', () => {
     vi.restoreAllMocks();
   });
 
+  const waiterCount = (bridge: AcpSessionBridge, sessionId: string) =>
+    _sessionEntryForTest(bridge, sessionId)?.transportClosedFanout?.waiters
+      .size;
+
+  /** Collects garbage until every target is gone; returns how many survive. */
+  async function survivorsAfterGc(refs: Array<WeakRef<object>>) {
+    v8.setFlagsFromString('--expose_gc');
+    const gc = runInNewContext('gc') as () => void;
+    // deref() keeps its target alive until the current job ends, so collect
+    // in a job that has not dereferenced anything.
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
+    let alive = refs.length;
+    for (let attempt = 0; attempt < 10 && alive > 0; attempt++) {
+      await tick();
+      gc();
+      await tick();
+      alive = refs.filter((ref) => ref.deref() !== undefined).length;
+    }
+    return alive;
+  }
+
   /** Resolves once the fake agent has received `count` calls of `method`. */
   function agentCalls(
     handle: ReturnType<typeof makeChannel>,
@@ -269,6 +294,119 @@ describe('session requests racing the transport-closed rejection', () => {
       expect(outcome).toMatchObject({
         message: `agent channel closed mid-request (session ${session.sessionId})`,
       });
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('leaves no waiter behind after 1,000 settled requests on a live session', async () => {
+    let calls = 0;
+    let hold = false;
+    let release!: () => void;
+    const held = new Promise<Record<string, unknown>>((resolve) => {
+      release = () => resolve({ held: true });
+    });
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        if (method !== CONTEXT) return {};
+        if (hold) return held;
+        calls += 1;
+        if (calls % 2 === 0) {
+          throw RequestError.internalError(undefined, 'every second call');
+        }
+        return { v: 1, call: calls };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const id = session.sessionId;
+      const outcomes = await Promise.allSettled(
+        Array.from({ length: 1000 }, () => bridge.getSessionContextStatus(id)),
+      );
+      expect(outcomes.filter((o) => o.status === 'fulfilled')).toHaveLength(
+        500,
+      );
+      expect(outcomes.filter((o) => o.status === 'rejected')).toHaveLength(500);
+      expect(waiterCount(bridge, id)).toBe(0);
+
+      // The count is live, not vacuously zero: a pending request is in it.
+      hold = true;
+      const pending = bridge.getSessionContextStatus(id);
+      expect(waiterCount(bridge, id)).toBe(1);
+      release();
+      await expect(pending).resolves.toEqual({ held: true });
+      expect(waiterCount(bridge, id)).toBe(0);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('lets the replies of settled requests be collected while the session lives', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method, params) =>
+        method === CONTEXT
+          ? { v: 1, sessionId: params['sessionId'], body: 'x'.repeat(4096) }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    // Only the WeakRef leaves this frame, so the test itself holds no reply.
+    const replyRef = async (
+      target: AcpSessionBridge,
+      sessionId: string,
+    ): Promise<WeakRef<object>> =>
+      new WeakRef(
+        (await target.getSessionContextStatus(sessionId)) as unknown as object,
+      );
+
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const refs: Array<WeakRef<object>> = [];
+      for (let i = 0; i < 200; i++) {
+        refs.push(await replyRef(bridge, session.sessionId));
+      }
+      // The ACP SDK's read loop holds the most recent message until the next
+      // one arrives; one more request moves that hold off the tracked replies.
+      await bridge.getSessionContextStatus(session.sessionId);
+      expect(await survivorsAfterGc(refs)).toBe(0);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('does not keep a closed session reachable while its channel lives', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionClose
+          ? { closed: true }
+          : {},
+    });
+    const channelFactory = vi.fn(async () => handle.channel);
+    const bridge = makeBridge({ channelFactory });
+    // Only the WeakRef leaves this frame, so the test itself holds no entry.
+    const entryRef = (sessionId: string): WeakRef<object> =>
+      new WeakRef(_sessionEntryForTest(bridge, sessionId)!);
+
+    try {
+      const anchor = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const closing = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      expect(closing.sessionId).not.toBe(anchor.sessionId);
+      // Both sessions share the one channel, which outlives the closed one.
+      expect(channelFactory).toHaveBeenCalledOnce();
+      // Arm the closing session's fan-out on the shared channel.
+      await bridge.getSessionContextStatus(closing.sessionId);
+      const ref = entryRef(closing.sessionId);
+      await bridge.closeSession(closing.sessionId);
+      // Move the SDK read loop's last-message hold off the closed session.
+      await bridge.getSessionContextStatus(anchor.sessionId);
+      expect(bridge.sessionCount).toBe(1);
+      expect(handle.killed).toBe(false);
+
+      expect(await survivorsAfterGc([ref])).toBe(0);
     } finally {
       await bridge.shutdown();
     }
