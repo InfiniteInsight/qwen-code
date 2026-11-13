@@ -3118,6 +3118,62 @@ describe('BackgroundAgentResumeService', () => {
       expect(registry.get(agentId)?.status).toBe('paused');
     });
   });
+
+  // #259: an abandoned agent leaves every list. The registry drops the entry
+  // and the sidecar records `abandonedAt` for the rosters that read sidecars;
+  // both files stay on disk.
+  describe('abandonBackgroundAgent', () => {
+    it('drops the entry and marks the sidecar abandoned, keeping both files', () => {
+      const sessionId = 'session-abandon';
+      const agentId = 'agent-abandon';
+      const { metaPath, outputFile } = seedPaused(
+        sessionId,
+        agentId,
+        'Abandon me',
+      );
+      const { service } = createService();
+
+      expect(service.abandonBackgroundAgent(agentId)).toBe(true);
+
+      expect(registry.get(agentId)).toBeUndefined();
+      expect(registry.getAll().map((entry) => entry.agentId)).not.toContain(
+        agentId,
+      );
+      const meta = readAgentMeta(metaPath);
+      expect(meta?.status).toBe('cancelled');
+      expect(typeof meta?.abandonedAt).toBe('string');
+      expect(Number.isFinite(Date.parse(meta!.abandonedAt!))).toBe(true);
+      expect(fs.existsSync(metaPath)).toBe(true);
+      expect(fs.existsSync(outputFile)).toBe(true);
+    });
+
+    it('does not restore an abandoned agent when the session is restored', async () => {
+      const sessionId = 'session-abandon-restore';
+      const agentId = 'agent-abandon-restore';
+      seedPaused(sessionId, agentId, 'Abandon then restore');
+      const { service } = createService();
+      service.abandonBackgroundAgent(agentId);
+      registry = new BackgroundTaskRegistry();
+      const { service: restored } = createService();
+
+      await expect(
+        restored.loadPausedBackgroundAgents(sessionId),
+      ).resolves.toEqual([]);
+    });
+
+    it('refuses an agent that is not paused', () => {
+      register('agent-abandon-running', 'Running', {
+        status: 'running',
+        outputFile: path.join(tempDir, 'abandon-running.jsonl'),
+      });
+      const { service } = createService();
+
+      expect(service.abandonBackgroundAgent('agent-abandon-running')).toBe(
+        false,
+      );
+      expect(registry.get('agent-abandon-running')?.status).toBe('running');
+    });
+  });
 });
 
 function readMetaStatus(metaPath: string): string | undefined {

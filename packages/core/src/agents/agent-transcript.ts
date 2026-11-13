@@ -147,6 +147,12 @@ export interface AgentMeta {
   workspaceIsolation?: 'worktree';
   /** ISO 8601 timestamp of the latest lifecycle transition. */
   lastUpdatedAt?: string;
+  /**
+   * ISO 8601 time the user abandoned this paused agent instead of resuming
+   * it. Agent rosters leave an abandoned agent out; the sidecar and the
+   * transcript stay on disk.
+   */
+  abandonedAt?: string;
   /** Resolved approval mode used when the agent was launched. */
   resolvedApprovalMode?: string;
   /**

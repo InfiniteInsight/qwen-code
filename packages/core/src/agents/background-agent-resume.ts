@@ -1960,6 +1960,11 @@ export class BackgroundAgentResumeService {
     );
   }
 
+  /**
+   * Discard a paused agent the user chose not to resume. The sidecar records
+   * `abandonedAt` so rosters that read sidecars leave the agent out, and the
+   * registry drops the entry; the sidecar and transcript stay on disk.
+   */
   abandonBackgroundAgent(agentId: string): boolean {
     const registry = this.config.getBackgroundTaskRegistry();
     const entry = registry.get(agentId);
@@ -1967,10 +1972,12 @@ export class BackgroundAgentResumeService {
       return false;
     }
 
+    const now = new Date().toISOString();
     patchAgentMeta(entry.metaPath, {
       status: 'cancelled',
-      lastUpdatedAt: new Date().toISOString(),
+      lastUpdatedAt: now,
       lastError: undefined,
+      abandonedAt: now,
     });
     registry.abandon(agentId);
     return true;
