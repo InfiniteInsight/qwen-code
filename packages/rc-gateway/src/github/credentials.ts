@@ -23,7 +23,7 @@
 
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, chmod, lstat, mkdir, stat } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, readFile, stat } from 'node:fs/promises';
 import { delimiter, dirname, join } from 'node:path';
 import { readJsonStore, writeFileAtomic } from '../atomicWrite.js';
 import { NON_OWNER_WRITE_MASK } from '../policy/permissions.js';
@@ -163,38 +163,70 @@ async function runSafe(
 export interface GhStatusEntry {
   login: string;
   scopes?: string[];
-  /** Set for a `Failed to log in` entry: gh holds a token it cannot use. */
+  /**
+   * Set when gh could not confirm the login: a `Failed to log in` entry (the
+   * cause is gh's own reason line, scrubbed) or a `Timeout trying to log in`
+   * one. A timed-out login usually still has a usable token.
+   */
   error?: string;
 }
 
 const LOGGED_IN = /Logged in to github\.com account (\S+)/;
 const FAILED = /Failed to log in to github\.com account (\S+)/;
+const TIMED_OUT = /Timeout trying to log in to github\.com account (\S+)/;
 const SCOPES = /^\s*-\s*Token scopes:\s*(.*)$/;
+const DETAIL = /^\s*-\s*(.+)$/;
+/** Detail lines that describe the account rather than say why it failed. */
+const NOT_A_CAUSE =
+  /^(?:Active account|Git operations protocol|Token|Token scopes):|^To /;
+
+const FAILED_NO_CAUSE = 'gh: could not log in to this login';
+const TIMED_OUT_CAUSE = 'gh: timed out checking this login';
 
 /**
- * Parse gh 2.74's text status. Each account starts with a `Logged in to` or
- * `Failed to log in to` line; a `Token scopes:` line belongs to the account
- * above it. A login that is not a valid GitHub login is skipped, so nothing
- * odd in gh's output can become an argv later.
+ * Parse gh 2.74's text status. Each account starts with a `Logged in to`,
+ * `Failed to log in to` or `Timeout trying to log in to` line; the `- ...`
+ * lines below belong to it. A logged-in entry takes its `Token scopes:`; a
+ * failed one takes its first reason line (`- The token in ... is invalid.`)
+ * as the cause, or neutral wording when gh gave none, so no cause is claimed
+ * that gh did not print. A login that is not a valid GitHub login is skipped,
+ * so nothing odd in gh's output can become an argv later.
  */
 export function parseGhAuthStatus(text: string): GhStatusEntry[] {
   const out: GhStatusEntry[] = [];
   let current: GhStatusEntry | undefined;
+  let awaitingCause = false;
   for (const line of text.split(/\r?\n/)) {
     const ok = LOGGED_IN.exec(line);
     const failed = ok ? null : FAILED.exec(line);
-    const m = ok ?? failed;
+    const timedOut = ok || failed ? null : TIMED_OUT.exec(line);
+    const m = ok ?? failed ?? timedOut;
     if (m) {
       current = undefined;
+      awaitingCause = false;
       const login = m[1]!;
       if (!isLogin(login)) continue;
       if (out.some((e) => e.login.toLowerCase() === login.toLowerCase())) {
         continue;
       }
-      current = failed
-        ? { login, error: 'gh: the token for this login is invalid' }
-        : { login };
+      if (failed) {
+        current = { login, error: FAILED_NO_CAUSE };
+        awaitingCause = true;
+      } else if (timedOut) {
+        current = { login, error: TIMED_OUT_CAUSE };
+      } else {
+        current = { login };
+      }
       out.push(current);
+      continue;
+    }
+    if (current && awaitingCause) {
+      const d = DETAIL.exec(line);
+      if (d && !NOT_A_CAUSE.test(d[1]!.trim())) {
+        const cause = safeLine(d[1]!, []);
+        if (cause) current.error = `gh: ${cause}`;
+        awaitingCause = false;
+      }
       continue;
     }
     const s = current && !current.error ? SCOPES.exec(line) : null;
@@ -213,7 +245,8 @@ export function parseGhAuthStatus(text: string): GhStatusEntry[] {
  * (gh 2.74 has no `--json`). Both stdout and stderr are read: gh has printed
  * the status to either. gh exits 1 when any login is failing, so a non-zero
  * exit with parsable accounts is not an error. `logins` lists only the
- * working ones; `accounts` also carries scopes and failed logins.
+ * `Logged in to` ones; `accounts` also carries scopes and the failed and
+ * timed-out logins, each with its cause.
  */
 export async function listGhLogins(
   run: GhRunner,
@@ -250,10 +283,12 @@ export async function listGhLogins(
 /**
  * One account's token, from `gh auth token --hostname github.com --user
  * <login>`. Does not switch gh's active account. The login is checked first,
- * so it can never be read as a flag. A failure throws
- * {@link GitHubCredentialError} whose message holds the exit code and at most
- * one scrubbed stderr line, never stdout.
+ * so it can never be read as a flag. A login gh holds no token for throws
+ * `account_not_found`. Any other failure throws `gh_failed`, whose message
+ * holds the exit code and at most one scrubbed stderr line, never stdout.
  */
+const NO_TOKEN_FOR_USER = /no oauth token found for github\.com/i;
+
 export async function ghToken(login: string, run: GhRunner): Promise<string> {
   assertLogin(login);
   const out = await runSafe(
@@ -266,8 +301,12 @@ export async function ghToken(login: string, run: GhRunner): Promise<string> {
   }
   const missing = spawnError(out);
   if (missing) throw new GitHubCredentialError('gh_failed', missing);
-  const secrets = [out.stdout, ...out.stdout.split(/\s+/)];
+  const secrets = [out.stdout, out.stdout.trim()];
   if (out.exitCode !== 0) {
+    // gh's answer for a login it holds no token for.
+    if (NO_TOKEN_FOR_USER.test(out.stderr)) {
+      throw new GitHubCredentialError('account_not_found');
+    }
     const why = safeLine(out.stderr, secrets);
     throw new GitHubCredentialError(
       'gh_failed',
@@ -468,7 +507,8 @@ export class OAuthTokenStore {
     if ((st.mode & NON_OWNER_WRITE_MASK) !== 0) {
       throw new OAuthTokenStoreError(
         `github oauth store: ${path} is group/world-writable (mode 0${octal}); ` +
-          `its tokens cannot be trusted. Remove it, or run: chmod 600 ${path}`,
+          `its tokens cannot be trusted, and tightening it would not remove a planted one. ` +
+          `Remove ${path} and connect the accounts again`,
       );
     }
     if ((st.mode & 0o077) !== 0) {
@@ -478,7 +518,26 @@ export class OAuthTokenStore {
           `its tokens may have been read, so revoke them on GitHub and connect again`,
       );
     }
-    const raw = await readJsonStore(path);
+    // A file that is there but unreadable (EACCES, EIO) is refused, not
+    // opened empty: the next put would replace the tokens it holds.
+    let text: string;
+    try {
+      text = await readFile(path, 'utf8');
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return store;
+      throw new OAuthTokenStoreError(
+        `github oauth store: cannot read ${path}: ${code ?? 'error'}`,
+      );
+    }
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text) as unknown;
+    } catch {
+      // Not JSON: readJsonStore keeps it aside as <file>.corrupt-<ms> and
+      // logs that, so starting empty does not destroy the evidence.
+      raw = await readJsonStore(path);
+    }
     const entries =
       raw && typeof raw === 'object' && !Array.isArray(raw)
         ? (raw as { accounts?: unknown }).accounts
@@ -580,21 +639,37 @@ export class OAuthTokenStore {
   }
 }
 
-/** Refuse a store directory others can write: they could swap the file. */
+/**
+ * Refuse a store directory that is a symlink, is not a directory, belongs to
+ * another user or is writable by others: any of those lets someone else swap
+ * the file.
+ */
 async function checkDir(dir: string): Promise<void> {
   let st;
   try {
-    st = await stat(dir);
+    st = await lstat(dir);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
     throw new OAuthTokenStoreError(
       `github oauth store: cannot stat ${dir}: ${(err as NodeJS.ErrnoException).code ?? 'error'}`,
     );
   }
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    throw new OAuthTokenStoreError(
+      `github oauth store: ${dir} is not a directory (a symlink is refused)`,
+    );
+  }
+  const uid = process.getuid?.();
+  if (uid !== undefined && st.uid !== uid) {
+    throw new OAuthTokenStoreError(
+      `github oauth store: directory ${dir} is owned by uid ${st.uid}, not ${uid}`,
+    );
+  }
   if ((st.mode & NON_OWNER_WRITE_MASK) !== 0) {
     const octal = (st.mode & 0o777).toString(8).padStart(3, '0');
     throw new OAuthTokenStoreError(
-      `github oauth store: directory ${dir} is group/world-writable (mode 0${octal}); run: chmod 700 ${dir}`,
+      `github oauth store: directory ${dir} is group/world-writable (mode 0${octal}); ` +
+        `run chmod 700 ${dir}, and if others could have written there, remove the store file and connect again`,
     );
   }
 }
@@ -662,7 +737,8 @@ export class GitHubCredentials {
   /**
    * The token for one account. An id that is malformed, names a crafted
    * login, or names a login neither source holds throws `account_not_found`.
-   * A gh login is checked against gh's current list before its token is read.
+   * A gh login gh holds no token for is `account_not_found` too; any other
+   * gh failure is `gh_failed` with gh's scrubbed reason.
    */
   async token(id: GitHubAccountId): Promise<string> {
     const notFound = () => new GitHubCredentialError('account_not_found');
@@ -677,14 +753,10 @@ export class GitHubCredentials {
       return t;
     }
     if (source === 'gh') {
-      const gh = await listGhLogins(this.run);
-      const held = gh.accounts.find(
-        (a) => a.login.toLowerCase() === login.toLowerCase(),
-      );
-      if (!held) throw notFound();
-      // Listed but failing: say so instead of handing on a dead token.
-      if (held.error) throw new GitHubCredentialError('gh_failed', held.error);
-      return ghToken(held.login, this.run);
+      // One local `gh auth token` run, no `gh auth status` first: that one
+      // checks every login against the GitHub API. gh's own "no oauth token"
+      // answer becomes account_not_found inside ghToken.
+      return ghToken(login, this.run);
     }
     throw notFound();
   }

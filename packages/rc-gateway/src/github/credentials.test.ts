@@ -8,7 +8,9 @@ import {
   chmodSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  symlinkSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -67,7 +69,10 @@ function ghFake(tokens: Record<string, string>) {
       const login = argv[argv.indexOf('--user') + 1]!;
       const t = tokens[login];
       return t === undefined
-        ? { exitCode: 1, stderr: `no oauth token found for ${login}` }
+        ? {
+            exitCode: 1,
+            stderr: `no oauth token found for github.com account ${login}\n`,
+          }
         : { stdout: t + '\n' };
     }
     return { exitCode: 2, stderr: 'unexpected' };
@@ -123,9 +128,43 @@ describe('listGhLogins', () => {
         scopes: ['gist', 'read:org', 'repo', 'workflow'],
       },
       { login: 'InfiniteInsight' },
-      { login: 'stale-one', error: 'gh: the token for this login is invalid' },
+      {
+        login: 'stale-one',
+        error: 'gh: The token in /x/hosts.yml is invalid.',
+      },
     ]);
     expect(out.error).toBeUndefined();
+  });
+
+  it('keeps a login whose check timed out, with a timeout cause', async () => {
+    const text = [
+      'github.com',
+      '  X Timeout trying to log in to github.com account slow-one (/x/hosts.yml)',
+      '  - Active account: true',
+      '',
+      '  X Failed to log in to github.com account quiet-one (/x/hosts.yml)',
+      '  - Active account: false',
+      '  - To re-authenticate, run: gh auth login -h github.com',
+    ].join('\n');
+    const { run } = fakeRunner(() => ({ exitCode: 1, stderr: text }));
+    const out = await listGhLogins(run);
+    expect(out.logins).toEqual([]);
+    expect(out.accounts).toEqual([
+      { login: 'slow-one', error: 'gh: timed out checking this login' },
+      { login: 'quiet-one', error: 'gh: could not log in to this login' },
+    ]);
+    expect(out.error).toBeUndefined();
+  });
+
+  it('masks a token shape in a failure cause', async () => {
+    const { run } = fakeRunner(() => ({
+      exitCode: 1,
+      stdout:
+        '  X Failed to log in to github.com account a (/x)\n' +
+        '  - bad token ghp_abcdefghijklmnopqrstuvwxyz0123456789\n',
+    }));
+    const out = await listGhLogins(run);
+    expect(out.accounts).toEqual([{ login: 'a', error: 'gh: bad token ***' }]);
   });
 
   it('listGhLogins reports a missing gh', async () => {
@@ -349,7 +388,52 @@ describe('OAuthTokenStore', () => {
     const first = await OAuthTokenStore.open(file);
     await first.put('a', 'gho_a', []);
     chmodSync(file, 0o666);
-    await expect(OAuthTokenStore.open(file)).rejects.toThrow(/writable/);
+    const err = await OAuthTokenStore.open(file).then(
+      () => undefined,
+      (e: unknown) => e as Error,
+    );
+    expect(err?.message).toMatch(/writable/);
+    expect(err?.message).toMatch(/remove .* and connect/i);
+    expect(err?.message).not.toMatch(/chmod/);
+  });
+
+  it('refuses a file it cannot read rather than opening empty', async () => {
+    if (process.getuid?.() === 0) return; // root reads a 0000 file
+    const file = join(dir, 's.json');
+    const first = await OAuthTokenStore.open(file);
+    await first.put('a', 'gho_a', []);
+    chmodSync(file, 0o000);
+    try {
+      await expect(OAuthTokenStore.open(file)).rejects.toThrow(/cannot read/);
+    } finally {
+      chmodSync(file, 0o600);
+    }
+    expect(readFileSync(file, 'utf8')).toContain('gho_a');
+  });
+
+  it('keeps a corrupt file aside and opens empty', async () => {
+    const file = join(dir, 's.json');
+    writeFileSync(file, '{"accounts": {', { mode: 0o600 });
+    const store = await OAuthTokenStore.open(file);
+    expect(store.list()).toEqual([]);
+    expect(readdirSync(dir).some((f) => f.startsWith('s.json.corrupt-'))).toBe(
+      true,
+    );
+  });
+
+  it('refuses a symlinked or open store directory', async () => {
+    const real = join(dir, 'real');
+    await mkdir(real, { mode: 0o700 });
+    symlinkSync(real, join(dir, 'link'));
+    await expect(
+      OAuthTokenStore.open(join(dir, 'link', 's.json')),
+    ).rejects.toThrow(/not a directory|symlink/);
+    const open = join(dir, 'open');
+    await mkdir(open);
+    chmodSync(open, 0o777);
+    await expect(OAuthTokenStore.open(join(open, 's.json'))).rejects.toThrow(
+      /writable/,
+    );
   });
 
   it('drops malformed entries without logging their tokens', async () => {
@@ -442,6 +526,32 @@ describe('GitHubCredentials', () => {
       );
     }
     expect(calls.some((c) => c.argv.includes('--help'))).toBe(false);
+    // A token read does not wait on gh auth status's GitHub API check.
+    expect(calls.some((c) => c.argv[2] === 'status')).toBe(false);
+  });
+
+  it('a gh token read is one gh auth token run, other failures are gh_failed', async () => {
+    const store = await OAuthTokenStore.open(join(dir, 's.json'));
+    const ok = ghFake({ 'evann-opsnexus': 'gho_work' });
+    const creds = new GitHubCredentials({ run: ok.run, store });
+    expect(await creds.token('gh:evann-opsnexus')).toBe('gho_work');
+    expect(ok.calls.map((c) => c.argv[2])).toEqual(['token']);
+
+    const bad = fakeRunner(() => ({
+      exitCode: 1,
+      stdout: 'gho_partialtokenvalue',
+      stderr:
+        'failed to read keyring gho_partialtokenvalue ghp_abcdefghijklmnopqrstuvwxyz0123456789\n',
+    }));
+    const failing = new GitHubCredentials({ run: bad.run, store });
+    const err = await failing.token('gh:evann-opsnexus').then(
+      () => undefined,
+      (e: unknown) => e as Error & { code?: string },
+    );
+    expect(err?.code).toBe('gh_failed');
+    expect(err?.message).toContain('failed to read keyring');
+    expect(err?.message).not.toContain('gho_partialtokenvalue');
+    expect(err?.message).not.toContain('ghp_abcdefghij');
   });
 
   it('reports a gh failure beside the oauth accounts', async () => {
@@ -496,7 +606,7 @@ describe('createGhRunner', () => {
 });
 
 describe('GitHubCredentials with a failing gh login', () => {
-  it('lists it with its error and refuses its token by cause', async () => {
+  it('lists it with the cause gh gave', async () => {
     const store = await OAuthTokenStore.open(join(dir, 's.json'));
     const { run, calls } = fakeRunner(() => ({
       exitCode: 1,
@@ -510,12 +620,9 @@ describe('GitHubCredentials with a failing gh login', () => {
         id: 'gh:stale-one',
         source: 'gh',
         login: 'stale-one',
-        error: 'gh: the token for this login is invalid',
+        error: 'gh: The token in /x/hosts.yml is invalid.',
       },
     ]);
-    await expect(creds.token('gh:stale-one')).rejects.toThrow(
-      'gh: the token for this login is invalid',
-    );
-    expect(calls.some((c) => c.argv[2] === 'token')).toBe(false);
+    expect(calls.map((c) => c.argv[2])).toEqual(['status']);
   });
 });
