@@ -176,6 +176,24 @@ export const legacySessionTelemetryRoutes = [
     route: 'POST /session/:id/subagents/:subagentRef/cancel',
   },
   {
+    method: 'POST',
+    path: '/session/:id/subagents/:subagentRef/message',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/subagents/:subagentRef/message',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/subagents/:subagentRef/resume',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/subagents/:subagentRef/resume',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/subagents/:subagentRef/abandon',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/subagents/:subagentRef/abandon',
+  },
+  {
     method: 'GET',
     path: '/session/:id/lsp',
     attribution: 'handler_resolved',
