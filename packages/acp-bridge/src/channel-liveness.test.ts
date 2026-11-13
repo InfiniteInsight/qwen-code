@@ -288,24 +288,27 @@ describe('startChannelLivenessMonitor', () => {
       now: () => 0,
     });
 
-    for (let i = 0; i < 20; i++) {
-      await vi.advanceTimersByTimeAsync(CHANNEL_LIVENESS_INTERVAL_MS);
-    }
-    expect(refs).toHaveLength(20);
-    expect(onFailure).not.toHaveBeenCalled();
+    try {
+      for (let i = 0; i < 20; i++) {
+        await vi.advanceTimersByTimeAsync(CHANNEL_LIVENESS_INTERVAL_MS);
+      }
+      expect(refs).toHaveLength(20);
+      expect(onFailure).not.toHaveBeenCalled();
 
-    vi.useRealTimers();
-    v8.setFlagsFromString('--expose_gc');
-    const gc = runInNewContext('gc') as () => void;
-    // deref() keeps a live target alive past the current job, so dereference
-    // nothing until the collections are done.
-    const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
-    for (let attempt = 0; attempt < 5; attempt++) {
+      vi.useRealTimers();
+      v8.setFlagsFromString('--expose_gc');
+      const gc = runInNewContext('gc') as () => void;
+      // deref() keeps a live target alive past the current job, so dereference
+      // nothing until the collections are done.
+      const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
+      for (let attempt = 0; attempt < 5; attempt++) {
+        await tick();
+        gc();
+      }
       await tick();
-      gc();
+      expect(refs.filter((ref) => ref.deref() !== undefined)).toHaveLength(0);
+    } finally {
+      monitor.stop();
     }
-    await tick();
-    expect(refs.filter((ref) => ref.deref() !== undefined)).toHaveLength(0);
-    monitor.stop();
   });
 });
