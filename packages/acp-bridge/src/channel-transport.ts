@@ -69,7 +69,11 @@ export function armClosedFanout(closed: Promise<never>): ClosedFanout {
   return fanout;
 }
 
-/** Settle with `work`, or reject with the fan-out's error if it fires first. */
+/**
+ * Settle with `work`, or reject with the fan-out's error if it fires first.
+ * Pass freshly dispatched work: unlike `Promise.race`, an already-recorded
+ * close wins even over a `work` that has already settled.
+ */
 export function raceClosedFanout<T>(
   fanout: ClosedFanout,
   work: Promise<T>,
@@ -104,7 +108,9 @@ const channelUnavailableFanouts = new WeakMap<
  * Settle with `work`, or reject with `BridgeChannelClosedError(context)` if
  * the channel becomes unavailable first. Each channel and context share one
  * `channelUnavailableReject`, so a settled call leaves nothing on
- * `channel.exited`.
+ * `channel.exited`. `context` must come from a small fixed set of literals:
+ * a context carrying an id would arm a new `channelUnavailableReject` on
+ * `channel.exited` per value and bring the per-call leak back.
  */
 export function raceChannelUnavailable<T>(
   channel: AcpChannel,

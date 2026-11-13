@@ -5903,8 +5903,8 @@ export function createSessionControlPlane(
 
       // ACP `newSession` doesn't take a model id; honor the caller's
       // `modelServiceId` via `unstable_setSessionModel`. See
-      // `applyModelServiceId` for rationale (race against
-      // transportClosedReject, publish model_switched on success,
+      // `applyModelServiceId` for rationale (race through
+      // `raceTransportClosed`, publish model_switched on success,
       // model_switch_failed on failure, don't tear down the session).
       // The outcome is reported to the caller via `modelApplied` so a
       // create carrying a selection can tell a confirmed switch from a
@@ -6068,7 +6068,7 @@ export function createSessionControlPlane(
         modelId: string;
       }): Promise<unknown>;
     };
-    // Race against `transportClosedReject` so a child crash during
+    // Race through `raceTransportClosed` so a child crash during
     // model switch fails the call immediately instead of waiting the
     // full `timeoutMs`. Matches what `sendPrompt` and `setSessionModel`
     // already do — without this, a callback-attach with a broken model
@@ -14586,7 +14586,7 @@ export function createSessionControlPlane(
       // last `model_switched` event published may not match the actual model
       // the agent is on.
       //
-      // Race the agent call against `transportClosedReject` and a
+      // Race the agent call through `raceTransportClosed` and a
       // `withTimeout` so a wedged child can't block the HTTP handler
       // forever. Matches `sendPrompt` (transport race) and
       // `applyModelServiceId` (timeout) — the absence of either was an
