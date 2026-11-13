@@ -33790,7 +33790,18 @@ PAGE_SCENARIOS.push({
       // Typing searches once, 300 ms after the last key, and shows only matches.
       const before = searches.length;
       await page.focus('#gh-search');
-      await page.keyboard.type('hello', { delay: 40 });
+      // The keys are typed inside the page, one every 40 ms, as input events. Driven from here
+      // (keyboard.type) each key is a round trip, and under load one took over 300 ms, so the
+      // page rightly searched the half-typed "he". In the page the 40 ms waits run on the same
+      // timer queue as the 300 ms debounce, so a busy page delays both alike.
+      await page.evaluate(`(async () => {
+        const el = document.getElementById('gh-search');
+        for (const ch of 'hello') {
+          el.value += ch;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          await new Promise((r) => setTimeout(r, 40));
+        }
+      })()`);
       await ghcWaitRows(page, 1);
       const typed = searches.slice(before);
       expect(typed.length === 1 && typed[0] === 'hello', `the page searched ${JSON.stringify(typed)} for a typed word`);
