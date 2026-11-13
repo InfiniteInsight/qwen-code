@@ -45,10 +45,14 @@ export const REQUEST_TIMEOUT_MS = 15_000;
 export const MAX_BACKOFF_MS = 60_000;
 /** Waits before retrying the user lookup after a transient failure. */
 export const USER_RETRY_DELAYS_MS: readonly number[] = [2_000, 8_000];
+/** How long the token store may take to save before the flow gives up. */
+export const STORE_TIMEOUT_MS = 10_000;
 
 const MAX_EXPIRES_S = 3600;
 const MAX_INTERVAL_S = 300;
 const SLOW_DOWN_STEP_MS = 5_000;
+/** RFC 8628 3.2: the poll interval when the device answer gives none. */
+const DEFAULT_INTERVAL_S = 5;
 const MAX_BODY_CHARS = 64 * 1024;
 
 const DEVICE_CODE_SHAPE = /^[\x21-\x7e]{1,512}$/;
@@ -64,6 +68,7 @@ const KNOWN_POLL_ERRORS = new Set([
   'authorization_pending',
   'slow_down',
   'expired_token',
+  'token_expired',
   'access_denied',
   'unsupported_grant_type',
   'incorrect_client_credentials',
@@ -81,7 +86,9 @@ export type DeviceFlowState =
 /**
  * What the page may see of a flow. `login` once connected; `code` when
  * failed: GitHub's error code, or one of `invalid_response`,
- * `user_lookup_failed`, `invalid_login`, `store_failed`, `stopped`.
+ * `expiring_token_unsupported` (a GitHub App's expiring token, not an OAuth
+ * App's), `scope_missing` (the grant lacks `repo`), `user_lookup_failed`,
+ * `invalid_login`, `store_failed`, `stopped`.
  */
 export interface DeviceFlowStatus {
   state: DeviceFlowState;
@@ -135,6 +142,8 @@ interface Flow {
   pollTimer?: unknown;
   deadlineTimer?: unknown;
   inFlight?: AbortController;
+  /** Set while the token store is writing; stopAll lets that finish. */
+  storing?: boolean;
   endedAt?: number;
 }
 
@@ -274,7 +283,8 @@ export class DeviceFlows {
     const userCode = j['user_code'];
     const verificationUri = githubHttpsUrl(j['verification_uri']);
     const expiresIn = j['expires_in'];
-    const interval = j['interval'];
+    const interval =
+      j['interval'] === undefined ? DEFAULT_INTERVAL_S : j['interval'];
     if (
       typeof deviceCode !== 'string' ||
       !DEVICE_CODE_SHAPE.test(deviceCode) ||
@@ -312,11 +322,18 @@ export class DeviceFlows {
     return publicStatus(flow);
   }
 
-  /** End every live flow as `failed: stopped` and stop all their timers. */
+  /**
+   * End every live flow as `failed: stopped` and stop all their timers. A
+   * flow whose token the store is already writing is left to finish (within
+   * {@link STORE_TIMEOUT_MS}), so its status and `onEnd` match what was
+   * stored.
+   */
   stopAll(): void {
     this.epoch++;
     for (const flow of this.flows.values()) {
-      if (flow.state === 'pending') this.end(flow, 'failed', 'stopped');
+      if (flow.state === 'pending' && !flow.storing) {
+        this.end(flow, 'failed', 'stopped');
+      }
     }
   }
 
@@ -456,6 +473,21 @@ export class DeviceFlows {
       this.end(flow, 'failed', 'invalid_response');
       return;
     }
+    // An OAuth App's token does not expire. A refresh token or an expiry
+    // means a GitHub App's client ID: storing it would lose the refresh token
+    // and every clone would fail with 401 hours later.
+    if (
+      j['refresh_token'] !== undefined ||
+      j['expires_in'] !== undefined ||
+      j['refresh_token_expires_in'] !== undefined
+    ) {
+      this.end(flow, 'failed', 'expiring_token_unsupported');
+      return;
+    }
+    if (!scopes.includes(DEVICE_FLOW_SCOPE)) {
+      this.end(flow, 'failed', 'scope_missing');
+      return;
+    }
     // The device code is spent: the expiry no longer applies, and nothing
     // may poll again.
     if (flow.deadlineTimer !== undefined) this.clearTimer(flow.deadlineTimer);
@@ -482,6 +514,7 @@ export class DeviceFlows {
         return;
       }
       case 'expired_token':
+      case 'token_expired':
         this.end(flow, 'expired');
         return;
       case 'access_denied':
@@ -540,13 +573,26 @@ export class DeviceFlows {
       this.end(flow, 'failed', 'invalid_login');
       return;
     }
+    flow.storing = true;
+    let timer: unknown;
+    let stored: boolean;
     try {
-      await this.store.put(login, token, scopes);
+      stored = await Promise.race([
+        this.store.put(login, token, scopes).then(() => true),
+        new Promise<boolean>((resolve) => {
+          timer = this.timer(() => resolve(false), STORE_TIMEOUT_MS);
+        }),
+      ]);
     } catch {
+      stored = false;
+    } finally {
+      flow.storing = false;
+      if (timer !== undefined) this.clearTimer(timer);
+    }
+    if (!stored) {
       this.end(flow, 'failed', 'store_failed');
       return;
     }
-    if (flow.state !== 'pending') return;
     flow.login = login;
     this.end(flow, 'connected');
   }

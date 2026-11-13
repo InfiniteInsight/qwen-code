@@ -10,6 +10,7 @@ import {
   DeviceFlowError,
   DeviceFlows,
   MAX_LIVE_FLOWS,
+  STORE_TIMEOUT_MS,
   type DeviceFlowEnd,
   type DeviceFlowStore,
 } from './deviceFlow.js';
@@ -696,5 +697,137 @@ describe('DeviceFlows', () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(handles.length).toBeGreaterThan(0);
     expect(unref).toHaveBeenCalledTimes(handles.length);
+  });
+
+  it('an expiring token (GitHub App style) ends expiring_token_unsupported and stores nothing', async () => {
+    for (const extra of [
+      { refresh_token: 'ghr_1B4a2e77838347a7E420ce178F2E7c6912E169246c34E1' },
+      { expires_in: 28800 },
+      { refresh_token_expires_in: 15811200 },
+    ]) {
+      const ends: DeviceFlowEnd[] = [];
+      const gh = fakeGitHub({ polls: [{ ...GRANTED, ...extra }] });
+      const { flows, puts } = make(gh, { onEnd: (e) => ends.push(e) });
+      const { flowId } = await flows.start();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(flows.status(flowId)).toEqual({
+        state: 'failed',
+        code: 'expiring_token_unsupported',
+      });
+      expect(puts).toEqual([]);
+      expect(gh.calls.some((c) => c.url === USER_URL)).toBe(false);
+      expect(JSON.stringify(ends)).not.toContain('ghr_');
+      flows.stopAll();
+    }
+  });
+
+  it('a grant without the repo scope ends scope_missing and stores nothing', async () => {
+    for (const scope of ['', 'gist', 'read:org,gist']) {
+      const gh = fakeGitHub({
+        polls: [{ access_token: TOKEN, token_type: 'bearer', scope }],
+      });
+      const { flows, puts } = make(gh);
+      const { flowId } = await flows.start();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(flows.status(flowId)).toEqual({
+        state: 'failed',
+        code: 'scope_missing',
+      });
+      expect(puts).toEqual([]);
+      flows.stopAll();
+    }
+  });
+
+  it('stopAll during the store write lets it finish, so status and onEnd match what was stored', async () => {
+    let release: (() => void) | undefined;
+    const puts: string[] = [];
+    const ends: DeviceFlowEnd[] = [];
+    const gh = fakeGitHub({ polls: [GRANTED] });
+    flows = new DeviceFlows({
+      clientId: CLIENT_ID,
+      fetch: gh.fetch,
+      store: {
+        put: async (login) => {
+          await new Promise<void>((r) => (release = r));
+          puts.push(login);
+        },
+      },
+      onEnd: (e) => ends.push(e),
+    });
+    const { flowId } = await flows.start();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(release).toBeDefined();
+    flows.stopAll();
+    expect(flows.status(flowId)).toEqual({ state: 'pending' });
+    release!();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(puts).toEqual(['octocat']);
+    expect(flows.status(flowId)).toEqual({
+      state: 'connected',
+      login: 'octocat',
+    });
+    expect(ends).toEqual([{ flowId, state: 'connected', login: 'octocat' }]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('a store write that hangs ends store_failed after its timeout and frees the slot', async () => {
+    const gh = fakeGitHub({
+      device: Array.from({ length: MAX_LIVE_FLOWS + 1 }, (_, i) => ({
+        device_code: `device-code-${i}`,
+        user_code: `CODE-000${i}`,
+        verification_uri: 'https://github.com/login/device',
+        expires_in: 900,
+        interval: 5,
+      })),
+      polls: [GRANTED],
+    });
+    flows = new DeviceFlows({
+      clientId: CLIENT_ID,
+      fetch: gh.fetch,
+      store: { put: () => new Promise<void>(() => {}) },
+    });
+    const started = [];
+    for (let i = 0; i < MAX_LIVE_FLOWS; i++) started.push(await flows.start());
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(flows.status(started[0]!.flowId)).toEqual({ state: 'pending' });
+    await vi.advanceTimersByTimeAsync(STORE_TIMEOUT_MS);
+    expect(flows.status(started[0]!.flowId)).toEqual({
+      state: 'failed',
+      code: 'store_failed',
+    });
+    await expect(flows.start()).resolves.toMatchObject({
+      userCode: `CODE-000${MAX_LIVE_FLOWS}`,
+    });
+  });
+
+  it('token_expired ends expired like expired_token', async () => {
+    const gh = fakeGitHub({ polls: [{ error: 'token_expired' }] });
+    const { flows, puts } = make(gh);
+    const { flowId } = await flows.start();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(flows.status(flowId)).toEqual({ state: 'expired' });
+    expect(puts).toEqual([]);
+  });
+
+  it('a device answer without an interval polls every 5 s', async () => {
+    const gh = fakeGitHub({
+      device: [
+        {
+          device_code: DEVICE_CODE,
+          user_code: USER_CODE,
+          verification_uri: 'https://github.com/login/device',
+          expires_in: 900,
+        },
+      ],
+      polls: [PENDING, PENDING],
+    });
+    const { flows } = make(gh);
+    await flows.start();
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(gh.polls()).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(gh.polls()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(gh.polls()).toHaveLength(2);
   });
 });
