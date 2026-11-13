@@ -89,6 +89,7 @@ import {
 import { PushStore } from './pushStore.js';
 import { UiPrefsStore } from './uiPrefsStore.js';
 import { HostActions } from './hostActions.js';
+import { openGitHubDeps } from './routes/github.js';
 import {
   effectiveAttachmentLimit,
   advertisedAttachmentCap,
@@ -687,6 +688,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   let quietDigestTimer: NodeJS.Timeout | undefined;
   const startedBridges: StartedBridge[] = [];
   let bootAborted = false;
+  let stopGitHub: (() => void) | undefined;
 
   const cleanupServeResources = async (): Promise<void> => {
     bootAborted = true;
@@ -701,6 +703,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     if (bridgeReaper) clearInterval(bridgeReaper);
     stopWalRetention?.();
     stopLoopGuard?.();
+    stopGitHub?.();
     for (const b of startedBridges) b.stop();
     if (mdnsAdvertiser) await mdnsAdvertiser.stop(500);
     if (pump) await pump.stop();
@@ -870,6 +873,24 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       // eslint-disable-next-line no-console
       (line) => console.log(line),
     );
+    // Clone a GitHub repo from the phone (#257): one token store, one gh
+    // runner, one device-flow runner and one clone job runner for this
+    // gateway. The OAuth client id comes from ~/.qwen/rc/github-oauth.json or
+    // QWEN_RC_GITHUB_CLIENT_ID; without one, gh logins still work. Nothing
+    // here runs gh or asks GitHub. Shutdown stops pending connects and kills
+    // running clones.
+    const github = await openGitHubDeps({
+      rcDir: join(homedir(), '.qwen', 'rc'),
+      env: process.env,
+      // eslint-disable-next-line no-console
+      log: (line) => console.log(line),
+    });
+    if (github) {
+      stopGitHub = () => {
+        github.flows.stopAll();
+        github.clones.stopAll();
+      };
+    }
     // #196: say so once when the configured limit is held down to what the
     // daemon accepts per file, with the real reason, so an operator who raised
     // it is not left guessing. The read is best effort: a daemon that cannot be
@@ -1267,6 +1288,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       pushStore,
       uiPrefs,
       hostActions,
+      ...(github ? { github } : {}),
       ...(opts.maxAttachmentBytes !== undefined
         ? { maxAttachmentBytes: opts.maxAttachmentBytes }
         : {}),

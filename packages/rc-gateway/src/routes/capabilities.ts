@@ -175,6 +175,8 @@ export function createCapabilityRoute(deps: {
   hostAttach?: boolean;
   /** #212: true when the /rc/host/tabs routes are mounted. */
   hostTabs?: boolean;
+  /** #257: true when the /rc/github routes are mounted. */
+  githubClone?: boolean;
   /**
    * The upload size limit the attachment route enforces (#196), so the page
    * can shrink an image to fit before sending it. Omitted when not wired; the
@@ -357,6 +359,10 @@ export function createCapabilityRoute(deps: {
       // holds write (`writeScope`), so a reader and an older gateway see no
       // badge and no tab line.
       hostTabs: deps.hostTabs === true,
+      // #257: the OWNER /rc/github routes (accounts, device flow, repos and
+      // clone jobs) are mounted. The page draws the GitHub panel and Clone
+      // from GitHub only when this is set, so an older gateway shows neither.
+      githubClone: deps.githubClone === true,
     };
     if (deps.costTracking) {
       remoteControl.costTracking = {

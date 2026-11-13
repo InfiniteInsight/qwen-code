@@ -280,6 +280,7 @@ import { createUiPrefsRouter } from './routes/uiPrefs.js';
 import type { UiPrefsStore } from './uiPrefsStore.js';
 import { createHostActionRoutes } from './routes/hostActions.js';
 import type { HostActions } from './hostActions.js';
+import { createGitHubRoutes, type GitHubRouteDeps } from './routes/github.js';
 import { createRoutingRouter } from './routes/routing.js';
 import { createSearchRoute, type RankedSearch } from './routes/search.js';
 import { versionCheckMiddleware } from './middleware/versionCheck.js';
@@ -377,6 +378,13 @@ export interface GatewayDeps {
    * harness hands in one built over a fake.
    */
   hostActions?: HostActions;
+  /**
+   * Clone a GitHub repo from the phone (#257): one credential set, one
+   * device-flow runner and one clone job runner per gateway, built at boot
+   * by `openGitHubDeps`. The OWNER `/rc/github` routes mount only when this
+   * is set, and `/rc/capabilities` then reports `githubClone: true`.
+   */
+  github?: GitHubRouteDeps;
   /**
    * `--max-attachment-bytes` (#196): the configured upload limit. The limit
    * actually enforced and reported is {@link effectiveAttachmentLimit} of it.
@@ -1808,6 +1816,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       nativeShells: deps.nativeShellsCapability,
       hostAttach: deps.hostAttach !== undefined,
       hostTabs: deps.hostTabs !== undefined,
+      githubClone: deps.github !== undefined,
       maxAttachmentBytes: attachmentLimit,
       daemonQwenBin: deps.daemonQwenBin,
       daemonQwenBinHealthy: deps.daemonQwenBinHealthy,
@@ -2528,6 +2537,44 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       '/rc/host/actions/:name/start',
       requireScope(OWNER, audit),
       hostActionRoutes.start,
+    );
+  }
+
+  // The /rc/github routes (#257): gateway-global and OWNER-scoped, like the
+  // host actions above, because they read the owner's GitHub tokens and
+  // write folders on the host. Absent deps -> not mounted at all (404).
+  if (deps.github) {
+    const githubRoutes = createGitHubRoutes(deps.github, { audit });
+    app.get(
+      '/rc/github/accounts',
+      requireScope(OWNER, audit),
+      githubRoutes.accounts,
+    );
+    app.get('/rc/github/repos', requireScope(OWNER, audit), githubRoutes.repos);
+    app.post(
+      '/rc/github/oauth/start',
+      requireScope(OWNER, audit),
+      githubRoutes.oauthStart,
+    );
+    app.get(
+      '/rc/github/oauth/:flowId',
+      requireScope(OWNER, audit),
+      githubRoutes.oauthStatus,
+    );
+    app.delete(
+      '/rc/github/accounts/:source/:login',
+      requireScope(OWNER, audit),
+      githubRoutes.forget,
+    );
+    app.post(
+      '/rc/github/clone',
+      requireScope(OWNER, audit),
+      githubRoutes.clone,
+    );
+    app.get(
+      '/rc/github/clone/:jobId',
+      requireScope(OWNER, audit),
+      githubRoutes.cloneStatus,
     );
   }
 
