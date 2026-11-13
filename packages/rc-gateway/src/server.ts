@@ -602,6 +602,8 @@ export interface GatewayDeps {
     ) => Promise<TabEndpointAnswer>;
     /** Whether a terminal already shows the session; defaults to the /proc scan. */
     isMirrored?: (sessionId: string) => Promise<boolean>;
+    /** Whether a tab's folder still exists; defaults to a stat. */
+    folderExists?: (cwd: string) => Promise<boolean>;
     /**
      * `--reopen-crashed-tabs`: reopen a crashed tab without being asked,
      * once per record, only while the launcher is live. Off by default. The
@@ -954,6 +956,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
         endpointFor:
           deps.hostTabs.endpointFor ?? sessionEndpointResolver(deps.daemon),
         isMirrored: deps.hostTabs.isMirrored,
+        folderExists: deps.hostTabs.folderExists,
         autoReopen: deps.hostTabs.autoReopen === true,
       })
     : undefined;

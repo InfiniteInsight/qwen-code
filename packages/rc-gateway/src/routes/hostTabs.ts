@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { stat } from 'node:fs/promises';
 import type { RequestHandler } from 'express';
 import type { AuditRecorder } from '../auditLog.js';
 import {
@@ -215,6 +216,12 @@ export interface HostTabRoutesDeps {
   endpointFor: (sessionId: string, cwd: string) => Promise<TabEndpointAnswer>;
   /** Whether a terminal on this host already shows the session (hostMirrors.ts). */
   isMirrored?: (sessionId: string) => Promise<boolean>;
+  /**
+   * Whether the folder a tab ran in is still an existing directory; defaults
+   * to a stat. A reopen into a folder that is gone is refused by name
+   * (`folder_gone`), as the attach route refuses it (`invalid_workspace`).
+   */
+  folderExists?: (cwd: string) => Promise<boolean>;
   launcherStaleMs?: number;
   /**
    * Reopen a crashed tab without being asked (`--reopen-crashed-tabs`, off
@@ -349,14 +356,17 @@ export interface HostTabRoutes {
  * - `GET /rc/host/tabs`: every record with its derived state (see
  *   hostTabs.ts), newest first, the launcher's liveness, so the page can
  *   say whether Reopen can work before it is pressed, and `autoReopen`,
- *   whether the gateway reopens crashed tabs on its own.
+ *   whether the gateway reopens crashed tabs on its own, and `now`, the
+ *   gateway's clock in ms, for the phone to count a reopen's age on.
  * - `POST /rc/host/tabs/:tabId/reopen`: queue a terminal request for the
  *   record's conversation through the same request log POST /rc/terminals
  *   writes, so the launcher opens it like any other. A manual reopen also
  *   takes a closed or quit tab, not only a crashed or ghost one (the
  *   automatic reopen still takes only crashed and ghost; see
  *   {@link isReopenable}). Any other state answers `409 tab_live` or `409
- *   tab_not_reopenable` with the state. A launcher that is `stale` or `never` refuses it with
+ *   tab_not_reopenable` with the state. A record whose folder is gone answers
+ *   `409 folder_gone` naming it. A launcher that is `stale` or `never`
+ *   refuses it with
  *   `409 launcher_unavailable` and the liveness, the same fields the open
  *   route answers with: a request queued for an absent launcher would open a
  *   tab whenever it next ran, long after anyone asked. A terminal already
@@ -380,6 +390,15 @@ export function createHostTabRoutes(deps: HostTabRoutesDeps): HostTabRoutes {
   const { registry, audit } = deps;
   const staleMs = deps.launcherStaleMs ?? LAUNCHER_STALE_MS;
   const isMirrored = deps.isMirrored ?? ((id: string) => isSessionMirrored(id));
+  const folderExists =
+    deps.folderExists ??
+    (async (cwd: string) => {
+      try {
+        return (await stat(cwd)).isDirectory();
+      } catch {
+        return false;
+      }
+    });
 
   const notFound = { error: 'Tab not found', code: 'tab_not_found' };
   const inFlightReopens = new Set<string>();
@@ -448,6 +467,18 @@ export function createHostTabRoutes(deps: HostTabRoutesDeps): HostTabRoutes {
           {
             error: 'This gateway cannot open host terminals',
             code: 'host_terminals_unsupported',
+          },
+          sid,
+        );
+      }
+      // The tab runs in its folder: with the folder gone the attach would
+      // fail with a bare invalid_workspace, so the cause is named here.
+      if (!(await folderExists(tab.cwd))) {
+        return refuse(
+          409,
+          {
+            error: `The folder this tab ran in is gone: ${tab.cwd}`,
+            code: 'folder_gone',
           },
           sid,
         );
@@ -535,6 +566,9 @@ export function createHostTabRoutes(deps: HostTabRoutesDeps): HostTabRoutes {
         ? { state: launcher.state, seenMsAgo: launcher.seenMsAgo }
         : null,
       autoReopen: deps.autoReopen === true,
+      // The gateway's clock, so the phone's hold-back on a just-reopened tab
+      // does not depend on the two clocks agreeing.
+      now: (deps.now ?? registry.now)(),
     });
   };
 

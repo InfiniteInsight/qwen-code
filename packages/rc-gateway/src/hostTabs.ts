@@ -33,7 +33,7 @@
  * - `crashed`: ended with any code but 0 and 129, or a ghost for longer than
  *   the grace window (one launcher stale window, see routes/terminals.ts).
  * - `quit` (ended 0, `/quit`) and `closed` (ended 129, the tab was closed):
- *   the user's own act, shown nowhere.
+ *   the user's own act, kept so the phone can list them and reopen one.
  * - `replaced`: a ghost or crashed record of a conversation that has a newer
  *   record, or a live one: the conversation is back on screen, so the old
  *   record has nothing left to say. Shown nowhere.
