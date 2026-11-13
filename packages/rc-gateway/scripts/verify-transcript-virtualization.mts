@@ -32810,11 +32810,12 @@ PAGE_SCENARIOS.push({
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P559 by default thread rows are hidden, the menu says how many, and a fork stays',
+    name: 'P559 by default thread rows are hidden, the menu says how many, and a fork stays, a fork of a thread too',
     waitView: false,
     stub: AG_STUB,
     run: async ({ page }) => {
-      await ldServe(page, htFolders(), htLive(), { pausePoll: true });
+      const folders = htFolders();
+      const ctl = await ldServe(page, folders, htLive(), { pausePoll: true });
       await openList(page);
       await page.waitForFunction('uiHideThreads === true', null, { timeout: 10_000 });
       await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 3`, null, { timeout: 5_000 });
@@ -32841,7 +32842,25 @@ PAGE_SCENARIOS.push({
       await page.keyboard.press('End');
       const last = (await page.evaluate(`document.activeElement.getAttribute('role')`)) as string;
       expect(last === 'menuitemcheckbox', `End focused a ${last}, not the switch`);
-      return 'threads (by spawnedBy and by live-state parent) hidden, the fork and both roots shown; "3 hidden"; counts 3/2/1; the parent still says "2 agents"; End reaches the switch';
+      // A fork of the thread LD(4), made before the fork route dropped the
+      // copied parent_session: an older gateway lists it with both marks, and
+      // the daemon that loaded it names the thread's spawner as its parent.
+      // A fork is never a thread: listed, not counted hidden, not counted in
+      // the spawner's chip.
+      folders[LD_CWD].push(htRow(LD(8), 'p255 fork of a thread', { parentSessionId: LD(4), spawnedBy: LD(1) }));
+      ctl.live.set(LD_CWD, [...htLive()[LD_CWD], htThread(LD(8), 'run')]);
+      await page.evaluate(`refreshPastConversations(${JSON.stringify(LD_CWD)})`);
+      await page.waitForFunction(`pastConvos.some((s) => s.sessionId === ${JSON.stringify(LD(8))} && s.live)`, null, { timeout: 10_000 });
+      // A second's ticks, so a chip that counts the fork has had time to say so.
+      await page.waitForTimeout(1500);
+      const withFork = (await htIds(page)).sort();
+      const wantFork = [LD(1), LD(2), LD(3), LD(8)].sort();
+      expect(JSON.stringify(withFork) === JSON.stringify(wantFork), `with a fork of a thread the list shows ${JSON.stringify(withFork)}, not ${JSON.stringify(wantFork)}`);
+      const hiddenNow = (await page.evaluate('threadsInView()')) as number;
+      expect(hiddenNow === 3, `with a fork of a thread ${hiddenNow} rows are hidden, not the 3 threads`);
+      const parentChip = (await agChip(page)).find((r) => r.id === LD(1))!;
+      expect(parentChip.chip === '2 agents', `the spawner counts the working fork of its thread: its chip reads ${JSON.stringify(parentChip.chip)}, not "2 agents"`);
+      return 'threads (by spawnedBy and by live-state parent) hidden, the fork and both roots shown; "3 hidden"; counts 3/2/1; the parent still says "2 agents"; End reaches the switch; a working fork of a thread with both marks listed, not hidden, not in the chip';
     },
   });
 

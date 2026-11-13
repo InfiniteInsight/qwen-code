@@ -22701,8 +22701,11 @@
       }
       // #255. A thread is a conversation another one started with
       // create_sub_session: its row names the parent (`spawnedBy`), or, when it
-      // has no transcript yet, its live-state entry does. A fork is not one.
+      // has no transcript yet, its live-state entry does. A fork is not one,
+      // a fork of a thread included: a fork made before the fork route
+      // dropped the copied parent_session carries the thread's marks too.
       function isThread(s) {
+        if (s.parentSessionId) return false; // a fork (R6)
         return !!s.spawnedBy || !!(s.liveState && s.liveState.parentSessionId);
       }
       // Hidden by the switch: never the conversation on screen, whatever it is.
@@ -24153,11 +24156,13 @@
       }
       // The threads of `s` that are working now: rows anywhere in the list
       // whose live-state names `s` as their parent and whose dot is not idle.
+      // R6: a fork is never one.
       function rowThreadCount(s) {
         let n = 0;
         for (const x of pastConvos) {
           const st = x && x.liveState;
-          if (!st || st.parentSessionId !== s.sessionId) continue;
+          if (!st || x.parentSessionId) continue;
+          if (st.parentSessionId !== s.sessionId) continue;
           if (liveDotState(st) !== 'idle') n += 1;
         }
         return n;
