@@ -238,7 +238,12 @@ export type AuditAction =
   | 'host_tab_ended'
   | 'host_tab_reopened'
   | 'host_tab_dismissed'
-  | 'host_tab_removed';
+  | 'host_tab_removed'
+  // #257: GitHub accounts and clones. No row carries a token or a user code.
+  | 'github_oauth_connected'
+  | 'github_oauth_failed'
+  | 'github_oauth_forgotten'
+  | 'github_clone';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -394,6 +399,10 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'host_tab_reopened',
   'host_tab_dismissed',
   'host_tab_removed',
+  'github_oauth_connected',
+  'github_oauth_failed',
+  'github_oauth_forgotten',
+  'github_clone',
 ];
 
 export interface AuditEntry {

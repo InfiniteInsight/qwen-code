@@ -576,3 +576,19 @@ describe('#165 the response is scoped by token', () => {
     }
   });
 });
+
+describe('githubClone (#257)', () => {
+  it('githubClone is true only when the routes are mounted', async () => {
+    const wired = await mount({ githubClone: true });
+    const bare = await mount({});
+    try {
+      const on = await (await fetch(`${wired.base}/rc/capabilities`)).json();
+      expect(on.remoteControl.githubClone).toBe(true);
+      const off = await (await fetch(`${bare.base}/rc/capabilities`)).json();
+      expect(off.remoteControl.githubClone).toBe(false);
+    } finally {
+      await wired.close();
+      await bare.close();
+    }
+  });
+});
