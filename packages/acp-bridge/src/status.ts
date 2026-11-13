@@ -225,6 +225,18 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionTaskCancel: 'qwen/control/session/task/cancel',
   sessionTaskMessage: 'qwen/control/session/task/message',
   /**
+   * Resume ONE paused subagent through the child's own resume service.
+   * Params: `{ sessionId, taskId, message? }`, where `message` is the first
+   * continuation instruction; result: {@link ServeSubagentResumeResult}.
+   */
+  sessionTaskResume: 'qwen/control/session/task/resume',
+  /**
+   * Abandon ONE paused subagent: the child drops it from its registry and
+   * marks its sidecar `abandonedAt`. Params: `{ sessionId, taskId }`;
+   * result: {@link ServeSubagentAbandonResult}.
+   */
+  sessionTaskAbandon: 'qwen/control/session/task/abandon',
+  /**
    * Control a workflow run, delete its history, or start a new run from a
    * saved definition or a caller-supplied script. Params:
    * `{ sessionId, taskId, action }` plus the optional start input
@@ -1182,6 +1194,50 @@ export interface ServeSessionAgentsStatus {
   now: number;
   tasks: ServeSessionAgentTaskStatus[];
 }
+
+/**
+ * Why the child refused to resume or abandon a subagent. The resume codes are
+ * the resume service's own failure paths (`BackgroundAgentResumeRefusalCode`
+ * in core); `unsupported` is the daemon's answer when its bridge cannot reach
+ * the child for this action.
+ */
+export type ServeSubagentControlRefusalCode =
+  | 'agent_not_found'
+  | 'not_paused'
+  | 'resume_blocked'
+  | 'metadata_missing'
+  | 'metadata_unreadable'
+  | 'transcript_missing'
+  | 'capacity_full'
+  | 'resume_failed'
+  | 'unsupported';
+
+/**
+ * Result of {@link SERVE_CONTROL_EXT_METHODS.sessionTaskResume}: the agent is
+ * running again, or the refusal with its code and a reason naming the cause.
+ * `status` is the agent's status after the attempt, when it is registered.
+ */
+export type ServeSubagentResumeResult =
+  | { outcome: 'resumed'; status: 'running' }
+  | {
+      outcome: 'refused';
+      code: ServeSubagentControlRefusalCode;
+      reason: string;
+      status?: string;
+    };
+
+/**
+ * Result of {@link SERVE_CONTROL_EXT_METHODS.sessionTaskAbandon}: the paused
+ * agent is gone from the child's registry and rosters, or the refusal.
+ */
+export type ServeSubagentAbandonResult =
+  | { outcome: 'abandoned'; status: 'cancelled' }
+  | {
+      outcome: 'refused';
+      code: ServeSubagentControlRefusalCode;
+      reason: string;
+      status?: string;
+    };
 
 export interface ServeAgentTraceNode {
   agentId: string;

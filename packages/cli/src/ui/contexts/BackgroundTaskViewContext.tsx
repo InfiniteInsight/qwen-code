@@ -20,6 +20,10 @@ import {
   useState,
 } from 'react';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type {
+  AgentTask,
+  AgentTaskRemoteActionResult,
+} from '@qwen-code/qwen-code-core/agents/background-tasks.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   type DialogEntry,
@@ -27,6 +31,12 @@ import {
 } from '../hooks/useBackgroundTaskView.js';
 
 const debugLogger = createDebugLogger('BG_TASK_VIEW');
+
+function toActionResult(
+  result: AgentTaskRemoteActionResult,
+): BackgroundTaskActionResult {
+  return result.ok ? { ok: true } : { ok: false, reason: result.reason };
+}
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -61,6 +71,14 @@ export interface BackgroundTaskViewState {
   livePanelSelectedIndex: number;
 }
 
+/**
+ * What a resume, abandon or message did. A failure carries the reason the
+ * dialog shows (rule #211: every failure names its cause).
+ */
+export type BackgroundTaskActionResult =
+  | { ok: true }
+  | { ok: false; reason: string };
+
 export interface BackgroundTaskViewActions {
   moveSelectionUp(): boolean;
   moveSelectionDown(): boolean;
@@ -68,12 +86,19 @@ export interface BackgroundTaskViewActions {
   closeDialog(): void;
   enterDetail(): void;
   exitDetail(): void;
-  /** Stop or abandon the currently selected entry. */
-  cancelSelected(): void;
-  /** Resume the currently selected paused entry. */
-  resumeSelected(): Promise<void>;
+  /**
+   * Stop or abandon the currently selected entry. Local registry actions take
+   * effect before this returns; the promise reports an abandon's outcome, and
+   * is `undefined` for an entry the keypress does not apply to.
+   */
+  cancelSelected(): Promise<BackgroundTaskActionResult | undefined>;
+  /**
+   * Resume the currently selected paused entry; `undefined` when the
+   * selection is not a paused agent.
+   */
+  resumeSelected(): Promise<BackgroundTaskActionResult | undefined>;
   /** Send an interactive message to the currently selected agent entry. */
-  sendMessageToSelected(message: string): Promise<boolean>;
+  sendMessageToSelected(message: string): Promise<BackgroundTaskActionResult>;
   /**
    * Cooperatively pause or resume the selected workflow. Returns whether
    * the registry accepted the transition, or `null` when the keypress does
@@ -110,6 +135,10 @@ const DEFAULT_STATE: BackgroundTaskViewState = {
 
 const noop = () => {};
 const noopBool = () => false;
+const NO_PROVIDER: BackgroundTaskActionResult = {
+  ok: false,
+  reason: 'Background tasks are unavailable.',
+};
 
 const DEFAULT_ACTIONS: BackgroundTaskViewActions = {
   moveSelectionUp: noopBool,
@@ -119,9 +148,9 @@ const DEFAULT_ACTIONS: BackgroundTaskViewActions = {
   enterDetail: noop,
   exitDetail: noop,
   enterDetailFromPanel: noop,
-  cancelSelected: noop,
-  resumeSelected: async () => {},
-  sendMessageToSelected: async () => false,
+  cancelSelected: async () => undefined,
+  resumeSelected: async () => undefined,
+  sendMessageToSelected: async () => NO_PROVIDER,
   toggleSelectedWorkflowPause: () => null,
   setPillFocused: noop,
   setLivePanelFocused: noop,
@@ -224,13 +253,24 @@ export function BackgroundTaskViewProvider({
     }
   }, [dialogMode]);
 
-  const cancelSelected = useCallback(() => {
-    if (!config) return;
+  const cancelSelected = useCallback(async (): Promise<
+    BackgroundTaskActionResult | undefined
+  > => {
+    if (!config) return undefined;
     const target = entries[selectedIndex];
-    if (!target) return;
+    if (!target) return undefined;
     if (target.kind === 'agent' && target.status === 'paused') {
-      config.abandonBackgroundAgent(target.agentId);
-      return;
+      // A daemon-mirrored agent is abandoned on the daemon, which owns its
+      // sidecar; the mirror drops the entry once the daemon confirms.
+      if (target.remoteControl) {
+        return toActionResult(await target.remoteControl.abandon());
+      }
+      // Same fallback as the daemon's own abandon: an entry without a sidecar
+      // has nothing to mark, so the registry drops it directly.
+      if (!config.abandonBackgroundAgent(target.agentId)) {
+        config.getBackgroundTaskRegistry().abandon(target.agentId);
+      }
+      return { ok: true };
     }
     // Registry cancel paths are no-ops outside their actionable states,
     // so no pre-check here. Shell cancel goes through
@@ -288,29 +328,56 @@ export function BackgroundTaskViewProvider({
         );
       }
     }
+    return undefined;
   }, [config, entries, selectedIndex]);
 
-  const resumeSelected = useCallback(async () => {
-    if (!config) return;
+  // Resume a paused agent with an optional first instruction: on the daemon
+  // for a mirrored entry, through this process's resume service otherwise.
+  const resumeAgent = useCallback(
+    async (
+      target: AgentTask,
+      message?: string,
+    ): Promise<BackgroundTaskActionResult> => {
+      if (target.resumeBlockedReason) {
+        return { ok: false, reason: target.resumeBlockedReason };
+      }
+      if (target.remoteControl) {
+        return toActionResult(await target.remoteControl.resume(message));
+      }
+      if (!config) return NO_PROVIDER;
+      const outcome = await config.resumeBackgroundAgentWithOutcome(
+        target.agentId,
+        message,
+      );
+      return outcome.resumed
+        ? { ok: true }
+        : { ok: false, reason: outcome.reason };
+    },
+    [config],
+  );
+
+  const resumeSelected = useCallback(async (): Promise<
+    BackgroundTaskActionResult | undefined
+  > => {
+    if (!config) return undefined;
     const target = entries[selectedIndex];
-    if (
-      !target ||
-      target.kind !== 'agent' ||
-      target.status !== 'paused' ||
-      target.resumeBlockedReason
-    ) {
-      return;
+    if (!target || target.kind !== 'agent' || target.status !== 'paused') {
+      return undefined;
     }
-    await config.resumeBackgroundAgent(target.agentId);
-  }, [config, entries, selectedIndex]);
+    return resumeAgent(target);
+  }, [config, entries, selectedIndex, resumeAgent]);
 
   const sendMessageToSelected = useCallback(
-    async (message: string): Promise<boolean> => {
+    async (message: string): Promise<BackgroundTaskActionResult> => {
       const trimmed = message.trim();
-      if (!config || !trimmed) return false;
+      if (!config) return NO_PROVIDER;
+      if (!trimmed) return { ok: false, reason: 'The message is empty.' };
       const target = entries[selectedIndex];
-      if (!target || target.kind !== 'agent' || target.resumeBlockedReason) {
-        return false;
+      if (!target || target.kind !== 'agent') {
+        return { ok: false, reason: 'No agent is selected.' };
+      }
+      if (target.resumeBlockedReason) {
+        return { ok: false, reason: target.resumeBlockedReason };
       }
       const registry = config.getBackgroundTaskRegistry();
       let live = registry.get(target.agentId) ?? target;
@@ -326,17 +393,18 @@ export function BackgroundTaskViewProvider({
           );
           live = registry.get(target.agentId) ?? live;
         } else if (typeof registry.queueMessage === 'function') {
-          return registry.queueMessage(target.agentId, trimmed);
+          // A mirrored running agent's queue is drained to the daemon's
+          // message route by the attached TUI's sync hook.
+          return registry.queueMessage(target.agentId, trimmed)
+            ? { ok: true }
+            : { ok: false, reason: 'The agent is not accepting messages.' };
         } else {
-          return false;
+          return { ok: false, reason: 'The agent is not accepting messages.' };
         }
       }
       if (live.status === 'paused') {
-        const resumed = await config.resumeBackgroundAgent(
-          target.agentId,
-          trimmed,
-        );
-        return Boolean(resumed);
+        // A message to a paused agent resumes it with that message.
+        return resumeAgent(live, trimmed);
       }
       if (live.status === 'completed' && live.isBackgrounded !== false) {
         if (typeof registry.continueResidentAgent === 'function') {
@@ -345,7 +413,7 @@ export function BackgroundTaskViewProvider({
             trimmed,
           );
           if (continuation === 'continued') {
-            return true;
+            return { ok: true };
           }
         }
         if (typeof config.reviveCompletedBackgroundAgent === 'function') {
@@ -353,12 +421,17 @@ export function BackgroundTaskViewProvider({
             target.agentId,
             trimmed,
           );
-          return Boolean(revived);
+          return revived
+            ? { ok: true }
+            : { ok: false, reason: 'The finished agent could not be revived.' };
         }
       }
-      return false;
+      return {
+        ok: false,
+        reason: `The agent is ${live.status} and cannot take messages.`,
+      };
     },
-    [config, entries, selectedIndex],
+    [config, entries, selectedIndex, resumeAgent],
   );
 
   const toggleSelectedWorkflowPause = useCallback((): boolean | null => {

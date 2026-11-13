@@ -428,6 +428,8 @@ import {
   type ServeSessionTasksStatus,
   type ServeStatus,
   type ServeStatusCell,
+  type ServeSubagentAbandonResult,
+  type ServeSubagentResumeResult,
   type ServeWorkspaceMcpServerStatus,
   type ServeWorkspaceMcpStatus,
   type ServeWorkspaceProviderModel,
@@ -1029,6 +1031,25 @@ function buildAcpLocalReadRoots(config: Config): string[] {
     ...defaultAcpOnlyLocalReadRoots(),
     ...parseAcpLocalReadRootsEnv(),
   ];
+}
+
+/**
+ * The `{ sessionId, taskId }` params shared by the subagent resume and
+ * abandon ext methods, validated the way cancel and message validate them.
+ */
+function readSubagentControlParams(params: Record<string, unknown>): {
+  sessionId: string;
+  taskId: string;
+} {
+  const sessionId = params['sessionId'];
+  if (typeof sessionId !== 'string' || sessionId.length === 0) {
+    throw RequestError.invalidParams(undefined, 'Invalid or missing sessionId');
+  }
+  const taskId = params['taskId'];
+  if (typeof taskId !== 'string' || taskId.length === 0) {
+    throw RequestError.invalidParams(undefined, 'Invalid or missing taskId');
+  }
+  return { sessionId, taskId };
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -13816,16 +13837,20 @@ class QwenAgent implements Agent {
         }
         const currentTask = registry.get(task.id) ?? task;
         if (currentTask.status === 'paused') {
-          const resumed = await config.resumeBackgroundAgent(
+          const outcome = await config.resumeBackgroundAgentWithOutcome(
             currentTask.id,
             message,
           );
-          return resumed
+          // `reason` stays this answer's code vocabulary; the resume
+          // service's own code and sentence ride along (rule #211).
+          return outcome.resumed
             ? { delivered: true, action: 'resumed', status: 'running' }
             : {
                 delivered: false,
                 reason: 'resume_failed',
-                status: currentTask.status,
+                code: outcome.code,
+                detail: outcome.reason,
+                status: registry.get(currentTask.id)?.status ?? 'paused',
               };
         }
         if (currentTask.status === 'completed') {
@@ -13861,6 +13886,93 @@ class QwenAgent implements Agent {
           reason: 'not_running',
           status: currentTask.status,
         };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionTaskResume: {
+        const { sessionId, taskId } = readSubagentControlParams(params);
+        const rawMessage = params['message'];
+        if (rawMessage !== undefined && typeof rawMessage !== 'string') {
+          throw RequestError.invalidParams(
+            undefined,
+            'message must be a string',
+          );
+        }
+        const message = rawMessage?.trim() || undefined;
+        debugLogger.info(
+          `sessionTaskResume requested sessionId=${sessionId} taskId=${taskId} hasMessage=${message !== undefined}`,
+        );
+        const config = this.sessionOrThrow(sessionId).getConfig();
+        const registry = config.getBackgroundTaskRegistry();
+        // Same lookup as cancel and message: the agent id, or the tool call
+        // that launched it. An unknown id goes to the service, which answers
+        // agent_not_found.
+        const agentId =
+          registry.get(taskId)?.id ??
+          registry.getAll().find((t) => t.toolUseId === taskId)?.id ??
+          taskId;
+        const outcome = await config.resumeBackgroundAgentWithOutcome(
+          agentId,
+          message,
+        );
+        let result: ServeSubagentResumeResult;
+        if (outcome.resumed) {
+          result = { outcome: 'resumed', status: 'running' };
+        } else {
+          const status = registry.get(agentId)?.status;
+          result = {
+            outcome: 'refused',
+            code: outcome.code,
+            reason: outcome.reason,
+            ...(status ? { status } : {}),
+          };
+        }
+        debugLogger.info(
+          `sessionTaskResume ${result.outcome} sessionId=${sessionId} taskId=${agentId}` +
+            (result.outcome === 'refused' ? ` code=${result.code}` : ''),
+        );
+        return result;
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionTaskAbandon: {
+        const { sessionId, taskId } = readSubagentControlParams(params);
+        debugLogger.info(
+          `sessionTaskAbandon requested sessionId=${sessionId} taskId=${taskId}`,
+        );
+        const config = this.sessionOrThrow(sessionId).getConfig();
+        const registry = config.getBackgroundTaskRegistry();
+        const task =
+          registry.get(taskId) ??
+          registry.getAll().find((t) => t.toolUseId === taskId);
+        let result: ServeSubagentAbandonResult;
+        if (!task) {
+          // The roster also shows an interrupted run that was never restored,
+          // read back from its sidecar as paused; the service abandons it
+          // through that sidecar, or finds nothing to abandon.
+          result = config.abandonBackgroundAgent(taskId)
+            ? { outcome: 'abandoned', status: 'cancelled' }
+            : {
+                outcome: 'refused',
+                code: 'agent_not_found',
+                reason: `No background agent "${taskId}" is registered in this session.`,
+              };
+        } else if (task.status !== 'paused') {
+          result = {
+            outcome: 'refused',
+            code: 'not_paused',
+            reason: `Background agent "${task.id}" is ${task.status}; only a paused agent can be abandoned.`,
+            status: task.status,
+          };
+        } else {
+          // Same fallback as cancel on a paused agent: an entry without a
+          // sidecar has nothing to mark, so the registry drops it directly.
+          if (!config.abandonBackgroundAgent(task.id)) {
+            registry.abandon(task.id);
+          }
+          result = { outcome: 'abandoned', status: 'cancelled' };
+        }
+        debugLogger.info(
+          `sessionTaskAbandon ${result.outcome} sessionId=${sessionId} taskId=${task?.id ?? taskId}` +
+            (result.outcome === 'refused' ? ` code=${result.code}` : ''),
+        );
+        return result;
       }
       case SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction: {
         const sessionId = params['sessionId'];

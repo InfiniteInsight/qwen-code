@@ -462,6 +462,26 @@ export interface AgentTask extends TaskBase {
   messages?: readonly BackgroundAgentMessage[];
   /** Live AgentCore reference while the sub-agent runtime is active. */
   core?: AgentCore;
+  /**
+   * Present on an entry mirrored from a daemon-hosted session (a
+   * daemon-attached TUI tab). Resume and abandon act on the daemon's own
+   * agent through it: this process's resume service has no sidecar for a
+   * mirrored entry and would refuse.
+   */
+  remoteControl?: AgentTaskRemoteControl;
+}
+
+/** What a remote resume or abandon answered; a refusal names its cause. */
+export type AgentTaskRemoteActionResult =
+  | { ok: true }
+  | { ok: false; code?: string; reason: string };
+
+/** Daemon-backed controls for an agent the TUI only mirrors. */
+export interface AgentTaskRemoteControl {
+  /** Resume the paused agent; `message` is the first continuation instruction. */
+  resume(message?: string): Promise<AgentTaskRemoteActionResult>;
+  /** Abandon the paused agent; on success it leaves the mirror too. */
+  abandon(): Promise<AgentTaskRemoteActionResult>;
 }
 
 /**
@@ -519,12 +539,13 @@ interface BackgroundTaskCancelOptions {
  * Ordering relative to the registry mutation falls into two camps:
  *   - **Keeps the entry around** (`register` / `complete` / `fail` /
  *     `cancel` / `finalizeCancelled` /
- *     `finalizeCancellationIfPending` / `abandon`): emit while the
+ *     `finalizeCancellationIfPending`): emit while the
  *     entry is still in the Map (the status field has been mutated
  *     in place to its terminal value), so a callback that re-reads
  *     `registry.get(entry.agentId)` sees the entry. Snapshot-style
  *     consumers calling `getAll()` see the new status too.
- *   - **Removes the entry** (`unregisterForeground`, `reset`):
+ *   - **Removes the entry** (`unregisterForeground`, `abandon`,
+ *     `removeEntry`, `reset`):
  *     deletes from the Map BEFORE emitting so snapshot-style
  *     consumers drop the row. The `entry` arg carries the agent's
  *     last live state for log / display consumers; `registry.get`
@@ -1149,6 +1170,8 @@ export class BackgroundTaskRegistry {
     const entry = this.agents.get(agentId);
     if (!entry) return;
     this.deleteAgent(agentId);
+    // A drain loop parked on this id sees it gone and exits, as on abandon.
+    this.wakeMessageWaiters(agentId);
     this.emitStatusChange(entry);
     this.drainQueues();
   }
@@ -1258,9 +1281,11 @@ export class BackgroundTaskRegistry {
   }
 
   /**
-   * Marks a paused interrupted task as intentionally discarded/cancelled
-   * without emitting a task-notification. Used when the user explicitly
-   * abandons a recovered task instead of resuming it.
+   * Discards a paused interrupted task without emitting a task-notification
+   * and drops it from the registry, so it leaves every list (dialog, pill,
+   * live panel, daemon rosters). Used when the user explicitly abandons a
+   * recovered task instead of resuming it. A cancel of a running task keeps
+   * its entry; only an abandon removes it.
    */
   abandon(agentId: string): void {
     const entry = this.agents.get(agentId);
@@ -1272,8 +1297,13 @@ export class BackgroundTaskRegistry {
     this.releaseFinishingWaiters(agentId, true);
     debugLogger.info(`Abandoned paused background agent: ${agentId}`);
     this.rejectPendingApprovals(entry);
-    this.emitStatusChange(entry);
     this.disposeResidentAgent(agentId);
+    // Delete before emitting, as `unregisterForeground` does, so a callback
+    // re-pulling `getAll()` no longer sees the row; wake any message waiter
+    // so a loop parked on this id sees it gone and exits.
+    this.deleteAgent(agentId);
+    this.wakeMessageWaiters(agentId);
+    this.emitStatusChange(entry);
     this.drainQueues();
   }
 

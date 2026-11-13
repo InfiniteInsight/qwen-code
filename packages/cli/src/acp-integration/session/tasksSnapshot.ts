@@ -560,6 +560,10 @@ export async function buildSessionAgentsStatus(
           return;
         }
         metaSignatures.set(meta.agentId, JSON.stringify(meta));
+        // An agent the user abandoned leaves the roster (#259); its sidecar
+        // and transcript stay on disk, and the signature above keeps the
+        // cache honest about it.
+        if (typeof meta.abandonedAt === 'string') return;
         const startTime = Date.parse(meta.createdAt);
         if (!Number.isFinite(startTime) || !meta.status) {
           sidecarScanIncomplete = true;

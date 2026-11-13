@@ -95,6 +95,8 @@ import {
   type ServeSessionSavedWorkflowStatus,
   type ServeSessionTasksStatus,
   type ServeSessionWorkflowTaskStatus,
+  type ServeSubagentAbandonResult,
+  type ServeSubagentResumeResult,
   type ServeWorkspaceMcpResourcesStatus,
   type ServeWorkspaceMcpStatus,
   type ServeWorkspaceMcpToolsStatus,
@@ -14194,6 +14196,8 @@ export function createSessionControlPlane(
           action?: 'queued' | 'resumed' | 'continued' | 'revived';
           status?: string;
           reason?: string;
+          code?: string;
+          detail?: string;
         }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionTaskMessage, {
           taskId,
           message,
@@ -14201,6 +14205,39 @@ export function createSessionControlPlane(
       } finally {
         endSideRequest();
       }
+    },
+
+    // A resume starts the agent running in the child, so it is admitted the
+    // way a message is (reset barrier, side-request count); an abandon only
+    // discards a paused agent, so it goes like a cancel. Both reach the child
+    // through `requestSessionStatus`, which races the transport through
+    // `raceTransportClosed` (#258).
+    async resumeSessionTask(sessionId, taskId, message, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      assertSessionResetNotPending(sessionId);
+      const endSideRequest = beginSideRequest(entry);
+      try {
+        return await requestSessionStatus<ServeSubagentResumeResult>(
+          sessionId,
+          SERVE_CONTROL_EXT_METHODS.sessionTaskResume,
+          message === undefined ? { taskId } : { taskId, message },
+        );
+      } finally {
+        endSideRequest();
+      }
+    },
+
+    async abandonSessionTask(sessionId, taskId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      return requestSessionStatus<ServeSubagentAbandonResult>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionTaskAbandon,
+        { taskId },
+      );
     },
 
     async controlSessionWorkflowTask(

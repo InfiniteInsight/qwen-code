@@ -70,6 +70,8 @@ import type {
   DaemonSessionTurnIndexPage,
   DaemonSessionTurnIndexPageOptions,
   SideTaskSessionRequest,
+  DaemonSubagentAbandonResult,
+  DaemonSubagentResumeResult,
   DaemonSubagentSessionResolution,
   DaemonSessionGroup,
   DaemonSessionGroupCatalog,
@@ -3719,16 +3721,65 @@ export class DaemonClient {
     action?: 'queued' | 'resumed' | 'continued' | 'revived';
     status?: string;
     reason?: string;
+    /** On `resume_failed`: the resume service's refusal code. */
+    code?: string;
+    /** On `resume_failed`: a sentence naming the cause. */
+    detail?: string;
   }> {
     return await this.jsonRequest<{
       delivered: boolean;
       action?: 'queued' | 'resumed' | 'continued' | 'revived';
       status?: string;
       reason?: string;
+      code?: string;
+      detail?: string;
     }>(
       `/session/${urlEncode(sessionId)}/subagents/${urlEncode(subagentRef)}/message`,
       'POST /session/:id/subagents/:subagentRef/message',
       { clientId, mode: 'rest', method: 'POST', body: { message } },
+    );
+  }
+
+  /**
+   * Resume ONE paused subagent through the daemon's own resume service.
+   * Wraps `POST /session/:id/subagents/:subagentRef/resume`; `message`, when
+   * given, is the first continuation instruction. A refusal is answered, not
+   * thrown, with its `code` and `reason`; an unknown ref is a 404
+   * `DaemonHttpError`.
+   */
+  async resumeSubagentSession(
+    sessionId: string,
+    subagentRef: string,
+    message?: string,
+    clientId?: string,
+  ): Promise<DaemonSubagentResumeResult> {
+    return await this.jsonRequest<DaemonSubagentResumeResult>(
+      `/session/${urlEncode(sessionId)}/subagents/${urlEncode(subagentRef)}/resume`,
+      'POST /session/:id/subagents/:subagentRef/resume',
+      {
+        clientId,
+        mode: 'rest',
+        method: 'POST',
+        body: message === undefined ? {} : { message },
+      },
+    );
+  }
+
+  /**
+   * Abandon ONE paused subagent: the daemon drops it from its registry and
+   * rosters and marks its sidecar. Wraps
+   * `POST /session/:id/subagents/:subagentRef/abandon`; a refusal is answered
+   * with its `code` and `reason`, an unknown ref is a 404 `DaemonHttpError`.
+   */
+  async abandonSubagentSession(
+    sessionId: string,
+    subagentRef: string,
+    clientId?: string,
+  ): Promise<DaemonSubagentAbandonResult> {
+    return await this.jsonRequest<DaemonSubagentAbandonResult>(
+      `/session/${urlEncode(sessionId)}/subagents/${urlEncode(subagentRef)}/abandon`,
+      'POST /session/:id/subagents/:subagentRef/abandon',
+      { clientId, mode: 'rest', method: 'POST' },
     );
   }
 
@@ -8522,6 +8573,10 @@ export class WorkspaceDaemonClient {
     action?: 'queued' | 'resumed' | 'continued' | 'revived';
     status?: string;
     reason?: string;
+    /** On `resume_failed`: the resume service's refusal code. */
+    code?: string;
+    /** On `resume_failed`: a sentence naming the cause. */
+    detail?: string;
   }> {
     return this.client.messageSubagentSession(
       sessionId,
@@ -8529,6 +8584,28 @@ export class WorkspaceDaemonClient {
       message,
       clientId,
     );
+  }
+
+  resumeSubagentSession(
+    sessionId: string,
+    subagentRef: string,
+    message?: string,
+    clientId?: string,
+  ): Promise<DaemonSubagentResumeResult> {
+    return this.client.resumeSubagentSession(
+      sessionId,
+      subagentRef,
+      message,
+      clientId,
+    );
+  }
+
+  abandonSubagentSession(
+    sessionId: string,
+    subagentRef: string,
+    clientId?: string,
+  ): Promise<DaemonSubagentAbandonResult> {
+    return this.client.abandonSubagentSession(sessionId, subagentRef, clientId);
   }
 
   /** Export an active persisted session from this registered workspace. */
