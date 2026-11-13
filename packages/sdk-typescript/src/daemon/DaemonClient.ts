@@ -3721,12 +3721,18 @@ export class DaemonClient {
     action?: 'queued' | 'resumed' | 'continued' | 'revived';
     status?: string;
     reason?: string;
+    /** On `resume_failed`: the resume service's refusal code. */
+    code?: string;
+    /** On `resume_failed`: a sentence naming the cause. */
+    detail?: string;
   }> {
     return await this.jsonRequest<{
       delivered: boolean;
       action?: 'queued' | 'resumed' | 'continued' | 'revived';
       status?: string;
       reason?: string;
+      code?: string;
+      detail?: string;
     }>(
       `/session/${urlEncode(sessionId)}/subagents/${urlEncode(subagentRef)}/message`,
       'POST /session/:id/subagents/:subagentRef/message',
@@ -8567,6 +8573,10 @@ export class WorkspaceDaemonClient {
     action?: 'queued' | 'resumed' | 'continued' | 'revived';
     status?: string;
     reason?: string;
+    /** On `resume_failed`: the resume service's refusal code. */
+    code?: string;
+    /** On `resume_failed`: a sentence naming the cause. */
+    detail?: string;
   }> {
     return this.client.messageSubagentSession(
       sessionId,

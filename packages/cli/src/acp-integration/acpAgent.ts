@@ -13837,16 +13837,20 @@ class QwenAgent implements Agent {
         }
         const currentTask = registry.get(task.id) ?? task;
         if (currentTask.status === 'paused') {
-          const resumed = await config.resumeBackgroundAgent(
+          const outcome = await config.resumeBackgroundAgentWithOutcome(
             currentTask.id,
             message,
           );
-          return resumed
+          // `reason` stays this answer's code vocabulary; the resume
+          // service's own code and sentence ride along (rule #211).
+          return outcome.resumed
             ? { delivered: true, action: 'resumed', status: 'running' }
             : {
                 delivered: false,
                 reason: 'resume_failed',
-                status: currentTask.status,
+                code: outcome.code,
+                detail: outcome.reason,
+                status: registry.get(currentTask.id)?.status ?? 'paused',
               };
         }
         if (currentTask.status === 'completed') {

@@ -2626,6 +2626,10 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     action?: 'queued' | 'resumed' | 'continued' | 'revived';
     status?: string;
     reason?: string;
+    /** On `resume_failed`: the resume service's refusal code. */
+    code?: string;
+    /** On `resume_failed`: a sentence naming the cause. */
+    detail?: string;
   }>;
 
   /**

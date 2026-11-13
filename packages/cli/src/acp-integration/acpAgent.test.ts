@@ -17992,6 +17992,61 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
       await stop();
     });
+
+    // #259 review / rule #211: the phone's message path to a paused agent
+    // names why the resume failed instead of a bare resume_failed.
+    it('answers a message to a paused agent with the resume refusal code and reason', async () => {
+      const paused = { id: 'agent-paused-3', kind: 'agent', status: 'paused' };
+      const resumeBackgroundAgent = vi.fn();
+      const resumeBackgroundAgentWithOutcome = vi
+        .fn()
+        .mockResolvedValueOnce({
+          resumed: false,
+          code: 'capacity_full',
+          reason: 'maximum concurrent background agents (4) reached',
+          task: paused,
+        })
+        .mockResolvedValueOnce({ resumed: true, task: paused });
+      const { agent, stop } = await startAgent({
+        getBackgroundTaskRegistry: vi
+          .fn()
+          .mockReturnValue(registryWith([paused])),
+        resumeBackgroundAgent,
+        resumeBackgroundAgentWithOutcome,
+      });
+
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskMessage, {
+          sessionId,
+          taskId: 'agent-paused-3',
+          message: 'keep going',
+        }),
+      ).resolves.toEqual({
+        delivered: false,
+        reason: 'resume_failed',
+        code: 'capacity_full',
+        detail: 'maximum concurrent background agents (4) reached',
+        status: 'paused',
+      });
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskMessage, {
+          sessionId,
+          taskId: 'agent-paused-3',
+          message: 'keep going',
+        }),
+      ).resolves.toEqual({
+        delivered: true,
+        action: 'resumed',
+        status: 'running',
+      });
+      expect(resumeBackgroundAgentWithOutcome).toHaveBeenCalledWith(
+        'agent-paused-3',
+        'keep going',
+      );
+      expect(resumeBackgroundAgent).not.toHaveBeenCalled();
+
+      await stop();
+    });
   });
 
   it('rejects sessionTaskCancel with invalid params', async () => {

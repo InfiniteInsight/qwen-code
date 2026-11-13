@@ -14196,6 +14196,8 @@ export function createSessionControlPlane(
           action?: 'queued' | 'resumed' | 'continued' | 'revived';
           status?: string;
           reason?: string;
+          code?: string;
+          detail?: string;
         }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionTaskMessage, {
           taskId,
           message,
