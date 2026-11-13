@@ -84,8 +84,10 @@ function errCode(e: unknown): string {
  * Checks a clone destination before git runs. It must be absolute; it is
  * normalised; its parent must exist and be a directory; the destination itself
  * must be absent or an empty directory. A symlink at the destination is refused
- * even when it points at an empty directory, so the clone lands where the path
- * says. Never throws: every refusal names its cause.
+ * even when it points at an empty directory. The answer holds when the check
+ * runs, not after: the caller still relies on git clone refusing a destination
+ * that is not empty by the time it starts. Never throws: every refusal names
+ * its cause.
  */
 export async function checkDest(dest: string): Promise<DestCheck> {
   if (typeof dest !== 'string' || !isAbsolute(dest)) {
