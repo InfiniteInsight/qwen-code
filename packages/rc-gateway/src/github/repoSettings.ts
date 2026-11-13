@@ -23,6 +23,7 @@
 import { constants } from 'node:fs';
 import { lstat, open } from 'node:fs/promises';
 import { join } from 'node:path';
+import { isInternalSecretEnvVar } from '@qwen-code/qwen-code-core';
 
 export const REPO_SETTINGS_MAX_BYTES = 1024 * 1024;
 
@@ -30,6 +31,9 @@ export const REPO_SETTINGS_MAX_BYTES = 1024 * 1024;
  * `command` (hooks and MCP servers) and `url` (MCP servers) are display
  * strings: the hook's or server's own env, cwd, headers and trust are written
  * after it in `[label: ...]` parts, so they are never run or linked as is.
+ * A value from `.qwen/settings.json` that names `$VAR` or `${VAR}` ends with
+ * ` (expands $VAR from your environment)`, because the CLI fills those in
+ * from the owner's environment before it uses the value.
  */
 export interface RepoSettingsFindings {
   /** True when something is at `.qwen/settings.json`, read or not. */
@@ -48,6 +52,8 @@ export interface RepoSettingsFindings {
   approval: Array<{ key: string; value: string }>;
   /** Settings that choose where the owner's model key or traffic is sent. */
   credentials: Array<{ key: string; value: string }>;
+  /** Settings that send the owner's prompts, events or logs to a URL or path. */
+  dataSinks: Array<{ key: string; value: string }>;
   /** Why `.mcp.json` could not be inspected, when it is there. */
   mcpJsonUnreadable?: string;
   /**
@@ -110,7 +116,10 @@ const ASKING_APPROVAL_MODES: readonly string[] = ['default', 'plan'];
  * Lists whose every entry loosens approval: allow rules (`permissions.allow`,
  * `tools.allowed`, v1 `allowedTools`, merged into one allow list by
  * loadCliConfig) and the AUTO classifier's allow hints and environment lines
- * (`permissions.autoMode`, read by core's classifier system prompt).
+ * (`permissions.autoMode`, read by core's classifier system prompt). Also
+ * `dualOutput.inputFile`: the CLI watches that file for JSONL commands that
+ * submit prompts and answer tool approvals (`config.ts` loadCliConfig,
+ * docs/users/features/dual-output.md).
  */
 const APPROVAL_LIST_SETTINGS: readonly string[] = [
   'permissions.allow',
@@ -118,6 +127,31 @@ const APPROVAL_LIST_SETTINGS: readonly string[] = [
   'allowedTools',
   'permissions.autoMode.hints.allow',
   'permissions.autoMode.environment',
+  'dualOutput.inputFile',
+];
+
+/**
+ * Settings that send the owner's data to a URL or path the repo chooses. All
+ * are read from the merged settings with no workspace restriction
+ * (`settingsUtils.ts` restriction lists), so a repo's value applies when no
+ * flag or env var sets one:
+ * - `telemetry.*`: the OTLP endpoints, the per-signal endpoints, the outfile
+ *   and the target, resolved in core `telemetry/config.ts`
+ *   resolveTelemetrySettings (flag, then QWEN_TELEMETRY_* and
+ *   OTEL_EXPORTER_OTLP_* env, then settings). With `logPrompts` the prompts
+ *   go along.
+ * - `dualOutput.jsonFile`: the session's structured event stream.
+ * - `model.openAILoggingDir`: OpenAI API request and response logs.
+ */
+const DATA_SINK_SETTINGS: readonly string[] = [
+  'telemetry.otlpEndpoint',
+  'telemetry.otlpTracesEndpoint',
+  'telemetry.otlpLogsEndpoint',
+  'telemetry.otlpMetricsEndpoint',
+  'telemetry.outfile',
+  'telemetry.target',
+  'dualOutput.jsonFile',
+  'model.openAILoggingDir',
 ];
 
 type ReadResult =
@@ -360,6 +394,44 @@ function visible(s: string): string {
   return out;
 }
 
+// The CLI's expansion pattern (core `utils/envVarResolver.ts`
+// resolveEnvVarsInString), run over every string value of a settings file.
+const ENV_REFERENCE = /\$(?:(\w+)|{([^}]+)})/g;
+
+function collectReferences(v: unknown, names: Set<string>): void {
+  if (typeof v === 'string') {
+    for (const match of v.matchAll(ENV_REFERENCE)) {
+      const name = match[1] ?? match[2];
+      if (name === undefined) continue;
+      // Left unexpanded by the CLI, exactly as resolveEnvVarsInString does.
+      const upper = name.toUpperCase();
+      if (upper === 'SESSION_ID' || upper === 'QWEN_CODE_SESSION_ID') continue;
+      if (isInternalSecretEnvVar(name)) continue;
+      names.add(name);
+    }
+  } else if (Array.isArray(v)) {
+    for (const item of v) collectReferences(item, names);
+  } else if (isRecord(v)) {
+    // Values only: the CLI does not expand object keys.
+    for (const item of Object.values(v)) collectReferences(item, names);
+  }
+}
+
+/**
+ * The display text, then a note naming every `$VAR` the CLI would fill in
+ * from the owner's environment in the raw values it was built from, made
+ * visible as a whole.
+ */
+function shown(text: string, raw: unknown[], expands = true): string {
+  const names = new Set<string>();
+  if (expands) collectReferences(raw, names);
+  const note =
+    names.size > 0
+      ? ` (expands ${[...names].map((n) => `$${n}`).join(', ')} from your environment)`
+      : '';
+  return visible(text + note);
+}
+
 /** A string as is; anything else as JSON, so an odd value is shown, not dropped. */
 function valueText(v: unknown): string {
   if (typeof v === 'string') return v;
@@ -413,19 +485,25 @@ function withDetails(
 
 function describeHook(hook: Record<string, unknown>): string {
   if (hook['type'] === 'http') {
-    return withDetails(`http ${valueText(hook['url'])}`, [
+    const text = withDetails(`http ${valueText(hook['url'])}`, [
       ['headers', pairsText(hook['headers'])],
       ['env vars', listText(hook['allowedEnvVars'])],
     ]);
+    return shown(text, [hook['url'], hook['headers'], hook['allowedEnvVars']]);
   }
-  if (hook['type'] === 'prompt') return `prompt ${valueText(hook['prompt'])}`;
+  if (hook['type'] === 'prompt') {
+    return shown(`prompt ${valueText(hook['prompt'])}`, [hook['prompt']]);
+  }
   if (hook['type'] === 'command' && typeof hook['command'] === 'string') {
     // The hook runner spreads a hook's own env over the session's, unfiltered.
-    return withDetails(hook['command'], [['env', pairsText(hook['env'])]]);
+    const text = withDetails(hook['command'], [
+      ['env', pairsText(hook['env'])],
+    ]);
+    return shown(text, [hook['command'], hook['env']]);
   }
   // An entry the CLI would discard (no or unknown type, a non-string command)
   // is still shown whole rather than guessed at.
-  return valueText(hook);
+  return shown(valueText(hook), [hook]);
 }
 
 /**
@@ -448,10 +526,7 @@ function hooksOf(
       }
       for (const hook of definition['hooks']) {
         if (!isRecord(hook)) continue;
-        out.push({
-          event: visible(event),
-          command: visible(describeHook(hook)),
-        });
+        out.push({ event: visible(event), command: describeHook(hook) });
       }
     }
   }
@@ -468,6 +543,7 @@ function hooksOf(
 function serversOf(
   servers: unknown,
   prefix: string,
+  expands: boolean,
 ): RepoSettingsFindings['mcpServers'] {
   if (!isRecord(servers)) return [];
   return Object.entries(servers).map(([name, config]) => {
@@ -483,7 +559,7 @@ function serversOf(
       const command = [config['command'], ...args]
         .map((part) => quoteArg(valueText(part)))
         .join(' ');
-      entry.command = visible(
+      entry.command = shown(
         withDetails(command, [
           [
             'cwd',
@@ -492,15 +568,19 @@ function serversOf(
           ['env', pairsText(config['env'])],
           ['trust', trust],
         ]),
+        [config['command'], args, config['cwd'], config['env']],
+        expands,
       );
     }
     const url = [config['httpUrl'], config['url'], config['tcp']].find(present);
     if (url !== undefined) {
-      entry.url = visible(
+      entry.url = shown(
         withDetails(valueText(url), [
           ['headers', pairsText(config['headers'])],
           ['trust', trust],
         ]),
+        [url, config['headers']],
+        expands,
       );
     }
     return entry;
@@ -523,7 +603,8 @@ function commandsOf(
   const out: RepoSettingsFindings['commands'] = [];
   for (const key of COMMAND_SETTINGS) {
     const value = at(settings, key);
-    if (present(value)) out.push({ key, value: visible(valueText(value)) });
+    if (present(value))
+      out.push({ key, value: shown(valueText(value), [value]) });
   }
   const env = settings['env'];
   if (isRecord(env)) {
@@ -531,7 +612,7 @@ function commandsOf(
       if (present(value)) {
         out.push({
           key: visible(`env.${name}`),
-          value: visible(valueText(value)),
+          value: shown(valueText(value), [value]),
         });
       }
     }
@@ -552,13 +633,14 @@ function approvalOf(
     ) {
       continue;
     }
-    out.push({ key, value: visible(valueText(value)) });
+    out.push({ key, value: shown(valueText(value), [value]) });
   }
   for (const key of APPROVAL_LIST_SETTINGS) {
     const value = at(settings, key);
     const items = Array.isArray(value) ? value : [value];
     for (const item of items) {
-      if (present(item)) out.push({ key, value: visible(valueText(item)) });
+      if (present(item))
+        out.push({ key, value: shown(valueText(item), [item]) });
     }
   }
   return out;
@@ -574,6 +656,12 @@ function approvalOf(
  *   sends the owner's key to the URL the repo chose.
  * - `security.auth.baseUrl`: the base URL when no provider entry, flag or
  *   env var sets one, used with the owner's env API key.
+ * - `security.auth.apiKey`: the lowest API key layer
+ *   (`modelConfigUtils.ts` resolveCliGenerationConfig into
+ *   resolveModelConfig). A workspace value outranks the user's settings file,
+ *   so it replaces a key the owner keeps there, and serves whenever no
+ *   provider envKey, flag or env var supplies one: the owner's prompts then
+ *   go out on the repo owner's account. Only its presence is shown.
  * - `omni.delivery.upload.baseUrl` with `apiKeyEnv`: the media upload
  *   endpoint and the variable whose key is sent to it.
  * - `proxy`: every CLI HTTP request goes through it, which exposes a plain
@@ -589,14 +677,17 @@ function credentialsOf(
       const base = `modelProviders.${provider}`;
       if (!Array.isArray(models)) {
         if (present(models)) {
-          out.push({ key: visible(base), value: visible(valueText(models)) });
+          out.push({
+            key: visible(base),
+            value: shown(valueText(models), [models]),
+          });
         }
         continue;
       }
       models.forEach((model, index) => {
         const key = visible(`${base}[${index}]`);
         if (!isRecord(model)) {
-          out.push({ key, value: visible(valueText(model)) });
+          out.push({ key, value: shown(valueText(model), [model]) });
           return;
         }
         const parts: string[] = [];
@@ -609,9 +700,14 @@ function credentialsOf(
         }
         out.push({
           key,
-          value: visible(
-            parts.length > 0 ? parts.join(', ') : valueText(model),
-          ),
+          value:
+            parts.length > 0
+              ? shown(parts.join(', '), [
+                  model['id'],
+                  model['baseUrl'],
+                  model['envKey'],
+                ])
+              : shown(valueText(model), [model]),
         });
       });
     }
@@ -620,7 +716,13 @@ function credentialsOf(
   if (present(authBaseUrl)) {
     out.push({
       key: 'security.auth.baseUrl',
-      value: visible(valueText(authBaseUrl)),
+      value: shown(valueText(authBaseUrl), [authBaseUrl]),
+    });
+  }
+  if (present(at(settings, 'security.auth.apiKey'))) {
+    out.push({
+      key: 'security.auth.apiKey',
+      value: 'a key is set (value not shown)',
     });
   }
   const uploadBaseUrl = at(settings, 'omni.delivery.upload.baseUrl');
@@ -628,16 +730,29 @@ function credentialsOf(
     const keyEnv = at(settings, 'omni.delivery.upload.apiKeyEnv');
     out.push({
       key: 'omni.delivery.upload.baseUrl',
-      value: visible(
+      value: shown(
         present(keyEnv)
           ? `${valueText(uploadBaseUrl)}, key from $${valueText(keyEnv)}`
           : valueText(uploadBaseUrl),
+        [uploadBaseUrl, keyEnv],
       ),
     });
   }
   const proxy = settings['proxy'];
   if (present(proxy)) {
-    out.push({ key: 'proxy', value: visible(valueText(proxy)) });
+    out.push({ key: 'proxy', value: shown(valueText(proxy), [proxy]) });
+  }
+  return out;
+}
+
+function dataSinksOf(
+  settings: Record<string, unknown>,
+): RepoSettingsFindings['dataSinks'] {
+  const out: RepoSettingsFindings['dataSinks'] = [];
+  for (const key of DATA_SINK_SETTINGS) {
+    const value = at(settings, key);
+    if (present(value))
+      out.push({ key, value: shown(valueText(value), [value]) });
   }
   return out;
 }
@@ -651,6 +766,7 @@ type SettingsPart = Pick<
   | 'commands'
   | 'approval'
   | 'credentials'
+  | 'dataSinks'
 >;
 
 function unreadableSettings(reason: string): SettingsPart {
@@ -662,6 +778,7 @@ function unreadableSettings(reason: string): SettingsPart {
     commands: [],
     approval: [],
     credentials: [],
+    dataSinks: [],
   };
 }
 
@@ -680,6 +797,7 @@ async function inspectSettingsFile(dir: string): Promise<SettingsPart> {
         commands: [],
         approval: [],
         credentials: [],
+        dataSinks: [],
       };
     }
     if (read.kind === 'unreadable') return unreadableSettings(read.reason);
@@ -695,10 +813,11 @@ async function inspectSettingsFile(dir: string): Promise<SettingsPart> {
     return {
       file: true,
       hooks: hooksOf(settings),
-      mcpServers: serversOf(settings['mcpServers'], ''),
+      mcpServers: serversOf(settings['mcpServers'], '', true),
       commands: commandsOf(settings),
       approval: approvalOf(settings),
       credentials: credentialsOf(settings),
+      dataSinks: dataSinksOf(settings),
     };
   } catch (e) {
     return unreadableSettings(`it could not be inspected: ${errorText(e)}`);
@@ -709,7 +828,8 @@ async function inspectSettingsFile(dir: string): Promise<SettingsPart> {
  * `<dir>/.mcp.json`, which the CLI reads from the session folder with no
  * trust check (`mcpJson.ts` loadProjectMcpServers, Claude Code's
  * `{ "mcpServers": {...} }` shape). A file without an `mcpServers` object
- * is ignored by the CLI and so here.
+ * is ignored by the CLI and so here. The CLI does not expand `$VAR` in it,
+ * so its values carry no expansion note.
  */
 async function inspectMcpJson(dir: string): Promise<{
   servers: RepoSettingsFindings['mcpServers'];
@@ -731,7 +851,7 @@ async function inspectMcpJson(dir: string): Promise<{
       };
     }
     if (!isRecord(parsed)) return { servers: [] };
-    return { servers: serversOf(parsed['mcpServers'], '.mcp.json: ') };
+    return { servers: serversOf(parsed['mcpServers'], '.mcp.json: ', false) };
   } catch (e) {
     return {
       servers: [],
@@ -772,7 +892,7 @@ async function inspectEnvFiles(
 
 /**
  * Reads what `<dir>` brings: `.qwen/settings.json` (hooks, MCP servers,
- * command, approval and credential settings), `.mcp.json` servers, and the
+ * command, approval, credential and data-sink settings), `.mcp.json` servers, and the
  * variable names of `.qwen/.env` and `.env`. Never throws: a file it cannot
  * read, parse or walk is reported as unreadable.
  */
@@ -806,6 +926,7 @@ export function hasRepoFindings(findings: RepoSettingsFindings): boolean {
     findings.commands.length > 0 ||
     findings.approval.length > 0 ||
     findings.credentials.length > 0 ||
+    findings.dataSinks.length > 0 ||
     findings.envFiles.some(
       (e) => e.unreadable !== undefined || e.keys.length > 0,
     )
