@@ -1467,6 +1467,230 @@
         color: var(--g1-warn);
         margin-top: 6px;
       }
+      /* #257. Clone from GitHub: a screen over the folder screen (z-index 74),
+         under the toasts (76) so a refusal of the conversation's start is
+         seen. Findings wrap in full: a command is never cut short. */
+      #gh-clone {
+        position: fixed;
+        top: env(safe-area-inset-top, 0px);
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 75;
+        display: flex;
+        flex-direction: column;
+        background: var(--g1-page);
+      }
+      #gh-clone[hidden] {
+        display: none;
+      }
+      :root.kb-open #gh-clone {
+        bottom: auto;
+        height: calc(var(--app-h, 100dvh) - env(safe-area-inset-top, 0px));
+      }
+      :root:has(#gh-clone:not([hidden])) #h1-toasts {
+        position: fixed;
+        z-index: 76;
+        bottom: calc(96px + env(safe-area-inset-bottom, 0px));
+      }
+      @media (min-width: 1100px) {
+        #gh-clone {
+          right: auto;
+          width: var(--h1-left);
+          box-sizing: border-box;
+          border-right: 1px solid var(--g1-line);
+        }
+        :root:has(#gh-clone:not([hidden])) #h1-toasts {
+          position: absolute;
+          z-index: 3;
+          bottom: 52px;
+        }
+      }
+      #gh-clone .scr-body {
+        padding: 8px 16px 24px;
+      }
+      #gh-clone .lede {
+        margin: 4px 4px 0;
+        color: var(--g1-ink-mid);
+        font-size: 14px;
+        line-height: 1.45;
+      }
+      #gh-clone [hidden],
+      #gh-clone-entry[hidden],
+      #gh-pick-bar[hidden] {
+        display: none;
+      }
+      #gh-clone .ghc-label {
+        display: block;
+        padding: 16px 0 6px;
+        font-size: 12px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--g1-ink-mid);
+      }
+      #gh-clone select,
+      #gh-clone input {
+        display: block;
+        width: 100%;
+        min-height: 44px;
+        box-sizing: border-box;
+        font-size: 16px;
+        border-radius: 10px;
+      }
+      #gh-clone button,
+      #gh-clone-open,
+      #gh-pick-bar button {
+        min-height: 44px;
+        min-width: 44px;
+        padding: 0 14px;
+        border-radius: 10px;
+        font-size: 15px;
+      }
+      #gh-clone-open {
+        width: 100%;
+      }
+      #gh-clone #gh-go,
+      #gh-clone #gh-pick {
+        display: block;
+        width: 100%;
+        margin-top: 10px;
+      }
+      #gh-clone .ghc-note,
+      #gh-clone #gh-account-note,
+      #gh-clone #gh-dest-note,
+      #gh-clone #gh-org,
+      #gh-clone #gh-chosen {
+        margin: 8px 0 0;
+        font-size: 13px;
+        line-height: 1.4;
+        color: var(--g1-ink-mid);
+        overflow-wrap: anywhere;
+      }
+      #gh-clone #gh-chosen {
+        font-size: 14px;
+        color: var(--g1-ink-hi);
+      }
+      #gh-clone .ghc-warn,
+      #gh-clone #gh-clone-note {
+        margin: 10px 0 0;
+        font-size: 14px;
+        line-height: 1.4;
+        color: var(--g1-warn);
+        overflow-wrap: anywhere;
+      }
+      #gh-clone .ghc-detail {
+        display: block;
+        margin-top: 4px;
+        font-size: 12px;
+        color: var(--g1-ink-mid);
+      }
+      #gh-repos {
+        margin-top: 8px;
+        max-height: 40vh;
+        overflow: auto;
+        border: 1px solid var(--g1-edge);
+        border-radius: 10px;
+      }
+      #gh-repos > :not(.ghc-repo) {
+        padding: 12px;
+        font-size: 14px;
+        color: var(--g1-ink-mid);
+        overflow-wrap: anywhere;
+      }
+      #gh-repos button.ghc-repo {
+        display: block;
+        width: 100%;
+        min-height: 56px;
+        box-sizing: border-box;
+        padding: 8px 12px;
+        border: 0;
+        border-bottom: 1px solid var(--g1-line);
+        border-radius: 0;
+        background: transparent;
+        color: var(--g1-ink-hi);
+        text-align: left;
+        cursor: pointer;
+      }
+      #gh-repos button.ghc-repo[aria-pressed='true'] {
+        background: var(--g1-band);
+        box-shadow: inset 3px 0 0 var(--g1-ink-hi);
+      }
+      #gh-repos .ghc-repo-name {
+        display: block;
+        font-size: 15px;
+        overflow-wrap: anywhere;
+      }
+      #gh-repos .ghc-repo-meta,
+      #gh-repos .ghc-repo-desc {
+        display: block;
+        font-size: 12px;
+        color: var(--g1-ink-mid);
+        overflow-wrap: anywhere;
+      }
+      #gh-run,
+      #gh-ask,
+      #gh-end,
+      #gh-pick-bar {
+        margin: 12px 0;
+        padding: 12px;
+        border-radius: 10px;
+        background: var(--g1-band);
+        color: var(--g1-ink-hi);
+        font-size: 14px;
+        line-height: 1.4;
+        overflow-wrap: anywhere;
+      }
+      #gh-run p,
+      #gh-ask p,
+      #gh-end p,
+      #gh-pick-bar p {
+        margin: 0 0 8px;
+      }
+      #gh-run .ghc-line {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 13px;
+        color: var(--g1-ink-mid);
+      }
+      #gh-clone .ghc-actions,
+      #gh-pick-bar .ghc-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 8px;
+      }
+      #gh-ask .ghc-cat {
+        margin: 12px 0 0;
+      }
+      #gh-ask h3 {
+        margin: 0 0 4px;
+        font-size: 12px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--g1-ink-mid);
+      }
+      #gh-ask ul {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+      #gh-ask li {
+        padding: 6px 0;
+        border-top: 1px solid var(--g1-line);
+      }
+      #gh-ask .ghc-name {
+        display: block;
+        font-size: 13px;
+        font-weight: 600;
+        overflow-wrap: anywhere;
+      }
+      #gh-ask .ghc-val {
+        display: block;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 13px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        text-overflow: clip;
+      }
       #wt-reset {
         align-self: flex-start;
         min-height: 40px;
@@ -5662,6 +5886,15 @@
             Pick the folder on the host it runs in; nothing starts until you
             choose one.
           </p>
+          <!-- #257: shown while Clone from GitHub is choosing where to put the
+               clone; the folder browsed to below becomes its parent. -->
+          <div id="gh-pick-bar" role="status" hidden>
+            <p id="gh-pick-text"></p>
+            <div class="ghc-actions">
+              <button id="gh-pick-use" type="button">Clone into this folder</button>
+              <button id="gh-pick-cancel" type="button">Cancel</button>
+            </div>
+          </div>
           <div class="grp">Recent folders</div>
           <div id="dir-recent">(no recent folders yet)</div>
           <div class="grp">On the host</div>
@@ -5677,6 +5910,70 @@
             />
             <button id="new-session" type="button">Start here</button>
           </div>
+          <!-- #257: hidden on a gateway without caps.remoteControl.githubClone. -->
+          <div id="gh-clone-entry" hidden>
+            <div class="grp">From GitHub</div>
+            <button id="gh-clone-open" type="button" aria-haspopup="dialog" aria-controls="gh-clone">Clone from GitHub</button>
+          </div>
+        </div>
+      </div>
+      <!-- #257. Clone from GitHub, which the folder screen's button opens: pick
+           an account and a repo (search, or paste owner/name or a link), say
+           where to put it, clone through the gateway, then list what the repo
+           brings that would run code or change trust and ask before starting a
+           conversation in it. Built like the archived screen: hidden attribute,
+           back button, Escape. Everything the gateway or the repo says is set
+           as text, never as markup. -->
+      <div id="gh-clone" role="dialog" aria-label="Clone from GitHub" hidden>
+        <div class="scr-head">
+          <button id="gh-back" type="button" aria-label="Back to the folder screen">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6" /></svg>
+          </button>
+          <strong class="ttl">Clone from GitHub</strong>
+          <span class="scr-sp" aria-hidden="true"></span>
+        </div>
+        <div class="scr-body">
+          <p class="lede">
+            Clone a repo onto the host, then start a conversation in it. You see
+            what the repo brings before anything starts.
+          </p>
+          <div id="gh-form">
+            <label class="ghc-label" for="gh-account">GitHub account</label>
+            <select id="gh-account" aria-label="GitHub account"></select>
+            <div id="gh-account-note" role="status" hidden></div>
+            <label class="ghc-label" for="gh-search">Repo</label>
+            <input
+              id="gh-search"
+              type="text"
+              inputmode="url"
+              autocomplete="off"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck="false"
+              placeholder="Search, or paste owner/name or a github.com link"
+            />
+            <div id="gh-org" hidden></div>
+            <div id="gh-repos" role="group" aria-label="Repos"></div>
+            <div id="gh-chosen" role="status" hidden></div>
+            <label class="ghc-label" for="gh-dest">Clone into</label>
+            <input
+              id="gh-dest"
+              type="text"
+              inputmode="url"
+              autocomplete="off"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck="false"
+              placeholder="/path/on/the/host/name"
+            />
+            <div id="gh-dest-note" role="status" hidden></div>
+            <button id="gh-pick" type="button">Pick another folder</button>
+            <div id="gh-clone-note" role="alert" hidden></div>
+            <button id="gh-go" type="button">Clone</button>
+          </div>
+          <div id="gh-run" role="status" hidden></div>
+          <div id="gh-ask" hidden></div>
+          <div id="gh-end" role="status" hidden></div>
         </div>
       </div>
       <!-- #185. The archived screen behind the list's Archived (n), with the
@@ -23064,6 +23361,7 @@
         const scr = $('list-screen');
         if (!open) {
           setDirPickerOpen(false);
+          ghcListClosed(); // #257: the clone screen over the folder screen
           setArchivedOpen(false);
           closeRowMenu(false);
           setFolderMenuOpen(false);
@@ -23573,6 +23871,820 @@
         const p = $('new-session-cwd').value.trim();
         if (p) void browseTo(p);
       };
+
+      // ---- Clone from GitHub (#257) ----------------------------------------
+      // The screen behind the folder screen's Clone from GitHub. It asks the
+      // gateway to clone a repo (POST /rc/github/clone), follows the job once
+      // a second (GET /rc/github/clone/:id), and when git is done either
+      // starts the conversation in the clone at once (the repo brings
+      // nothing: hasFindings === false) or lists what it brings and asks.
+      // A done job that does not say hasFindings, or one whose inspection
+      // failed, is asked about too. The repo's text and the gateway's are
+      // only ever set as text. No token is on this page: the gateway holds
+      // them, and the page names an account only by its id.
+      const GH_LAST_ACCOUNT_KEY = 'rc.github.lastAccount';
+      const GH_SEARCH_MS = 300;
+      const GH_POLL_MS = 1000;
+      const GH_ORG_LINE =
+        'Repos of an organisation that has not approved this app are not listed; use a gh login for those.';
+      // What a refused clone means, in words, by the gateway's code. The
+      // describeFailure line (code, HTTP status, the gateway's own message)
+      // follows it, so the cause is named twice over.
+      const GH_REFUSALS = {
+        invalid_repo:
+          'That is not a GitHub repo name. Use owner/name or a github.com link.',
+        dest_not_absolute:
+          'The folder must be an absolute path on the host, one that starts with /.',
+        dest_parent_missing:
+          'The folder to clone into has no parent folder on the host, so nothing was cloned. Pick another folder.',
+        dest_not_empty:
+          'That folder already has files in it, so nothing was cloned. Pick another folder, or change the name.',
+        dest_not_directory:
+          'Something that is not a folder is already at that path, so nothing was cloned. Pick another folder.',
+        too_many_clones:
+          'The host is already running as many clones as it allows, so nothing was cloned. Wait for one to finish, then try again.',
+        clone_refused:
+          'The gateway would not start the clone (it may be shutting down), so nothing was cloned.',
+        account_not_found:
+          'The gateway no longer has that GitHub account. Choose another, or connect it again under More, Host, GitHub.',
+      };
+      const ghc = {
+        gen: 0, // bumped on every start, close and reset: an overtaken answer is dropped
+        phase: 'form', // form | sending | running | ask | starting | ended
+        job: null, // { id, repo, dest } while a clone is followed
+        repo: '', // owner/name chosen
+        destParent: '', // a folder picked with Pick another folder; '' = <home>/projects
+        destTyped: false, // the destination was typed: a new repo does not rewrite it
+        home: '', // the host's home folder, once read
+        searchSeq: 0,
+        searchTimer: null,
+        pollTimer: null,
+        destSeq: 0,
+        picking: false,
+      };
+      function ghcLastAccount() {
+        try {
+          const v = localStorage.getItem(GH_LAST_ACCOUNT_KEY);
+          return typeof v === 'string' ? v : '';
+        } catch {
+          return '';
+        }
+      }
+      function ghcRememberAccount(id) {
+        try {
+          localStorage.setItem(GH_LAST_ACCOUNT_KEY, id);
+        } catch {
+          /* unavailable: the next open picks the first account */
+        }
+      }
+      // owner/name from owner/name or a github.com link, else ''. Only fills
+      // the box: the gateway checks the repo again.
+      function ghcParseRepo(text) {
+        let p = String(text || '').trim();
+        if (p.startsWith('https://github.com/')) p = p.slice('https://github.com/'.length);
+        else if (p.startsWith('git@github.com:')) p = p.slice('git@github.com:'.length);
+        if (p.endsWith('/')) p = p.slice(0, -1);
+        if (p.endsWith('.git')) p = p.slice(0, -4);
+        const parts = p.split('/');
+        if (parts.length !== 2) return '';
+        const [owner, name] = parts;
+        if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(owner)) return '';
+        if (!/^[A-Za-z0-9._-]{1,100}$/.test(name) || name === '.' || name === '..') return '';
+        return owner + '/' + name;
+      }
+      function ghcName(repo) {
+        const i = String(repo).indexOf('/');
+        return i < 0 ? '' : repo.slice(i + 1);
+      }
+      // The one panel of the screen showing: the form, the run, the question
+      // or the end.
+      function ghcView(phase) {
+        ghc.phase = phase;
+        $('gh-form').hidden = !(phase === 'form' || phase === 'sending');
+        $('gh-run').hidden = !(phase === 'running' || phase === 'starting');
+        $('gh-ask').hidden = phase !== 'ask';
+        $('gh-end').hidden = phase !== 'ended';
+        const scroller = $('gh-clone').querySelector('.scr-body');
+        if (scroller) scroller.scrollTop = 0;
+      }
+      function ghcSetNote(el, text, cls) {
+        el.textContent = '';
+        el.className = cls || '';
+        el.hidden = !text;
+        if (text) el.textContent = text;
+      }
+      // A refusal: the words, then the failure line in smaller type.
+      function ghcSetRefusal(el, words, detail) {
+        el.textContent = '';
+        el.hidden = false;
+        if (words) {
+          el.append(words);
+          const d = document.createElement('span');
+          d.className = 'ghc-detail';
+          d.textContent = detail;
+          el.append(d);
+        } else {
+          el.textContent = detail;
+        }
+      }
+      function ghcReset() {
+        ghc.gen++;
+        clearTimeout(ghc.searchTimer);
+        clearTimeout(ghc.pollTimer);
+        ghc.searchSeq++;
+        ghc.destSeq++;
+        ghc.job = null;
+        ghc.repo = '';
+        ghc.destParent = '';
+        ghc.destTyped = false;
+        ghc.picking = false;
+        $('gh-pick-bar').hidden = true;
+        $('gh-search').value = '';
+        $('gh-dest').value = '';
+        $('gh-repos').textContent = '';
+        ghcSetNote($('gh-chosen'), '');
+        ghcSetNote($('gh-account-note'), '');
+        ghcSetNote($('gh-dest-note'), '');
+        ghcSetNote($('gh-clone-note'), '');
+        ghcSetNote($('gh-org'), '');
+        $('gh-go').disabled = false;
+        $('gh-go').textContent = 'Clone';
+        ghcView('form');
+      }
+      function setGhCloneOpen(open, refocus) {
+        const scr = $('gh-clone');
+        if (scr.hidden === !open) return;
+        if (open) {
+          ghcReset();
+          scr.hidden = false;
+          $('gh-back').focus({ preventScroll: true });
+          void ghcLoadAccounts();
+          void ghcHome().then(() => ghcSyncDest());
+          return;
+        }
+        const phase = ghc.phase;
+        const job = ghc.job;
+        ghc.gen++;
+        clearTimeout(ghc.searchTimer);
+        clearTimeout(ghc.pollTimer);
+        ghc.searchSeq++;
+        scr.hidden = true;
+        // Leaving does not stop a clone, and does not start a conversation.
+        if (phase === 'running' && job) {
+          setStatus(
+            'The clone of ' + job.repo + ' keeps running on the host, into ' + job.dest +
+              '. No conversation starts there until you ask.',
+          );
+        } else if (phase === 'ask' && job) {
+          setStatus('The clone stays at ' + job.dest + '. Nothing was started.');
+        }
+        if (refocus && !$('dir-picker').hidden) {
+          $('gh-clone-open').focus({ preventScroll: true });
+        }
+      }
+      // The list (and the folder screen over it) shut: so does this one, and
+      // a folder pick in progress is over.
+      function ghcListClosed() {
+        ghc.picking = false;
+        $('gh-pick-bar').hidden = true;
+        setGhCloneOpen(false);
+      }
+      // The accounts: the last one used when the gateway still lists it, else
+      // the first.
+      async function ghcLoadAccounts() {
+        const gen = ghc.gen;
+        const note = $('gh-account-note');
+        const sel = $('gh-account');
+        ghcSetNote(note, 'Reading the GitHub accounts…');
+        const list = await readGitHubAccounts();
+        if (gen !== ghc.gen || $('gh-clone').hidden) return;
+        sel.textContent = '';
+        if (!list) {
+          ghcSetNote(
+            note,
+            githubState.loadError || 'The GitHub accounts could not be read.',
+            'ghc-warn',
+          );
+          $('gh-go').disabled = true;
+          return;
+        }
+        if (list.length === 0) {
+          ghcSetNote(
+            note,
+            'No GitHub accounts yet. Connect one under More, Host, GitHub, or log in with gh on the host.',
+            'ghc-warn',
+          );
+          $('gh-go').disabled = true;
+          return;
+        }
+        for (const a of list) {
+          const o = document.createElement('option');
+          o.value = a.id;
+          o.textContent =
+            a.login + (a.source === 'gh' ? ' (gh on this host)' : ' (connected)');
+          sel.append(o);
+        }
+        const stored = ghcLastAccount();
+        sel.value = list.some((a) => a.id === stored) ? stored : list[0].id;
+        $('gh-go').disabled = false;
+        ghcAccountChanged(false);
+      }
+      function ghcAccountChanged(remember) {
+        const id = $('gh-account').value;
+        const a = (githubState.accounts || []).find((x) => x.id === id);
+        if (remember && id) ghcRememberAccount(id);
+        ghcSetNote($('gh-org'), a && a.source === 'oauth' ? GH_ORG_LINE : '');
+        const problem =
+          a && typeof a.error === 'string' && a.error
+            ? a.login + ' is listed as failing by gh (' + a.error + '); a clone with it may fail.'
+            : githubState.ghError
+              ? 'gh could not list its logins: ' + githubState.ghError
+              : '';
+        ghcSetNote($('gh-account-note'), problem, 'ghc-warn');
+        if (!ghcParseRepo($('gh-search').value)) {
+          void ghcSearch($('gh-search').value.trim());
+        }
+      }
+      async function ghcSearch(q) {
+        const account = $('gh-account').value;
+        if (!account) return;
+        const seq = ++ghc.searchSeq;
+        const gen = ghc.gen;
+        const box = $('gh-repos');
+        if (!box.firstChild) box.textContent = 'Searching…';
+        const did = 'searching GitHub repos';
+        let res = null;
+        let body = null;
+        let threw = null;
+        try {
+          res = await fetch(
+            '/rc/github/repos?account=' + encodeURIComponent(account) + '&q=' + encodeURIComponent(q),
+            { headers: githubAuth() },
+          );
+          body = await res.json().catch(() => null);
+        } catch (e) {
+          threw = e;
+        }
+        if (seq !== ghc.searchSeq || gen !== ghc.gen) return;
+        box.textContent = '';
+        const say = (text) => {
+          const d = document.createElement('div');
+          d.textContent = text;
+          box.append(d);
+        };
+        if (threw) return say(failureOf(threw, did));
+        if (!res.ok) return say(describeFailure(res, body, did));
+        if (!body || !Array.isArray(body.repos)) {
+          return say(did + ' failed: the answer had no repo list');
+        }
+        for (const r of body.repos) {
+          if (!r || typeof r.fullName !== 'string') continue;
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'ghc-repo';
+          b.dataset.repo = r.fullName;
+          b.setAttribute('aria-pressed', String(r.fullName === ghc.repo));
+          const n = document.createElement('span');
+          n.className = 'ghc-repo-name';
+          n.textContent = r.fullName;
+          const m = document.createElement('span');
+          m.className = 'ghc-repo-meta';
+          const pushed =
+            typeof r.pushedAt === 'string' && r.pushedAt
+              ? 'pushed ' + (relativeTime(r.pushedAt) || r.pushedAt)
+              : 'never pushed';
+          m.textContent = (r.private ? 'private' : 'public') + ', ' + pushed;
+          b.append(n, m);
+          if (typeof r.description === 'string' && r.description) {
+            const d = document.createElement('span');
+            d.className = 'ghc-repo-desc';
+            d.textContent = r.description;
+            b.append(d);
+          }
+          box.append(b);
+        }
+        if (!box.firstChild) {
+          say(
+            q
+              ? 'No repo of this account has "' + q + '" in its name. You can still paste owner/name or a github.com link.'
+              : 'This account lists no repos. You can still paste owner/name or a github.com link.',
+          );
+        } else if (body.truncated === true) {
+          say('More repos match than are shown. Type more of the name to narrow the list.');
+        }
+      }
+      function ghcChoose(repo) {
+        ghc.repo = repo;
+        ghcSetNote($('gh-chosen'), repo ? 'Selected repo: ' + repo : '');
+        for (const b of $('gh-repos').querySelectorAll('button.ghc-repo')) {
+          b.setAttribute('aria-pressed', String(b.dataset.repo === repo));
+        }
+        ghcSetNote($('gh-clone-note'), '');
+        void ghcSyncDest();
+      }
+      // The host's home folder: the one the gateway reports, else the one the
+      // folder browser opens at (GET /rc/fs with no path, as the folder screen
+      // asks at boot). '' when neither is known, with the cause in the note
+      // under the destination.
+      async function ghcHome() {
+        const rc = caps && caps.remoteControl;
+        const known = rc && typeof rc.homeDir === 'string' ? rc.homeDir.replace(/\/+$/, '') : '';
+        if (known) return known;
+        if (ghc.home) return ghc.home;
+        const gen = ghc.gen;
+        const did = 'reading the host\'s home folder';
+        let res = null;
+        let body = null;
+        let threw = null;
+        try {
+          res = await fetch('/rc/fs', { headers: githubAuth() });
+          body = await res.json().catch(() => null);
+        } catch (e) {
+          threw = e;
+        }
+        if (threw || !res.ok || !body || typeof body.path !== 'string' || !body.path.startsWith('/')) {
+          if (gen === ghc.gen) {
+            ghcSetNote(
+              $('gh-dest-note'),
+              (threw
+                ? failureOf(threw, did)
+                : !res.ok
+                  ? describeFailure(res, body, did)
+                  : did + ' failed: the answer had no path') +
+                '. Type the full path of the folder to clone into.',
+              'ghc-warn',
+            );
+          }
+          return '';
+        }
+        ghc.home = body.path.replace(/\/+$/, '') || '/';
+        if (gen === ghc.gen) ghcSetNote($('gh-dest-note'), '');
+        return ghc.home;
+      }
+      // The destination field: <home>/projects/<name>, or <picked folder>/<name>,
+      // until the reader types one. Always absolute: a ~ never goes out.
+      async function ghcSyncDest() {
+        if (ghc.destTyped || !ghc.repo) return;
+        const name = ghcName(ghc.repo);
+        const gen = ghc.gen;
+        const seq = ++ghc.destSeq;
+        let parent = ghc.destParent;
+        if (!parent) {
+          const home = await ghcHome();
+          if (!home) return;
+          parent = joinPath(home, 'projects');
+        }
+        if (gen !== ghc.gen || seq !== ghc.destSeq || ghc.destTyped) return;
+        $('gh-dest').value = joinPath(parent, name);
+      }
+      // Clone: checks, then POST. The answer is a job to follow or a refusal
+      // said in words.
+      async function ghcClone() {
+        if (ghc.phase !== 'form') return;
+        const note = $('gh-clone-note');
+        ghcSetNote(note, '');
+        // Taken before anything is awaited: a second tap finds the form busy.
+        ghc.phase = 'sending';
+        $('gh-go').disabled = true;
+        $('gh-go').textContent = 'Starting the clone…';
+        const gen = ghc.gen;
+        const settle = (text, cls) => {
+          ghc.phase = 'form';
+          $('gh-go').disabled = false;
+          $('gh-go').textContent = 'Clone';
+          ghcSetNote(note, text, cls || 'ghc-warn');
+        };
+        const account = $('gh-account').value;
+        const repo = ghc.repo || ghcParseRepo($('gh-search').value);
+        if (!account) return settle('Choose a GitHub account first.');
+        if (!repo) {
+          return settle(
+            'Choose a repo first: tap one in the list, or paste owner/name or a github.com link.',
+          );
+        }
+        let dest = $('gh-dest').value.trim();
+        if (dest === '~' || dest.startsWith('~/')) {
+          const home = await ghcHome();
+          if (gen !== ghc.gen) return;
+          if (!home) {
+            return settle(
+              'The host\'s home folder is not known, so ~ cannot be expanded. Type the full path, starting with /.',
+            );
+          }
+          dest = joinPath(home, dest.slice(2));
+          $('gh-dest').value = dest;
+        }
+        if (!dest) {
+          return settle('Say where to put the clone: an absolute path on the host.');
+        }
+        const did = 'cloning ' + repo;
+        let res = null;
+        let body = null;
+        let threw = null;
+        try {
+          res = await fetch('/rc/github/clone', {
+            method: 'POST',
+            headers: Object.assign({ 'Content-Type': 'application/json' }, githubAuth()),
+            body: JSON.stringify({ account, repo, dest }),
+          });
+          body = await res.json().catch(() => null);
+        } catch (e) {
+          threw = e;
+        }
+        if (gen !== ghc.gen) {
+          // The screen was left while the gateway was answering.
+          if (res && res.status === 202) {
+            setStatus('The clone of ' + repo + ' started on the host, into ' + dest + '.');
+          }
+          return;
+        }
+        if (threw) return settle(failureOf(threw, did));
+        if (!res.ok) {
+          settle('');
+          const code = body && typeof body.code === 'string' ? body.code : '';
+          return ghcSetRefusal(note, GH_REFUSALS[code] || '', describeFailure(res, body, did));
+        }
+        if (!body || typeof body.jobId !== 'string') {
+          return settle(did + ' failed: the answer had no job to follow');
+        }
+        settle('');
+        ghcRememberAccount(account);
+        ghc.job = { id: body.jobId, repo, dest };
+        ghcRenderRun(
+          'Cloning ' + repo + ' into ' + dest,
+          typeof body.warning === 'string' ? body.warning : '',
+        );
+        ghcView('running');
+        const pgen = ++ghc.gen;
+        void ghcPoll(pgen);
+      }
+      function ghcRenderRun(head, warning) {
+        const box = $('gh-run');
+        box.textContent = '';
+        const add = (cls, id, text) => {
+          const p = document.createElement('p');
+          if (cls) p.className = cls;
+          if (id) p.id = id;
+          p.textContent = text;
+          box.append(p);
+        };
+        add('', 'gh-run-head', head);
+        add('ghc-line', 'gh-run-line', 'Waiting for git to say something…');
+        add('ghc-note', '', 'The clone keeps running on the host if you leave this screen.');
+        if (warning) add('ghc-warn', 'gh-run-warn', warning);
+        add('ghc-warn', 'gh-run-poll', '');
+        $('gh-run-poll').hidden = true;
+      }
+      function ghcRunPollNote(text) {
+        const el = $('gh-run-poll');
+        if (!el) return;
+        el.textContent = text;
+        el.hidden = !text;
+      }
+      // One loop per started clone: gen says whose it is, and a close, a reset
+      // or a newer start drops it.
+      async function ghcPoll(pgen) {
+        const job = ghc.job;
+        if (pgen !== ghc.gen || !job) return;
+        ghc.pollTimer = null;
+        const did = 'checking the clone of ' + job.repo;
+        let res = null;
+        let body = null;
+        let threw = null;
+        try {
+          res = await fetch('/rc/github/clone/' + encodeURIComponent(job.id), {
+            headers: githubAuth(),
+          });
+          body = await res.json().catch(() => null);
+        } catch (e) {
+          threw = e;
+        }
+        if (pgen !== ghc.gen || ghc.job !== job) return;
+        if (threw) {
+          ghcRunPollNote(failureOf(threw, did) + '. Still trying.');
+        } else if (res.status === 404 && body && body.code === 'job_not_found') {
+          return ghcEnd(
+            [
+              ['', 'The gateway no longer knows this clone (it probably restarted), so how it ended is unknown.'],
+              ['', 'Check the folder ' + job.dest + ' on the host.'],
+            ],
+            [['gh-retry', 'Try again', ghcRetry]],
+          );
+        } else if (!res.ok) {
+          ghcRunPollNote(describeFailure(res, body, did) + '. Still trying.');
+        } else if (!body || typeof body.state !== 'string') {
+          ghcRunPollNote(did + ' failed: the answer had no state. Still trying.');
+        } else if (body.state === 'done') {
+          return ghcDone(Object.assign({}, body, { repo: body.repo || job.repo, dest: body.dest || job.dest }));
+        } else if (body.state === 'failed') {
+          return ghcFailed(body, job);
+        } else {
+          ghcRunPollNote('');
+          const lines = Array.isArray(body.lines) ? body.lines : [];
+          const last = lines.length ? String(lines[lines.length - 1]) : '';
+          const el = $('gh-run-line');
+          const want = last || 'Waiting for git to say something…';
+          if (el && el.textContent !== want) el.textContent = want;
+        }
+        ghc.pollTimer = setTimeout(() => void ghcPoll(pgen), GH_POLL_MS);
+      }
+      // The end view: each line is [class, text]; each button [id, label, fn].
+      function ghcEnd(lines, buttons) {
+        clearTimeout(ghc.pollTimer);
+        const box = $('gh-end');
+        box.textContent = '';
+        for (const [cls, text] of lines) {
+          const p = document.createElement('p');
+          if (cls) p.className = cls;
+          p.textContent = text;
+          box.append(p);
+        }
+        if (buttons.length) {
+          const acts = document.createElement('div');
+          acts.className = 'ghc-actions';
+          for (const [id, label, fn] of buttons) {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.id = id;
+            b.textContent = label;
+            b.onclick = fn;
+            acts.append(b);
+          }
+          box.append(acts);
+        }
+        ghcView('ended');
+        const first = box.querySelector('button');
+        if (first) first.focus({ preventScroll: true });
+      }
+      // Back to the form, with the repo and the folder as they were.
+      function ghcRetry() {
+        ghc.job = null;
+        ghc.gen++;
+        ghcSetNote($('gh-clone-note'), '');
+        ghcView('form');
+      }
+      function ghcFailed(st, job) {
+        const lines = [['', 'The clone failed: ' + job.repo + '.']];
+        if (Number.isFinite(st.exitCode)) {
+          lines.push(['', 'git failed with exit code ' + st.exitCode + '.']);
+        }
+        const err = typeof st.error === 'string' ? st.error : '';
+        if (err) lines.push(['ghc-line', err]);
+        const out = Array.isArray(st.lines) ? st.lines : [];
+        const last = out.length ? String(out[out.length - 1]) : '';
+        if (last && !err.includes(last)) {
+          lines.push(['ghc-line', 'Last line from git: ' + last]);
+        }
+        ghcEnd(lines, [['gh-retry', 'Try again', ghcRetry]]);
+      }
+      // git is done. Nothing to ask about: start. Anything else (findings, a
+      // failed inspection, or an answer that does not say): ask first.
+      function ghcDone(st) {
+        if (st.hasFindings === false) {
+          void ghcStartIn(st.repo, st.dest);
+          return;
+        }
+        ghcShowAsk(st);
+      }
+      // The categories a clone's findings can hold, each with its heading and
+      // how an item reads as [name, value]. A category not listed here is
+      // still shown, under its own key.
+      const GH_FINDING_CATS = [
+        ['hooks', 'Hooks', (i) => [i.event, i.command]],
+        ['mcpServers', 'MCP servers', (i) => [i.name, i.command || i.url]],
+        ['commands', 'Commands', (i) => [i.key, i.value]],
+        ['approval', 'Approval settings', (i) => [i.key, i.value]],
+        ['credentials', 'Credentials and model endpoints', (i) => [i.key, i.value]],
+        ['dataSinks', 'Data sent elsewhere', (i) => [i.key, i.value]],
+        [
+          'envFiles',
+          '.env files',
+          (i) => [
+            i.file,
+            typeof i.unreadable === 'string' && i.unreadable
+              ? 'could not be read: ' + i.unreadable
+              : Array.isArray(i.keys) && i.keys.length
+                ? 'sets ' + i.keys.join(', ')
+                : '',
+          ],
+        ],
+      ];
+      function ghcText(v) {
+        return typeof v === 'string' ? v : v === undefined || v === null ? '' : String(v);
+      }
+      // An item of a category the page has no reader for: a string is its own
+      // name; an object is read by the usual field names.
+      function ghcGenericItem(i) {
+        if (typeof i === 'string') return [i, ''];
+        if (!i || typeof i !== 'object') return [ghcText(i), ''];
+        const first = (names) => {
+          for (const n of names) if (typeof i[n] === 'string' && i[n]) return i[n];
+          return '';
+        };
+        const name = first(['key', 'name', 'event', 'file', 'id']);
+        const value = first(['value', 'command', 'url']);
+        return name || value ? [name || value, name ? value : ''] : ['', JSON.stringify(i)];
+      }
+      function ghcFindingNodes(f) {
+        const out = [];
+        const line = (text) => {
+          const p = document.createElement('p');
+          p.className = 'ghc-warn';
+          p.textContent = text;
+          out.push(p);
+        };
+        if (!f || typeof f !== 'object') return out;
+        if (typeof f.unreadable === 'string') {
+          line('.qwen/settings.json could not be read: ' + f.unreadable);
+        }
+        if (typeof f.mcpJsonUnreadable === 'string') {
+          line('.mcp.json could not be read: ' + f.mcpJsonUnreadable);
+        }
+        const cat = (heading, items) => {
+          const sec = document.createElement('section');
+          sec.className = 'ghc-cat';
+          const h = document.createElement('h3');
+          h.textContent = heading;
+          const ul = document.createElement('ul');
+          for (const [name, value] of items) {
+            const li = document.createElement('li');
+            const n = document.createElement('span');
+            n.className = 'ghc-name';
+            n.textContent = ghcText(name);
+            li.append(n);
+            if (ghcText(value)) {
+              const v = document.createElement('span');
+              v.className = 'ghc-val';
+              v.textContent = ghcText(value);
+              li.append(v);
+            }
+            ul.append(li);
+          }
+          sec.append(h, ul);
+          out.push(sec);
+        };
+        const known = new Set(['file', 'unreadable', 'mcpJsonUnreadable']);
+        for (const [key, heading, read] of GH_FINDING_CATS) {
+          known.add(key);
+          if (Array.isArray(f[key]) && f[key].length) {
+            cat(heading, f[key].map((i) => (i && typeof i === 'object' ? read(i) : [ghcText(i), ''])));
+          }
+        }
+        for (const key of Object.keys(f)) {
+          if (known.has(key)) continue;
+          if (Array.isArray(f[key]) && f[key].length) {
+            cat(key, f[key].map(ghcGenericItem));
+          } else if (typeof f[key] === 'string' && f[key]) {
+            line(key + ': ' + f[key]);
+          }
+        }
+        return out;
+      }
+      function ghcShowAsk(st) {
+        clearTimeout(ghc.pollTimer);
+        const repo = ghcText(st.repo);
+        const dest = ghcText(st.dest);
+        const box = $('gh-ask');
+        box.textContent = '';
+        const p = (text, cls) => {
+          const el = document.createElement('p');
+          if (cls) el.className = cls;
+          el.textContent = text;
+          box.append(el);
+        };
+        p(repo + ' was cloned to ' + dest + '.');
+        p(
+          'It brings settings that can run commands, send data or loosen approval on the host. They take effect when a conversation starts in this folder. Nothing has started yet.',
+        );
+        if (typeof st.error === 'string' && st.error) p(st.error, 'ghc-warn');
+        const nodes = ghcFindingNodes(st.findings);
+        for (const n of nodes) box.append(n);
+        if (!nodes.length && !st.error) {
+          p('The gateway did not list what the repo brings, so it asks before starting.');
+        }
+        const acts = document.createElement('div');
+        acts.className = 'ghc-actions';
+        const go = document.createElement('button');
+        go.type = 'button';
+        go.id = 'gh-start';
+        go.textContent = 'Start a conversation here';
+        go.onclick = () => void ghcStartIn(repo, dest);
+        const no = document.createElement('button');
+        no.type = 'button';
+        no.id = 'gh-cancel';
+        no.textContent = 'Cancel';
+        no.onclick = () => {
+          ghc.job = null;
+          ghcEnd(
+            [
+              ['', 'Nothing was started.'],
+              ['', 'The clone stays at ' + dest + '.'],
+            ],
+            [['gh-again', 'Clone another repo', ghcAnother]],
+          );
+        };
+        acts.append(go, no);
+        box.append(acts);
+        ghc.job = { id: '', repo, dest };
+        ghcView('ask');
+        go.focus({ preventScroll: true });
+      }
+      function ghcAnother() {
+        ghcReset();
+        void ghcLoadAccounts();
+      }
+      // The conversation, in the clone. The create is the folder screen's own
+      // (startConversationIn): when it works, the page moves onto the new
+      // conversation and the list shuts, which closes this screen; when it does
+      // not, this screen is still up and says so.
+      async function ghcStartIn(repo, dest) {
+        const gen = ++ghc.gen;
+        ghc.job = { id: '', repo, dest };
+        ghcRenderRun('Cloned ' + repo + ' into ' + dest + '. Starting a conversation there…', '');
+        ghcView('starting');
+        await startConversationIn(dest);
+        if (gen !== ghc.gen || $('gh-clone').hidden) return;
+        const why = ($('status').textContent || '').trim();
+        ghcEnd(
+          [
+            ['', 'The clone is at ' + dest + ', but the conversation did not start.'],
+            ...(why ? [['ghc-line', why]] : []),
+          ],
+          [['gh-restart', 'Try starting again', () => void ghcStartIn(repo, dest)]],
+        );
+      }
+      $('gh-clone-open').addEventListener('click', () => setGhCloneOpen(true));
+      $('gh-back').addEventListener('click', () => setGhCloneOpen(false, true));
+      $('gh-clone').addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        setGhCloneOpen(false, true);
+      });
+      // The folder screen shows the button only where the gateway can clone,
+      // and opens with no folder pick pending.
+      $('list-new').addEventListener('click', () => {
+        $('gh-clone-entry').hidden = !githubOn();
+        ghc.picking = false;
+        $('gh-pick-bar').hidden = true;
+      });
+      $('gh-account').addEventListener('change', () => ghcAccountChanged(true));
+      $('gh-search').addEventListener('input', () => {
+        clearTimeout(ghc.searchTimer);
+        const text = $('gh-search').value;
+        const ref = ghcParseRepo(text);
+        if (ref) {
+          // A pasted repo is the repo: no search, and a search still on its
+          // way is dropped.
+          ghc.searchSeq++;
+          $('gh-repos').textContent = '';
+          const d = document.createElement('div');
+          d.textContent = 'Using ' + ref + ' as typed. No search is needed.';
+          $('gh-repos').append(d);
+          ghcChoose(ref);
+          return;
+        }
+        ghc.searchTimer = setTimeout(() => void ghcSearch(text.trim()), GH_SEARCH_MS);
+      });
+      $('gh-repos').addEventListener('click', (e) => {
+        const b = e.target.closest('button.ghc-repo');
+        if (b) ghcChoose(b.dataset.repo);
+      });
+      $('gh-dest').addEventListener('input', () => {
+        ghc.destTyped = $('gh-dest').value.trim() !== '';
+        ghcSetNote($('gh-clone-note'), '');
+      });
+      $('gh-go').addEventListener('click', () => void ghcClone());
+      // Pick another folder: the folder browser (the folder screen under this
+      // one) comes back with a bar, and the folder browsed to is where the
+      // repo's own folder goes.
+      $('gh-pick').addEventListener('click', () => {
+        if (ghc.phase !== 'form') return;
+        ghc.picking = true;
+        $('gh-pick-text').textContent =
+          (ghc.repo ? 'Cloning ' + ghc.repo + ': ' : '') +
+          'browse to the folder it should go in, then tap Clone into this folder. The clone gets its own folder inside it.';
+        $('gh-pick-bar').hidden = false;
+        $('gh-clone').hidden = true;
+        $('gh-pick-use').focus({ preventScroll: true });
+      });
+      $('gh-pick-use').addEventListener('click', () => {
+        if (!ghc.picking) return;
+        if (!curDirPath) return setStatus('browse a folder first');
+        ghc.picking = false;
+        $('gh-pick-bar').hidden = true;
+        ghc.destParent = curDirPath;
+        ghc.destTyped = false;
+        $('gh-clone').hidden = false;
+        void ghcSyncDest();
+        $('gh-go').focus({ preventScroll: true });
+      });
+      $('gh-pick-cancel').addEventListener('click', () => {
+        if (!ghc.picking) return;
+        ghc.picking = false;
+        $('gh-pick-bar').hidden = true;
+        $('gh-clone').hidden = false;
+        $('gh-pick').focus({ preventScroll: true });
+      });
 
       // ---- Past conversations (add-resume-conversations) --------------------
       // Tied to the currently-browsed workspace folder (curDirPath, above):
