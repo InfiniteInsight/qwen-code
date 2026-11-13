@@ -19316,7 +19316,9 @@ PAGE_SCENARIOS.push({
             // #110's Organize and Sources and #123's Reload workspace are the
             // same kind: offered only where the gateway, the daemon and the
             // token allow them, and not by this stub's defaults.
-            undrawn.every((x) => ['agents', 'organize', 'sources', 'reload-workspace'].includes(x.action ?? '')),
+            // #256's Closed tabs row is the same kind: drawn only when the host holds
+            // a closed tab and the token can read the host's tabs.
+            undrawn.every((x) => ['agents', 'organize', 'sources', 'reload-workspace'].includes(x.action ?? '') || x.label === 'Closed tabs'),
             `rows in the markup and not drawn at ${at}: ${JSON.stringify(undrawn.map((x) => x.label))}`,
           );
           const drawnRows = g.rows.filter((x) => x.drawn);
@@ -20562,7 +20564,8 @@ PAGE_SCENARIOS.push({
           const val = row.querySelector('.val');
           return {
             group: grp.querySelector('.grp').firstChild.textContent,
-            last: grp.lastElementChild === row,
+            // #256: the hidden Closed tabs row, last in the group, is not a row after it.
+            last: Array.from(grp.children).filter((c) => c.id !== 'more-closed-tabs').pop() === row,
             label: row.querySelector('.lbl').textContent,
             value: val.textContent,
             h: Math.round(row.getBoundingClientRect().height),
@@ -20618,7 +20621,7 @@ PAGE_SCENARIOS.push({
         sheetBox: document.getElementById('h1-host-acts') ? document.getElementById('h1-host-acts').getClientRects().length : -1,
         sheetRows: document.querySelectorAll('#h1-host-acts .sh-row').length,
         moreRows: document.querySelectorAll('#more-screen [data-host-act]').length,
-        host: Array.from(document.getElementById('more-g-host').parentElement.querySelectorAll('.row')).map((x) => x.dataset.panel || x.dataset.hostAct),
+        host: Array.from(document.getElementById('more-g-host').parentElement.querySelectorAll('.row')).filter((x) => !x.hidden).map((x) => x.dataset.panel || x.dataset.hostAct),
       }))()`)) as { sheetBox: number; sheetRows: number; moreRows: number; host: string[] };
       expect(answers.length === 2 && answers.every((s) => s === 404), `the reads were answered ${JSON.stringify(answers)}, not one 404 for the sheet and one for More`);
       expect(r.sheetBox === 0 && r.sheetRows === 0, `the sheet draws a host action box (${r.sheetBox} boxes, ${r.sheetRows} rows) on a gateway that has none`);
@@ -31656,6 +31659,208 @@ PAGE_SCENARIOS.push({
       await page.waitForFunction(`document.getElementById('status').textContent === 'already open on the host'`, null, { timeout: 10_000 });
       expect((await t.requests.readAll()).length === 0, 'a reopen of a conversation already on screen queued a request');
       return 'lost, then 12 s later crashed, on the row and in the line; Reopen said "already open on the host" and queued nothing';
+    },
+  });
+
+  // ---- #256: closed and quit host tabs, listed under More > Host with Reopen
+  type CtEntry = { session: string; tab: string; title: string; folder: string; how: string; btn: string; btnH: number; btnDisabled: boolean };
+  const ctHostRows = (page: Page) =>
+    page.evaluate(String.raw`(() => {
+      const g = document.getElementById('more-g-host').parentElement;
+      return Array.from(g.querySelectorAll('.row'))
+        .filter((r) => r.getClientRects().length > 0)
+        .map((r) => ({ label: r.querySelector('.lbl').textContent, val: r.querySelector('.val').textContent, panel: r.dataset.panel || null }));
+    })()`) as Promise<Array<{ label: string; val: string; panel: string | null }>>;
+  const ctEntries = (page: Page) =>
+    page.evaluate(String.raw`Array.from(document.querySelectorAll('#closed-tabs-list .ct-entry')).map((e) => {
+      const b = e.querySelector('button');
+      return {
+        session: e.dataset.session,
+        tab: e.dataset.tab,
+        title: e.querySelector('.ct-title').textContent,
+        folder: e.querySelector('.ct-folder').textContent,
+        how: e.querySelector('.ct-how').textContent,
+        btn: b.textContent,
+        btnH: Math.round(b.getBoundingClientRect().height),
+        btnDisabled: b.disabled,
+      };
+    })`) as Promise<CtEntry[]>;
+  /** More, with the host rows read: the launcher row and the Closed tabs row's state settled. */
+  const ctOpenMore = async (page: Page, rowShown: boolean) => {
+    await page.click('#h1-more');
+    await page.waitForFunction(
+      `(() => {
+        const g = document.getElementById('more-g-host').parentElement;
+        const labels = Array.from(g.querySelectorAll('.row')).filter((r) => r.getClientRects().length > 0).map((r) => r.querySelector('.lbl').textContent);
+        return labels.includes(${JSON.stringify(HOST_ACTION_LABEL)}) && labels.includes('Closed tabs') === ${rowShown};
+      })()`,
+      null,
+      { timeout: 10_000 },
+    );
+  };
+  const ctOpenPanel = async (page: Page) => {
+    await page.click('#more-screen .row[data-panel="closed-tabs"]');
+    await page.waitForSelector('#panel-closed-tabs', { state: 'visible' });
+  };
+  const ctNote = (page: Page) =>
+    page.evaluate(`(() => { const n = document.getElementById('closed-tabs-note'); return n && !n.hidden ? n.textContent : ''; })()`) as Promise<string>;
+  const ctShort = (id: string) => id.slice(0, 8);
+
+  PAGE_SCENARIOS.push({
+    name: "P566 Closed tabs lists each conversation's newest closed or quit tab, right after the launcher, and nothing else",
+    waitView: false,
+    stub: { hostTabs: {}, hostActions: true },
+    run: async ({ page, viewer }) => {
+      const t = tabsOf(viewer);
+      await t.poll();
+      // Oldest first, a second apart so the order is the registry's own.
+      await tbSeed(viewer, TB(1), 'closed'); // A
+      t.advance(1000);
+      await tbSeed(viewer, TB(2), 'quit'); // B
+      t.advance(1000);
+      await tbSeed(viewer, TB(3), 'crashed', 137); // C
+      t.advance(1000);
+      await tbSeed(viewer, TB(4), 'live'); // D
+      t.advance(1000);
+      await tbSeed(viewer, TB(5), 'closed'); // E, closed ...
+      t.advance(1000);
+      await tbSeed(viewer, TB(5), 'live'); // ... then a newer live tab
+      t.advance(1000);
+      await tbSeed(viewer, TB(6), 'closed'); // F, closed twice
+      t.advance(1000);
+      await tbSeed(viewer, TB(6), 'closed');
+      await ctOpenMore(page, true);
+      const rows = await ctHostRows(page);
+      const at = rows.findIndex((r) => r.label === HOST_ACTION_LABEL);
+      expect(at >= 0 && rows[at + 1]?.label === 'Closed tabs', `the Host rows are ${JSON.stringify(rows.map((r) => r.label))}`);
+      expect(rows[at + 1]!.val === '3' && rows[at + 1]!.panel === 'closed-tabs', `the row is ${JSON.stringify(rows[at + 1])}`);
+      await ctOpenPanel(page);
+      const entries = await ctEntries(page);
+      const ids = entries.map((e) => e.session);
+      expect(JSON.stringify(ids) === JSON.stringify([TB(6), TB(2), TB(1)]), `the panel lists ${JSON.stringify(ids)}, not F, B, A newest first`);
+      await shot(page, 'p566-closed-tabs-390');
+      return 'launcher row, then Closed tabs 3; the panel lists F, B, A once each, newest first, and not C (crashed), D (live) or E (reopened by a newer live tab)';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P567 Reopen on a closed tab queues it for that conversation and folder, and the entry and count go',
+    waitView: false,
+    stub: { hostTabs: {}, hostActions: true },
+    run: async ({ page, viewer }) => {
+      const sent = tbSent(page);
+      const t = tabsOf(viewer);
+      await t.poll();
+      const a = await tbSeed(viewer, TB(1), 'closed');
+      t.advance(1000);
+      await tbSeed(viewer, TB(2), 'quit');
+      t.advance(1000);
+      await tbSeed(viewer, TB(3), 'closed');
+      await ctOpenMore(page, true);
+      expect((await ctHostRows(page)).find((r) => r.label === 'Closed tabs')?.val === '3', 'the row does not read 3 before Reopen');
+      await ctOpenPanel(page);
+      await page.click(`#closed-tabs-list .ct-entry[data-session="${TB(1)}"] button`);
+      await page.waitForFunction(`document.getElementById('status').textContent === 'tab reopening on the host…'`, null, { timeout: 10_000 });
+      const posts = sent.filter((s) => s.startsWith('POST'));
+      expect(posts.length === 1 && posts[0] === `POST /rc/host/tabs/${a}/reopen`, `the page sent ${JSON.stringify(posts)}`);
+      const queued = await t.requests.readAll();
+      expect(queued.length === 1 && queued[0]!.sessionId === TB(1), `the request log holds ${JSON.stringify(queued.map((q) => q.sessionId))}`);
+      expect(queued[0]!.linuxArgv.join(' ') === `qwen-rc attach --session ${TB(1)} ${TB_CWD}`, `the queued tab runs ${queued[0]!.linuxArgv.join(' ')}`);
+      // The next read: the host's record still says closed until the new tab
+      // attaches, and the page must not draw the entry back while it opens.
+      await t.poll();
+      await page.evaluate('readHostTabs()');
+      await page.waitForFunction(`document.querySelectorAll('#closed-tabs-list .ct-entry[data-session="${TB(1)}"]').length === 0`, null, { timeout: 10_000 });
+      const left = (await ctEntries(page)).map((e) => e.session);
+      expect(JSON.stringify(left) === JSON.stringify([TB(3), TB(2)]), `the panel lists ${JSON.stringify(left)}`);
+      const val = (await ctHostRows(page)).find((r) => r.label === 'Closed tabs')?.val;
+      const dom = (await page.evaluate(`document.querySelector('#more-screen .row[data-panel="closed-tabs"] .val').textContent`)) as string;
+      expect(dom === '2', `the row reads ${JSON.stringify(dom)} (visible value ${JSON.stringify(val)})`);
+      expect(sent.filter((s) => s.startsWith('POST')).length === 1, 'a second POST went out');
+      return 'one POST for A, one request queued for its conversation and folder, "tab reopening on the host…"; after the next read A is gone and the row reads 2';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P568 a launcher that stopped checking in is said before Reopen, and Reopen is refused in words',
+    waitView: false,
+    stub: { hostTabs: {}, hostActions: true },
+    run: async ({ page, viewer }) => {
+      const t = tabsOf(viewer);
+      await t.poll();
+      await tbSeed(viewer, TB(1), 'closed');
+      t.advance(60_000);
+      await ctOpenMore(page, true);
+      await ctOpenPanel(page);
+      const note = await ctNote(page);
+      expect(note === 'the launcher stopped checking in 60 s ago, so Reopen cannot open a tab now', `the note reads ${JSON.stringify(note)}`);
+      await page.click(`#closed-tabs-list .ct-entry[data-session="${TB(1)}"] button`);
+      await page.waitForFunction(`document.getElementById('status').textContent.startsWith('no tab reopened: the launcher stopped checking in')`, null, { timeout: 10_000 });
+      expect((await t.requests.readAll()).length === 0, 'a refused reopen queued a request');
+      const entries = await ctEntries(page);
+      expect(entries.length === 1 && !entries[0]!.btnDisabled && entries[0]!.btn === 'Reopen', `after the refusal the entry is ${JSON.stringify(entries)}`);
+      return 'the note names the stale launcher before Reopen; Reopen said "no tab reopened: the launcher stopped checking in"; nothing queued, the entry stays';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P569 no closed tabs, or a read-only token, draws no row',
+    waitView: false,
+    stub: { hostTabs: {}, hostActions: true },
+    run: async ({ page, viewer }) => {
+      const sent = tbSent(page);
+      const t = tabsOf(viewer);
+      await t.poll();
+      // Owner, and the only record is a crashed tab: nothing to list.
+      await tbSeed(viewer, TB(1), 'crashed', 137);
+      await ctOpenMore(page, false);
+      await page.waitForFunction(`hostTabs.bySession.size === 1`, null, { timeout: 10_000 });
+      let rows = await ctHostRows(page);
+      expect(!rows.some((r) => r.panel === 'closed-tabs' || r.label === 'Closed tabs'), `a row drew with only a crashed tab: ${JSON.stringify(rows)}`);
+      await page.click('#more-back');
+      // Control: a closed tab on the host draws the row for the owner.
+      await tbSeed(viewer, TB(2), 'closed');
+      await ctOpenMore(page, true);
+      await page.click('#more-back');
+      // The same page as a reader: write scope gone, the closed tab still on the host.
+      await page.evaluate('caps.remoteControl.writeScope = false; undefined');
+      const before = sent.length;
+      await ctOpenMore(page, false);
+      await page.waitForTimeout(600);
+      rows = await ctHostRows(page);
+      expect(!rows.some((r) => r.panel === 'closed-tabs' || r.label === 'Closed tabs'), `a reader was shown a row: ${JSON.stringify(rows)}`);
+      expect(sent.length === before, `a reader sent ${JSON.stringify(sent.slice(before))}`);
+      return 'a crashed-only host draws no row; a closed tab draws it for the owner; with write scope gone the row goes and nothing more is requested from /rc/host/tabs';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P570 an entry names the conversation, its folder and how it ended, at 44px',
+    waitView: false,
+    stub: { hostTabs: {}, hostActions: true },
+    run: async ({ page, viewer }) => {
+      const t = tabsOf(viewer);
+      await t.poll();
+      await tbSeed(viewer, TB(1), 'closed');
+      t.advance(1000);
+      await tbSeed(viewer, TB(2), 'quit');
+      await serveList(page, TB_CWD, { list: [tbRow(TB(1), 'p256 fix the parser')] });
+      await page.setViewportSize(PHONE);
+      await ctOpenMore(page, true);
+      await ctOpenPanel(page);
+      const entries = await ctEntries(page);
+      const by = new Map(entries.map((e) => [e.session, e]));
+      const a = by.get(TB(1));
+      const b = by.get(TB(2));
+      expect(!!a && !!b && entries.length === 2, `the entries are ${JSON.stringify(entries)}`);
+      expect(a!.title === 'p256 fix the parser', `A is titled ${JSON.stringify(a!.title)}`);
+      expect(b!.title === ctShort(TB(2)), `B is titled ${JSON.stringify(b!.title)}, not its short id`);
+      expect(a!.folder.includes('/scratch') && b!.folder.includes('/scratch'), `the folders are ${JSON.stringify([a!.folder, b!.folder])}`);
+      expect(a!.how.startsWith('window closed'), `A ended ${JSON.stringify(a!.how)}`);
+      expect(b!.how.startsWith('quit with /quit'), `B ended ${JSON.stringify(b!.how)}`);
+      expect(entries.every((e) => e.btn === 'Reopen' && e.btnH >= 44), `the buttons are ${JSON.stringify(entries.map((e) => [e.btn, e.btnH]))}`);
+      await shot(page, 'p570-closed-tabs-entries-390');
+      return `A "${a!.title}" ${a!.how}, B "${b!.title}" ${b!.how}, both in ${a!.folder.replace(/[\u2066\u2069]/g, '')}, Reopen ${a!.btnH}px and ${b!.btnH}px tall at 390`;
     },
   });
 }
