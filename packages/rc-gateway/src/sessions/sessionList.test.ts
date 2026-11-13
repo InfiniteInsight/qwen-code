@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   mkdtemp,
   mkdir,
+  open,
   rm,
   writeFile,
   utimes,
@@ -18,6 +19,7 @@ import { join } from 'node:path';
 import {
   assembleListing,
   readFirstRecord,
+  readHeadRecords,
   readFirstUserMessage,
   readSessionTitle,
   readSessionTitleInfo,
@@ -684,5 +686,140 @@ describe('listSessionsAcross (archive state)', () => {
     const { sessions } = await listSessionsAcross([dir]);
     expect(sessions).toHaveLength(1);
     expect(sessions[0].archived).toBeUndefined();
+  });
+});
+
+describe('listSessions spawnedBy (#255)', () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'rc-spawned-'));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const marker = (parent: string) =>
+    JSON.stringify({
+      type: 'system',
+      subtype: 'parent_session',
+      systemPayload: { parentSessionId: parent },
+    });
+  const filler = (n: number) => JSON.stringify({ type: 'user', n });
+
+  it('lists a sub-session with spawnedBy and no parentSessionId', async () => {
+    await writeFile(join(dir, `${ID(1)}.jsonl`), marker('P') + '\n');
+    const { sessions } = await listSessions(dir);
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].spawnedBy).toBe('P');
+    expect('parentSessionId' in sessions[0]).toBe(false);
+  });
+
+  it('lists a fork with parentSessionId and no spawnedBy', async () => {
+    await writeFile(
+      join(dir, `${ID(1)}.jsonl`),
+      JSON.stringify({ forkedFrom: { sessionId: 'F' }, type: 'user' }) + '\n',
+    );
+    const { sessions } = await listSessions(dir);
+    expect(sessions[0].parentSessionId).toBe('F');
+    expect('spawnedBy' in sessions[0]).toBe(false);
+  });
+
+  it('finds parent_session within the first 8 records only', async () => {
+    const at = async (id: string, index: number) => {
+      const lines: string[] = [];
+      for (let i = 0; i < index; i++) lines.push(filler(i));
+      lines.push(marker('P'));
+      await writeFile(join(dir, `${id}.jsonl`), lines.join('\n') + '\n');
+    };
+    await at(ID(1), 7); // line 8
+    await at(ID(2), 8); // line 9
+    const { sessions } = await listSessions(dir);
+    const byId = new Map(sessions.map((s) => [s.sessionId, s]));
+    expect(byId.get(ID(1))?.spawnedBy).toBe('P');
+    expect(byId.get(ID(2))?.spawnedBy).toBeUndefined();
+  });
+
+  it('still finds the marker after an unparseable first line, without inventing a fork parent', async () => {
+    await writeFile(
+      join(dir, `${ID(1)}.jsonl`),
+      'not json\n' + marker('P') + '\n',
+    );
+    const { sessions } = await listSessions(dir);
+    expect(sessions[0].spawnedBy).toBe('P');
+    expect('parentSessionId' in sessions[0]).toBe(false);
+  });
+
+  it('still lists a fork whose first record is over 64 KiB (100 KiB)', async () => {
+    const big = JSON.stringify({
+      forkedFrom: { sessionId: 'F' },
+      type: 'user',
+      pad: 'x'.repeat(100 * 1024),
+    });
+    await writeFile(join(dir, `${ID(1)}.jsonl`), big + '\n' + filler(1) + '\n');
+    const { sessions } = await listSessions(dir);
+    expect(sessions[0].parentSessionId).toBe('F');
+    expect('spawnedBy' in sessions[0]).toBe(false);
+  });
+
+  it('drops a first line over the 1 MiB bound (a root) instead of a partial record', async () => {
+    await writeFile(
+      join(dir, `${ID(1)}.jsonl`),
+      JSON.stringify({ pad: 'x'.repeat(1100 * 1024) }) + '\n',
+    );
+    expect(await readHeadRecords(dir, ID(1))).toBeNull();
+  });
+
+  it('drops a line cut off by the 64 KiB bound after the first line', async () => {
+    const lines = [filler(0), marker('P') + ' '.repeat(80 * 1024)];
+    await writeFile(join(dir, `${ID(1)}.jsonl`), lines.join('\n'));
+    const recs = await readHeadRecords(dir, ID(1));
+    expect(recs).toHaveLength(1);
+  });
+
+  it('stops reading once 8 records are in hand', async () => {
+    const head = Array.from({ length: 8 }, (_, i) => filler(i)).join('\n');
+    // Far more than the bound follows the 8th line.
+    await writeFile(
+      join(dir, `${ID(1)}.jsonl`),
+      head + '\n' + 'y'.repeat(300 * 1024),
+    );
+    const probe = await open(join(dir, `${ID(1)}.jsonl`), 'r');
+    const proto = Object.getPrototypeOf(probe) as { read: unknown };
+    await probe.close();
+    const read = vi.spyOn(
+      proto as { read: (...a: unknown[]) => Promise<{ bytesRead: number }> },
+      'read',
+    );
+    try {
+      const recs = await readHeadRecords(dir, ID(1), { chunkSize: 1024 });
+      expect(recs).toHaveLength(8);
+      const bytes = (
+        await Promise.all(read.mock.results.map((r) => r.value))
+      ).reduce((n, r) => n + r.bytesRead, 0);
+      // The 8 short lines fit in the first chunk; no further read happens.
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(bytes).toBe(1024);
+    } finally {
+      read.mockRestore();
+    }
+  });
+
+  it('lists a fork of a sub-session with parentSessionId and no spawnedBy, though it copied parent_session', async () => {
+    // A fork made before the fork route dropped the record: the fork header,
+    // then the sub-session's own parent_session marker, copied.
+    const lines = [
+      JSON.stringify({ type: 'fork', forkedFrom: { sessionId: 'T' } }),
+      JSON.stringify({
+        type: 'system',
+        subtype: 'parent_session',
+        forkedFrom: { sessionId: 'T' },
+        systemPayload: { parentSessionId: 'P' },
+      }),
+      filler(1),
+    ];
+    await writeFile(join(dir, `${ID(1)}.jsonl`), lines.join('\n') + '\n');
+    const { sessions } = await listSessions(dir);
+    expect(sessions[0].parentSessionId).toBe('T');
+    expect('spawnedBy' in sessions[0]).toBe(false);
   });
 });

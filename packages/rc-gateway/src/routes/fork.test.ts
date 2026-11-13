@@ -27,6 +27,7 @@ import { decodeSegment, getSharedWal } from '../wal.js';
 import { listSessions } from '../sessions/sessionList.js';
 import { parentOf } from '../sessions/lineage.js';
 import { readParentRecords } from '../sessions/forkStore.js';
+import { activeBranch } from './activeBranch.js';
 
 // A cwd whose sanitizeCwd is stable and lands under our tmp runtime base.
 const CWD = '/fork-test/ws';
@@ -977,5 +978,95 @@ describe('a route-made fork is visible to lineage', () => {
 
     const records = await readParentRecords(chatsDir, NEW_ID);
     expect(parentOf(records)).toBe(PARENT_ID);
+  });
+});
+
+describe('a fork of a sub-session (#255)', () => {
+  it("drops the records core's forkSession drops and keeps the rest one whole chain", async () => {
+    await mkdir(chatsDir, { recursive: true });
+    const base = { sessionId: PARENT_ID, cwd: CWD };
+    const SPAWNER = '22222222222222222222222222222222';
+    // A real sub-session: parent_session is the chain's root, its creator
+    // attribution and each turn's settled outcome sit on the chain too.
+    const records = [
+      {
+        ...base,
+        uuid: 'ps',
+        parentUuid: null,
+        type: 'system',
+        subtype: 'parent_session',
+        systemPayload: { parentSessionId: SPAWNER },
+      },
+      {
+        ...base,
+        uuid: 'src',
+        parentUuid: 'ps',
+        type: 'system',
+        subtype: 'session_source',
+        systemPayload: { sourceType: 'sub_session' },
+      },
+      { ...base, uuid: 'u0', parentUuid: 'src', type: 'user' },
+      { ...base, uuid: 'a0', parentUuid: 'u0', type: 'assistant' },
+      {
+        ...base,
+        uuid: 'tr',
+        parentUuid: 'a0',
+        type: 'system',
+        subtype: 'turn_result',
+        systemPayload: {},
+      },
+      {
+        ...base,
+        uuid: 'snap',
+        parentUuid: 'tr',
+        type: 'system',
+        subtype: 'session_sources_snapshot',
+        systemPayload: {},
+      },
+      { ...base, uuid: 'u1', parentUuid: 'tr', type: 'user' },
+      { ...base, uuid: 'a1', parentUuid: 'u1', type: 'assistant' },
+    ];
+    await writeFile(
+      join(chatsDir, `${PARENT_ID}.jsonl`),
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+      'utf8',
+    );
+    const { daemon } = fakeDaemon(async () => ({}));
+    const audit = fakeAudit();
+    const url = await mount({ daemon, audit, randomId: () => NEW_ID });
+    const res = await postFork(url, {});
+    expect(res.status).toBe(200);
+
+    const copied = (await readFile(join(chatsDir, `${NEW_ID}.jsonl`), 'utf8'))
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((r) => r['type'] !== 'fork');
+    const dropped = [
+      'parent_session',
+      'session_source',
+      'session_sources_snapshot',
+      'turn_result',
+    ];
+    expect(
+      copied.filter((r) => dropped.includes(r['subtype'] as string)),
+    ).toEqual([]);
+    expect(copied.map((r) => r['uuid'])).toEqual(['u0', 'a0', 'u1', 'a1']);
+    // Re-rooted: the first kept record is the root, each next one chains
+    // onto the one before, so the whole fork is its live branch.
+    expect(copied.map((r) => r['parentUuid'])).toEqual([
+      null,
+      'u0',
+      'a0',
+      'u1',
+    ]);
+    expect(activeBranch(copied).records).toHaveLength(4);
+    expect(audit.calls[0]?.detail).toMatchObject({ copiedCount: 4 });
+
+    // The fork lists as a fork of the sub-session, not as a thread.
+    const listed = await listSessions(chatsDir);
+    const child = listed.sessions.find((s) => s.sessionId === NEW_ID);
+    expect(child?.parentSessionId).toBe(PARENT_ID);
+    expect(child && 'spawnedBy' in child).toBe(false);
   });
 });

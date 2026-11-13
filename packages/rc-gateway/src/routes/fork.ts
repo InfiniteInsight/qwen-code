@@ -334,6 +334,9 @@ export function createForkRoute(
     };
 
     const forkedRecords = forkRecords(records, parentId, newId);
+    // #255: what was copied, the records forkSession drops left out (and the
+    // title appended below, as before, not counted).
+    const copiedCount = forkedRecords.length;
     // When named, append a core-faithful custom_title record (chained onto the
     // tail) so the fork shows its name in the picker, on resume, and via
     // /rc/sessions. Appended BEFORE writeFork → loadSession, so a malformed
@@ -533,7 +536,7 @@ export function createForkRoute(
       target: parentId,
       detail: {
         newSessionId: newId,
-        copiedCount: records.length,
+        copiedCount,
         named: !!name,
       },
     });

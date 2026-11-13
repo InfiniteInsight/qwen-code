@@ -567,6 +567,26 @@ describe('readCatalogPage', () => {
     });
   });
 
+  it('diskRow carries spawnedBy', async () => {
+    const disk: SessionListItem[] = [
+      { sessionId: 'd1', forks: [], updatedAt: at(5), spawnedBy: 'P' },
+      { sessionId: 'd2', forks: [], updatedAt: at(4) },
+    ];
+    const deps: CatalogDeps = {
+      ...poolOf([]),
+      readPreview: async () => null,
+      scanDisk: async () => ({ sessions: disk, truncated: false }),
+    };
+    const page = await readCatalogPage(deps, {
+      members: fresh('/cold'),
+      options: { size: 5 },
+      includeGroups: false,
+    });
+    const byId = new Map(page.sessions.map((r) => [r.sessionId, r]));
+    expect(byId.get('d1')?.spawnedBy).toBe('P');
+    expect('spawnedBy' in (byId.get('d2') as object)).toBe(false);
+  });
+
   it('passes includeGroups through and merges group records by id', async () => {
     const a = new FakeDaemon(
       '/a',

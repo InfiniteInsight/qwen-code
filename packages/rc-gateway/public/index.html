@@ -2285,6 +2285,35 @@
         border-radius: 50%;
         background: #3fb950;
       }
+      /* #255. What the conversation is doing, in the status line's colours
+         (#h1-status .dot), so the list and the open conversation agree:
+         waiting on you, working, background work, open. The words are the
+         dot's name and title (LIVE_DOT_WORDS), never the colour alone. */
+      #past-list .s .dot[data-state='wait'] {
+        background: var(--g1-warn);
+      }
+      #past-list .s .dot[data-state='run'] {
+        background: var(--g1-link);
+      }
+      #past-list .s .dot[data-state='bg'] {
+        background: #a371f7;
+      }
+      #past-list .s .dot[data-state='idle'] {
+        background: #3fb950;
+      }
+      /* #255. How many agents a working row has running: "2 agents", words
+         in a pill after the dot. It never shrinks; the title gives way. */
+      #past-list .s .agchip {
+        flex: none;
+        padding: 0 6px;
+        border: 1px solid var(--g1-ink-mid);
+        border-radius: 8px;
+        font-size: 11px;
+        line-height: 16px;
+        font-weight: 600;
+        white-space: nowrap;
+        color: var(--g1-ink-mid);
+      }
       /* #212. The conversation's tab on the host crashed or was lost: a word
          in a pill after the title, red for crashed, amber for lost. It never
          shrinks; the title gives way instead. */
@@ -2522,6 +2551,30 @@
         flex: none;
         color: var(--g1-ink-mid);
         font-size: 13px;
+      }
+      /* #255. The switch under the folders: the radio rows' look, set off by a
+         rule, ticked the same way. */
+      #list-folders [role='menuitemcheckbox'] {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 44px;
+        margin-top: 4px;
+        padding: 0 10px;
+        border: 0;
+        border-top: 1px solid var(--g1-edge);
+        border-radius: 0 0 8px 8px;
+        background: transparent;
+        color: var(--g1-ink-hi);
+        font-size: 15px;
+        text-align: left;
+      }
+      #list-folders [role='menuitemcheckbox']:hover,
+      #list-folders [role='menuitemcheckbox']:focus {
+        background: var(--g1-on);
+      }
+      #list-folders [role='menuitemcheckbox'][aria-checked='true'] .ck {
+        visibility: visible;
       }
       /* The folder screen: the folder browser, the recent folders and the
          typed path the New conversation panel held, each at the tap floor. */
@@ -7453,6 +7506,11 @@
       // Kept here because the boot read and the view's own attach resolve in
       // either order: whichever lands second is the one that can apply it.
       let stampZone = null;
+      // #255. Whether the list hides subagent threads: the gateway's saved
+      // choice for this device (ui-prefs `hideThreads`, true until changed),
+      // or null while unread and for a gateway that does not carry the key,
+      // which draws no switch and hides nothing.
+      let uiHideThreads = null;
       function applyStampZone() {
         if (transcriptView && stampZone) transcriptView.setStampZone(stampZone);
       }
@@ -7495,6 +7553,13 @@
           });
           if (!res.ok) return; // the view keeps its own default zone
           const prefs = await res.json();
+          // #255: read first, so a gateway with no zone still says it.
+          const hide =
+            typeof prefs.hideThreads === 'boolean' ? prefs.hideThreads : null;
+          if (hide !== uiHideThreads) {
+            uiHideThreads = hide;
+            threadsFollow();
+          }
           if (typeof prefs.stampZone !== 'string' || !prefs.stampZone) return;
           fillStampZones();
           ensureStampZoneOption(prefs.stampZone);
@@ -17577,6 +17642,7 @@
             startPastConvosPoll(); // issue #35: keep the past-conversations list fresh
             startHostTabsPoll(); // #212: crashed and lost tabs on the host
             startPendingCardsPoll(); // issue #46: recover lost question cards while watching
+            startLiveTick(); // #255: the laptop's list pane is up from the start
             applyWorkspaceControlGating();
             renderRecentWorkspaces();
             void browseToSavedFolder(); // #182: the folder the reader left
@@ -17696,6 +17762,7 @@
           startPastConvosPoll(); // issue #35: same as the auth-gate path
           startHostTabsPoll(); // #212: same as the auth-gate path
           startPendingCardsPoll(); // issue #46: same as the auth-gate path
+          startLiveTick(); // #255: same as the auth-gate path
           // authGate() (above) only populates the directory picker for a
           // token that ALREADY existed at script load — a fresh pair (QR or
           // manual code) has no such run, so #dir-list would otherwise show
@@ -22075,6 +22142,7 @@
         if (!paneLayout()) {
           $('h1-title').setAttribute('aria-expanded', String(open));
         }
+        if (!open && !listShown()) stopLiveTick(); // #255: off screen
         if (!open) return;
         closeH1Menu(false);
         setMoreOpen(false);
@@ -22089,6 +22157,7 @@
         // opened in another folder since shows its live dot as the list opens.
         if (curDirPath) void refreshPastConversations(curDirPath);
         $('list-back').focus({ preventScroll: true });
+        startLiveTick(); // #255: the dots, read every second while it is up
       }
       function closeListToChat() {
         setListOpen(false);
@@ -22597,7 +22666,11 @@
       // only the refreshes the list always had (the poll, a watch starting
       // or ending, the tab coming back, an archive, delete or rename) read
       // again. A folder that leaves the set leaves the cache.
-      const folderRows = new Map(); // cwd -> { sessions, truncated }
+      // #255: the listing as read (raw) and the live-state map read beside it
+      // (live, null when unread or unreadable) are kept apart, merged when
+      // drawn (mergeFolderRows), so the 1 s live tick can replace `live`
+      // and merge again without reading the disk.
+      const folderRows = new Map(); // cwd -> { raw, live, truncated }
       // The current folder and MAX_RECENT recent ones: at most six reads.
       const LIST_FOLDERS_MAX = MAX_RECENT + 1;
       function listFoldersFrom(current) {
@@ -22625,6 +22698,44 @@
       function viewFolders() {
         const one = shownFolder();
         return one ? [one] : listFolders();
+      }
+      // #255. A thread is a conversation another one started with
+      // create_sub_session: its row names the parent (`spawnedBy`), or, when it
+      // has no transcript yet, its live-state entry does. A fork is not one,
+      // a fork of a thread included: a fork made before the fork route
+      // dropped the copied parent_session carries the thread's marks too.
+      function isThread(s) {
+        if (s.parentSessionId) return false; // a fork (R6)
+        return !!s.spawnedBy || !!(s.liveState && s.liveState.parentSessionId);
+      }
+      // Hidden by the switch: never the conversation on screen, whatever it is.
+      function threadHidden(s) {
+        return (
+          uiHideThreads === true &&
+          !!s &&
+          isThread(s) &&
+          s.sessionId !== watchedSessionId
+        );
+      }
+      // The rows the list and the menu's counts speak of: what is not hidden.
+      function convosShown() {
+        return uiHideThreads === true
+          ? pastConvos.filter((s) => !threadHidden(s))
+          : pastConvos;
+      }
+      // How many rows the switch hides in the folder filter's view.
+      function threadsInView() {
+        const one = shownFolder();
+        return pastConvos.filter(
+          (s) => threadHidden(s) && (!one || s.cwd === one),
+        ).length;
+      }
+      // The switch changed, or the gateway's answer for it arrived: redraw
+      // from what is already read.
+      function threadsFollow() {
+        pastPage = 1;
+        renderList();
+        syncFolderMenuCounts();
       }
 
       // "just now" / "N min ago" / "N h ago" / "N d ago". A skewed clock or a
@@ -22757,18 +22868,20 @@
           box.appendChild(d);
         };
         // #193: the folder filter first, then the search over what it left.
+        // #255: then the subagent threads, before the search and the paging.
         const one = shownFolder();
-        const inView = one
-          ? pastConvos.filter((s) => s && s.cwd === one)
-          : pastConvos;
+        const unhidden = convosShown();
+        const inView = one ? unhidden.filter((s) => s && s.cwd === one) : unhidden;
         if (inView.length === 0) {
           closeRowMenu(false);
           none(
-            one
-              ? 'No conversations in this folder yet.'
-              : listFolders().length
-                ? 'No conversations in these folders yet.'
-                : 'No folder yet. Use New conversation to pick one.',
+            threadsInView() > 0
+              ? 'Only subagent threads here, and they are hidden.'
+              : one
+                ? 'No conversations in this folder yet.'
+                : listFolders().length
+                  ? 'No conversations in these folders yet.'
+                  : 'No folder yet. Use New conversation to pick one.',
           );
           renderCatalogNotices(box); // #132
           renderLoadMore(pager, true);
@@ -22821,15 +22934,10 @@
           head.appendChild(tt);
           // issue #89: open on the daemon right now, from its own snapshot
           // rather than the transcript, so it says something the disk scan
-          // cannot. A dot as drawn, named for a screen reader.
-          if (s.live) {
-            const dot = document.createElement('span');
-            dot.className = 'dot';
-            dot.setAttribute('role', 'img');
-            dot.setAttribute('aria-label', 'open');
-            dot.title = 'open on the host';
-            head.appendChild(dot);
-          }
+          // cannot. A dot as drawn, named for a screen reader. #255: coloured
+          // and named for what the conversation is doing (liveDot).
+          if (s.live) head.appendChild(liveDot(s));
+          paintAgentChip(head, s); // #255: after the dot, before the tab badge
           // #212: its terminal tab on the host crashed or was lost. Words,
           // not a colour alone, and part of the row's name for a screen
           // reader; the sheet's Host tab line has the verbs.
@@ -23153,7 +23261,9 @@
       // for any menu and the function that shuts it back onto its button.
       function menuKeys(e, menu, shut) {
         const items = Array.from(
-          menu.querySelectorAll('[role="menuitem"],[role="menuitemradio"]'),
+          menu.querySelectorAll(
+            '[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"]',
+          ),
         );
         const i = items.indexOf(document.activeElement);
         let next = -1;
@@ -23212,7 +23322,7 @@
         menu.textContent = '';
         const one = shownFolder();
         const count = (cwd) =>
-          pastConvos.filter((s) => s && (cwd === '' || s.cwd === cwd)).length;
+          convosShown().filter((s) => s && (cwd === '' || s.cwd === cwd)).length; // #255
         const items = [['', 'All folders']].concat(
           listFolders().map((cwd) => [cwd, isolatedFolder(cwd)]),
         );
@@ -23249,6 +23359,7 @@
           };
           menu.appendChild(b);
         }
+        if (uiHideThreads !== null) menu.appendChild(hideThreadsItem()); // #255
         menu.hidden = false;
         door.setAttribute('aria-expanded', 'true');
         placeFolderMenu();
@@ -23260,9 +23371,10 @@
       // place, keeping the items and the focus where they are.
       function syncFolderMenuCounts() {
         if (!folderMenuShown()) return;
+        syncHideThreadsItem(); // #255
         for (const b of folderMenuEl.querySelectorAll('[role="menuitemradio"]')) {
           const cwd = b.dataset.folder || '';
-          const held = pastConvos.filter(
+          const held = convosShown().filter(
             (s) => s && (cwd === '' || s.cwd === cwd),
           ).length;
           const n = b.querySelector('.n');
@@ -23274,6 +23386,72 @@
               held +
               (held === 1 ? ' conversation' : ' conversations'),
           );
+        }
+      }
+      // #255. The switch under the folders: "Hide subagent threads", ticked by
+      // default, with how many rows it hides in the folder filter's view. It
+      // is drawn only for a gateway whose ui-prefs carry the choice
+      // (uiHideThreads is null otherwise).
+      function hideThreadsItem() {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.id = 'list-hide-threads';
+        b.setAttribute('role', 'menuitemcheckbox');
+        b.tabIndex = -1;
+        const ck = document.createElement('span');
+        ck.className = 'ck';
+        ck.setAttribute('aria-hidden', 'true');
+        ck.textContent = '✓';
+        const lbl = document.createElement('span');
+        lbl.className = 'lbl';
+        lbl.textContent = 'Hide subagent threads';
+        const n = document.createElement('span');
+        n.className = 'n';
+        b.append(ck, lbl, n);
+        b.onclick = () => void setHideThreads(uiHideThreads !== true);
+        paintHideThreadsItem(b);
+        return b;
+      }
+      function paintHideThreadsItem(b) {
+        const on = uiHideThreads === true;
+        b.setAttribute('aria-checked', String(on));
+        const held = on ? threadsInView() : 0;
+        const n = b.querySelector('.n');
+        const text = held > 0 ? held + ' hidden' : '';
+        if (n.textContent !== text) n.textContent = text;
+      }
+      function syncHideThreadsItem() {
+        const b = folderMenuEl && folderMenuEl.querySelector('#list-hide-threads');
+        if (b) paintHideThreadsItem(b);
+      }
+      // Ticks at once and puts it back when the gateway refuses, saying why.
+      async function setHideThreads(next) {
+        const was = uiHideThreads;
+        uiHideThreads = next;
+        threadsFollow();
+        const did = 'saving the hide subagent threads setting';
+        const undo = () => {
+          if (uiHideThreads !== next) return; // a later choice stands
+          uiHideThreads = was;
+          threadsFollow();
+        };
+        try {
+          const res = await fetch('/rc/ui-prefs', {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + token(),
+            },
+            body: JSON.stringify({ hideThreads: next }),
+          });
+          if (!res.ok) {
+            const body = await res.json().catch(() => null);
+            undo();
+            setStatus(describeFailure(res, body, did));
+          }
+        } catch (e) {
+          undo();
+          setStatus(describeFailure(null, null, { did, err: e }));
         }
       }
       // Hung under the folder line and as wide as it less 8px a side, which
@@ -23344,10 +23522,15 @@
       // the list is drawn from all of them merged, so a caller handing in
       // one folder's rows still gets exactly those when no recent folder
       // holds any.
-      function renderPastConversations(sessions, cwd, truncated) {
+      // #255: `sessions` are the listing as read and `live` the live-state map
+      // read beside it (absent: none), kept apart in folderRows, with the
+      // number `liveSeq` of the read that brought it.
+      function renderPastConversations(sessions, cwd, truncated, live, liveSeq) {
         if (typeof cwd === 'string' && cwd) {
           folderRows.set(cwd, {
-            sessions: Array.isArray(sessions) ? sessions : [],
+            raw: Array.isArray(sessions) ? sessions : [],
+            live: live || null,
+            liveSeq: liveSeq || 0,
             truncated: Boolean(truncated),
           });
         }
@@ -23396,7 +23579,7 @@
         for (const cwd of folders) {
           const got = folderRows.get(cwd);
           if (!got) continue;
-          for (const s of got.sessions) {
+          for (const s of mergeLiveSessions(got.raw, got.live)) {
             if (!s || !s.sessionId || seen.has(s.sessionId)) continue;
             seen.add(s.sessionId);
             out.push({ ...s, cwd: cwd });
@@ -23572,7 +23755,7 @@
         const t = Date.parse(c.updatedAt);
         if (Number.isNaN(t)) return false;
         let oldest = Infinity;
-        for (const s of got.sessions) {
+        for (const s of got.raw) {
           if (!s || s.liveOnly) continue;
           const u = Date.parse(s.updatedAt);
           if (!Number.isNaN(u) && u < oldest) oldest = u;
@@ -23622,7 +23805,22 @@
           ...(preview ? { preview } : {}),
           cwd: c.workspace,
           ...catalogMarks(c),
+          ...catalogSpawnedBy(c), // #255
         };
+      }
+      // #255. The conversation that started this one with create_sub_session:
+      // a disk row names it `spawnedBy`; a daemon row's `parentSessionId` is
+      // the same thing (the daemon's summary has no fork notion).
+      function catalogSpawnedBy(c) {
+        const by =
+          typeof c.spawnedBy === 'string' && c.spawnedBy
+            ? c.spawnedBy
+            : c.source === 'daemon' &&
+                typeof c.parentSessionId === 'string' &&
+                c.parentSessionId
+              ? c.parentSessionId
+              : '';
+        return by ? { spawnedBy: by } : {};
       }
       const GROUP_SWATCHES = {
         red: '#f85149',
@@ -23798,6 +23996,7 @@
       // daemon the gateway already runs for that folder and otherwise says
       // nothing is open there, so asking it about a folder costs no daemon.
       async function readLiveStates(cwd, spawn) {
+        liveReadsInFlight.set(cwd, (liveReadsInFlight.get(cwd) || 0) + 1);
         try {
           const res = await fetch(
             '/rc/sessions/live-state?workspace=' +
@@ -23805,7 +24004,11 @@
               (spawn ? '' : '&spawn=0'),
             { headers: { Authorization: 'Bearer ' + token() } },
           );
-          if (!res.ok) return null;
+          if (!res.ok) {
+            const failBody = await res.json().catch(() => null);
+            if (liveStateRefuses(res.status, failBody)) liveStateRefused.add(cwd); // R8
+            return null;
+          }
           const j = await res.json();
           if (!j || !Array.isArray(j.sessions)) return null;
           const m = new Map();
@@ -23815,7 +24018,38 @@
           return m;
         } catch {
           return null;
+        } finally {
+          const left = (liveReadsInFlight.get(cwd) || 1) - 1;
+          if (left > 0) liveReadsInFlight.set(cwd, left);
+          else liveReadsInFlight.delete(cwd);
         }
+      }
+      // #255: each folder's live-state reads not answered yet, the 30 s
+      // refresh's and the 1 s tick's alike. The tick skips a folder that has
+      // one out, so a slow daemon never gathers a read a second.
+      const liveReadsInFlight = new Map(); // cwd -> reads out
+      // #255: a number taken as each live-state read is sent, kept with the
+      // live map it brought (folderRows' liveSeq), so of two maps for one
+      // folder the one asked for last wins whichever lands last: the 30 s
+      // read waits for every folder before it writes any, and a tick sent
+      // after it can land first.
+      let liveSeqNext = 0;
+      // #255 R8: the folders whose last live-state read was refused in a way
+      // asking again will not change (liveStateRefuses). The 1 s tick skips
+      // them until the next 30 s read, which asks again and keeps or clears
+      // the mark by its own answer.
+      const liveStateRefused = new Set();
+      // A refusal: the token may not read it (403), the daemon has no
+      // live-state route (a 502 live_state_unsupported), or the gateway has
+      // no pool to read without spawning (live_state_unpooled). Any other
+      // failure (a slow or failing daemon) is asked again on the next tick.
+      function liveStateRefuses(status, body) {
+        const code = body && typeof body.code === 'string' ? body.code : '';
+        return (
+          status === 403 ||
+          (status === 502 && code === 'live_state_unsupported') ||
+          code === 'live_state_unpooled'
+        );
       }
 
       // Merged before the filter and the pager, so a conversation that exists
@@ -23833,7 +24067,8 @@
         const marked = list.map((s) => {
           if (s && live.has(s.sessionId)) {
             seen.add(s.sessionId);
-            return { ...s, live: true };
+            // #255: and the snapshot entry itself, which the dot is read from.
+            return { ...s, live: true, liveState: live.get(s.sessionId) };
           }
           return s;
         });
@@ -23845,6 +24080,7 @@
             live: true,
             liveOnly: true,
             updatedAt: typeof st.updatedAt === 'string' ? st.updatedAt : undefined,
+            liveState: st, // #255
           });
         }
         return only.concat(marked);
@@ -23862,6 +24098,118 @@
         );
       }
 
+      // #255. What a live row's dot says, from its live-state entry
+      // (s.liveState), highest first: waiting on the reader (a permission or
+      // a question), working (a turn open), background work (no turn open,
+      // something still running), else open. The status line's own states
+      // and colours (#h1-status), so the list and the open conversation
+      // agree, with words as the dot's name and title, never colour alone.
+      const LIVE_DOT_WORDS = {
+        wait: 'waiting on you',
+        run: 'working',
+        bg: 'background work',
+        idle: 'open',
+      };
+      function liveDotState(st) {
+        if (!st) return 'idle';
+        if (st.isWaitingForPermission === true) return 'wait';
+        if (st.isWaitingForUserQuestion === true) return 'wait';
+        if (st.hasActivePrompt === true) return 'run';
+        if (st.activeWorkState === 'active') return 'run';
+        if (st.hasRunningBackgroundTasks === true) return 'bg';
+        return 'idle';
+      }
+      function paintLiveDot(dot, s) {
+        const state = liveDotState(s.liveState);
+        if (dot.dataset.state === state) return;
+        dot.dataset.state = state;
+        dot.setAttribute('aria-label', LIVE_DOT_WORDS[state]);
+        dot.title = LIVE_DOT_WORDS[state];
+      }
+      function liveDot(s) {
+        const dot = document.createElement('span');
+        dot.className = 'dot';
+        dot.setAttribute('role', 'img');
+        paintLiveDot(dot, s);
+        return dot;
+      }
+      // Brings the marks on the rows drawn to what pastConvos says now, row
+      // by row (data-session), without rebuilding one: the reader's place,
+      // focus and an open row menu stay as they are. A row that has gained
+      // or lost its live dot gets it or loses it here too.
+      function paintRowMarks() {
+        const by = new Map();
+        for (const s of pastConvos) {
+          if (s && s.sessionId) by.set(String(s.sessionId), s);
+        }
+        for (const row of $('past-list').querySelectorAll('.s[data-session]')) {
+          const s = by.get(row.dataset.session);
+          const head = row.querySelector('.t');
+          if (!s || !head) continue;
+          const dot = head.querySelector('.dot');
+          if (s.live && dot) paintLiveDot(dot, s);
+          else if (s.live) head.querySelector('.tt').after(liveDot(s));
+          else if (dot) dot.remove();
+          paintAgentChip(head, s);
+        }
+      }
+      // #255. The "N agents" chip after the dot: the subagents the roster
+      // says are running plus the working threads of this conversation
+      // (rowAgentCount). Painted on the node it is on, so the same call
+      // serves a row being built and a row being kept.
+      function paintAgentChip(head, s) {
+        const n = rowAgentCount(s);
+        let chip = head.querySelector('.agchip');
+        if (n <= 0) {
+          if (chip) chip.remove();
+          return;
+        }
+        if (!chip) {
+          chip = document.createElement('span');
+          chip.className = 'agchip';
+        }
+        const anchor = head.querySelector('.dot') || head.querySelector('.tt');
+        if (chip.previousElementSibling !== anchor) anchor.after(chip);
+        const text = agentsChipText(n);
+        if (chip.textContent !== text) chip.textContent = text;
+        const title = rowAgentWords(s);
+        if (chip.title !== title) chip.title = title;
+      }
+      // The threads of `s` that are working now: rows anywhere in the list
+      // whose live-state names `s` as their parent and whose dot is not idle.
+      // R7: a live row whose live-state names no parent (an older daemon) is
+      // one by its transcript's spawnedBy. R6: a fork is never one.
+      function rowThreadCount(s) {
+        let n = 0;
+        for (const x of pastConvos) {
+          const st = x && x.liveState;
+          if (!st || x.parentSessionId) continue;
+          if ((st.parentSessionId || x.spawnedBy) !== s.sessionId) continue;
+          if (liveDotState(st) !== 'idle') n += 1;
+        }
+        return n;
+      }
+      // The subagents running in `s`: the open conversation's own roster
+      // when it is the one watched, else the last roster read for the row
+      // (rosterCounts), which only a working row has and only while it works.
+      function rowRosterCount(s) {
+        if (!agentsOn()) return 0;
+        if (s.sessionId === watchedSessionId) return agentsRunningCount();
+        if (liveDotState(s.liveState) === 'idle') return 0;
+        return rosterCounts.get(String(s.sessionId)) || 0;
+      }
+      function rowAgentCount(s) {
+        return rowRosterCount(s) + rowThreadCount(s);
+      }
+      function rowAgentWords(s) {
+        const subs = rowRosterCount(s);
+        const threads = rowThreadCount(s);
+        const out = [];
+        if (subs > 0) out.push(subs + (subs === 1 ? ' subagent' : ' subagents'));
+        if (threads > 0) out.push(threads + (threads === 1 ? ' thread' : ' threads'));
+        return out.join(', ');
+      }
+
       // One folder's rows, or null when its listing could not be read, with
       // the daemon's live snapshot read beside it (#89). The current folder
       // reads it the way it always has, through the daemon pool, which starts
@@ -23876,11 +24224,16 @@
       const folderReadFailures = new Map();
       async function readFolderRows(cwd, spawn) {
         const did = 'reading the conversations in ' + cwd;
+        liveStateRefused.delete(cwd); // #255 R8: asked again here
         try {
           // One tick, both reads. The snapshot rides this poll rather than
           // keeping a timer of its own, so the list and its markers cannot
           // drift apart by a poll interval, and the rail gains a request
-          // rather than a second cadence.
+          // rather than a second cadence. #255: the dots now also have a 1 s
+          // read of their own (startLiveTick), of the snapshot alone; this
+          // one still brings a snapshot with every listing, so a new row
+          // arrives with its dot.
+          const liveSeq = ++liveSeqNext; // #255: as it is sent
           const [res, states] = await Promise.all([
             fetch('/rc/sessions?cwd=' + encodeURIComponent(cwd), {
               headers: { Authorization: 'Bearer ' + token() } },
@@ -23896,8 +24249,12 @@
           folderReadFailures.delete(cwd);
           // issue #36: pass the server's `truncated` flag through so the
           // 500-file cap is visible in the list.
+          // #255: the listing and the live map kept apart (folderRows), merged
+          // when drawn.
           return {
-            sessions: mergeLiveSessions(body.sessions, states),
+            raw: Array.isArray(body.sessions) ? body.sessions : [],
+            live: states,
+            liveSeq,
             truncated: Boolean(body.truncated),
           };
         } catch (e) {
@@ -23925,8 +24282,9 @@
         if (cwd !== curDirPath) return; // superseded by a newer browse
         let mine = null;
         folders.forEach((f, i) => {
-          if (f === cwd) mine = reads[i];
-          else if (reads[i]) folderRows.set(f, reads[i]);
+          const got = reads[i] && newerLive(f, reads[i]); // #255
+          if (f === cwd) mine = got;
+          else if (got) folderRows.set(f, got);
         });
         // #173: a failed read of the current folder is not an empty folder.
         // The last read of it stays on screen, and the failure is said once
@@ -23942,14 +24300,30 @@
             );
           }
           renderPastConversations(
-            last ? last.sessions : [],
+            last ? last.raw : [],
             cwd,
             last ? last.truncated : false,
+            last ? last.live : null,
+            last ? last.liveSeq : 0,
           );
           return;
         }
         folderReadFailedFor = null;
-        renderPastConversations(mine.sessions, cwd, mine.truncated);
+        renderPastConversations(
+          mine.raw,
+          cwd,
+          mine.truncated,
+          mine.live,
+          mine.liveSeq,
+        );
+      }
+      // #255: a folder's rows read again keep the live map asked for last:
+      // theirs, or one a tick sent after them brought in while they were
+      // still out (the batch waits for its slowest read).
+      function newerLive(cwd, read) {
+        const held = folderRows.get(cwd);
+        if (!held || (held.liveSeq || 0) <= read.liveSeq) return read;
+        return { ...read, live: held.live, liveSeq: held.liveSeq };
       }
 
       // issue #35: folder browsing is no longer the ONLY refresh trigger. A
@@ -23967,6 +24341,179 @@
           void refreshPastConversations(curDirPath);
         }, 30000);
       }
+
+      // #255. The dots' own read, every second while the list is on screen
+      // and the page is visible: each folder in the view, its live-state
+      // alone, never its listing. Every read is spawn=0, the current
+      // folder's too, so the tick never starts a daemon and never keeps one
+      // from idling out; and only on a gateway that says it honours spawn=0
+      // (liveStateNoSpawn), since an older one would start a daemon per
+      // folder asked about. A folder with a live-state read still out is
+      // skipped, so a slow daemon never gathers reads. A read that fails
+      // keeps the folder's last live map and says nothing: the 30 s read
+      // reports a folder it cannot read. A folder that refused (R8:
+      // liveStateRefused) is not asked again until the next 30 s read. The
+      // rows are rebuilt only when the set of live conversations changed;
+      // otherwise only their marks are painted (paintRowMarks).
+      const LIVE_TICK_MS = 1000;
+      let liveTickId = null;
+      function liveTickWanted() {
+        return (
+          !document.hidden && listShown() && liveStateNoSpawn() && !!token()
+        );
+      }
+      function startLiveTick() {
+        if (liveTickId !== null || !liveTickWanted()) return;
+        liveTickId = setInterval(liveTick, LIVE_TICK_MS);
+        startListRosterTick();
+      }
+      function stopLiveTick() {
+        if (liveTickId === null) return;
+        clearInterval(liveTickId);
+        liveTickId = null;
+        stopListRosterTick();
+      }
+      function liveTick() {
+        if (!liveTickWanted()) {
+          stopLiveTick();
+          return;
+        }
+        for (const cwd of viewFolders()) {
+          // A folder whose listing was never read has no rows to mark.
+          if (!folderRows.has(cwd) || liveReadsInFlight.has(cwd)) continue;
+          if (liveStateRefused.has(cwd)) continue; // #255 R8: until the 30 s read
+          const seq = ++liveSeqNext;
+          void readLiveStates(cwd, false).then((live) =>
+            liveTickLanded(cwd, seq, live),
+          );
+        }
+      }
+      function liveSessionIds() {
+        return pastConvos
+          .filter((s) => s && s.live)
+          .map((s) => String(s.sessionId))
+          .sort()
+          .join('\n');
+      }
+      function liveTickLanded(cwd, seq, live) {
+        // Failed: the last live map stays. A map asked for after this one
+        // (a 30 s read sent later) already landed: that one stays.
+        const got = folderRows.get(cwd);
+        if (!live || !got || seq <= (got.liveSeq || 0)) return;
+        got.live = live;
+        got.liveSeq = seq;
+        const was = liveSessionIds();
+        const folders = listFolders();
+        pastConvos = withCatalog(mergeFolderRows(folders), folders);
+        if (liveSessionIds() === was) {
+          paintRowMarks();
+          listRosterTick(true); // a row that began to work is read now
+          return;
+        }
+        renderList();
+        syncFolderMenuCounts();
+        listRosterTick(true);
+      }
+      // #255. The roster behind each working row's "N agents" chip. Read
+      // every AGENTS_POLL_MS for the rows on the page drawn that are
+      // waiting, working or on background work (an idle row is never read),
+      // the open conversation excepted (it has its roster already), at most
+      // ROSTER_READS_MAX at once; the rest wait for a free read, so a long
+      // list is read through rather than its first rows again. It starts and
+      // stops with the live tick: the list off screen or the page hidden,
+      // no roster reads. A row not read yet since the timer started is read
+      // as soon as a tick sees it work (listRosterTick(true)). A read that fails
+      // leaves the row without a roster count, so it draws no chip for it,
+      // and says nothing: the dot is the live-state's, not the roster's.
+      const ROSTER_READS_MAX = 4;
+      const rosterCounts = new Map(); // sessionId -> running subagents
+      let listRosterTimerId = null;
+      let listRosterGen = 0; // a read from before a stop lands nowhere
+      let listRosterQueue = [];
+      const listRosterReading = new Set();
+      const listRosterAsked = new Set(); // read since the timer started
+      function startListRosterTick() {
+        if (listRosterTimerId !== null) return;
+        listRosterTimerId = setInterval(() => listRosterTick(false), AGENTS_POLL_MS);
+        listRosterTick(false);
+      }
+      function stopListRosterTick() {
+        if (listRosterTimerId === null) return;
+        clearInterval(listRosterTimerId);
+        listRosterTimerId = null;
+        listRosterGen += 1;
+        listRosterQueue = [];
+        listRosterReading.clear();
+        listRosterAsked.clear();
+        rosterCounts.clear();
+      }
+      function listRosterRowsWanted(onlyNew) {
+        const by = new Map();
+        for (const s of pastConvos) {
+          if (s && s.sessionId) by.set(String(s.sessionId), s);
+        }
+        const out = [];
+        for (const row of $('past-list').querySelectorAll('.s[data-session]')) {
+          const id = row.dataset.session;
+          const s = by.get(id);
+          if (!s || !s.live || id === watchedSessionId) continue;
+          if (liveDotState(s.liveState) === 'idle') continue;
+          if (onlyNew && listRosterAsked.has(id)) continue;
+          if (!listRosterReading.has(id)) out.push(id);
+        }
+        return out;
+      }
+      function listRosterTick(onlyNew) {
+        if (listRosterTimerId === null || !agentsOn() || !token()) return;
+        const ids = listRosterRowsWanted(onlyNew);
+        if (!onlyNew) {
+          // A whole tick: a row no longer working drops its count.
+          const keep = new Set(listRosterRowsWanted(false).concat([...listRosterReading]));
+          for (const id of [...rosterCounts.keys()]) {
+            if (!keep.has(id)) rosterCounts.delete(id);
+          }
+          listRosterQueue = ids;
+        } else {
+          for (const id of ids) if (!listRosterQueue.includes(id)) listRosterQueue.push(id);
+        }
+        listRosterPump();
+      }
+      function listRosterPump() {
+        while (listRosterReading.size < ROSTER_READS_MAX && listRosterQueue.length) {
+          const id = listRosterQueue.shift();
+          if (listRosterReading.has(id)) continue;
+          void listRosterRead(id);
+        }
+      }
+      async function listRosterRead(id) {
+        const gen = listRosterGen;
+        listRosterReading.add(id);
+        listRosterAsked.add(id);
+        const r = await rcCall('/session/' + encodeURIComponent(id) + '/agents');
+        if (gen !== listRosterGen) return; // stopped meanwhile
+        listRosterReading.delete(id);
+        if (r.ok) {
+          const tasks = r.body && Array.isArray(r.body.tasks) ? r.body.tasks : [];
+          rosterCounts.set(
+            id,
+            tasks.filter(
+              (t) => t && t.kind === 'agent' && t.status === 'running',
+            ).length,
+          );
+        } else {
+          rosterCounts.delete(id);
+        }
+        paintRowMarks();
+        listRosterPump();
+      }
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) stopLiveTick();
+        else startLiveTick();
+      });
+      PANE_QUERY.addEventListener('change', () => {
+        if (listShown()) startLiveTick();
+        else stopLiveTick();
+      });
 
       // issue #46: while a session is watched, the event stream is the
       // only card source — if a permission_request frame was lost (ring
@@ -24559,6 +25106,8 @@
           noteConversationSwitch();
         }
         watchedSessionId = id;
+        // #255: a thread being opened is listed though threads are hidden.
+        if (switching && uiHideThreads === true) renderList();
         // #201: the strip follows the conversation, so A's files come back
         // when A is watched again.
         renderPendingAttachments();

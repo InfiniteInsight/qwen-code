@@ -7517,6 +7517,40 @@ describe('workspace session live-state route', () => {
     ).toEqual(['11111111-1111-4111-a111-111111111111']);
   });
 
+  it('carries parentSessionId for a sub-session', async () => {
+    const { app } = makeHarness({
+      primarySummaries: [
+        makeSummary('11111111-1111-4111-a111-111111111111', PRIMARY_CWD, {
+          parentSessionId: 'aaaaaaaa-1111-4111-a111-111111111111',
+        }),
+      ],
+    });
+
+    const res = await request(app)
+      .get(liveStatePath('primary-id'))
+      .set('Host', host())
+      .expect(200);
+
+    expect(res.body.sessions[0].parentSessionId).toBe(
+      'aaaaaaaa-1111-4111-a111-111111111111',
+    );
+  });
+
+  it('omits parentSessionId for a top-level session', async () => {
+    const { app } = makeHarness({
+      primarySummaries: [
+        makeSummary('11111111-1111-4111-a111-111111111111', PRIMARY_CWD),
+      ],
+    });
+
+    const res = await request(app)
+      .get(liveStatePath('primary-id'))
+      .set('Host', host())
+      .expect(200);
+
+    expect(res.body.sessions[0]).not.toHaveProperty('parentSessionId');
+  });
+
   it.each([true, false, undefined])(
     'preserves running background task state %s while the main prompt is idle',
     async (hasRunningBackgroundTasks) => {

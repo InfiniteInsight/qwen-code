@@ -9,6 +9,7 @@ import { isValidSessionId } from './chatsPath.js';
 import type { ForkRecord } from './forkTranscript.js';
 import {
   parentOf,
+  spawnedByOf,
   walkLineage,
   MAX_LINEAGE_DEPTH,
   type WalkLineageOpts,
@@ -154,5 +155,30 @@ describe('walkLineage', () => {
 
   it('defaults the cap to MAX_LINEAGE_DEPTH', () => {
     expect(MAX_LINEAGE_DEPTH).toBe(100);
+  });
+});
+
+describe('spawnedByOf', () => {
+  const marker = (id: unknown): ForkRecord => ({
+    type: 'system',
+    subtype: 'parent_session',
+    systemPayload: { parentSessionId: id },
+  });
+
+  it('finds a parent_session record at index 0 and at index 3', () => {
+    expect(spawnedByOf([marker('P')])).toBe('P');
+    expect(spawnedByOf([root(), root(), root(), marker('P'), root()])).toBe(
+      'P',
+    );
+  });
+
+  it('ignores forkedFrom and a non-string payload id', () => {
+    expect(spawnedByOf([{ forkedFrom: { sessionId: 'F' } }])).toBeNull();
+    expect(spawnedByOf([marker(7)])).toBeNull();
+  });
+
+  it('returns null for no records', () => {
+    expect(spawnedByOf(null)).toBeNull();
+    expect(spawnedByOf([])).toBeNull();
   });
 });

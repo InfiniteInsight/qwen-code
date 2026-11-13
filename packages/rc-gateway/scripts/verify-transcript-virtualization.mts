@@ -6294,7 +6294,8 @@ PAGE_SCENARIOS.push({
   // rows would pass a test that never asked for the missing one.
   // #185 (h1): the rows are the List screen's. "open" is the row's live dot
   // (named "open"), and what a row offers is what its ⋯ menu holds, read by
-  // opening it.
+  // opening it. #255: the dot is named for what the conversation is doing,
+  // so the working disk row's says "working"; "open" here is the dot itself.
   name: 'P37 a conversation with no transcript is listed, and an unreadable snapshot changes nothing',
   waitView: false,
   run: async ({ page }) => {
@@ -6349,7 +6350,7 @@ PAGE_SCENARIOS.push({
         id: w.dataset.session,
         label: (w.querySelector('.tt') || w).textContent || '',
         sub: w.querySelector('.sub') ? w.querySelector('.sub').textContent : '',
-        open: !!w.querySelector('.dot[aria-label="open"]'),
+        open: !!w.querySelector('.dot'),
         items: [],
       }))`)) as Row[];
       await openList(page);
@@ -6366,6 +6367,9 @@ PAGE_SCENARIOS.push({
     // curDirPath is what the page sets when it browses into a folder, and the
     // render is skipped unless it matches the cwd being refreshed. Set here so
     // the call below goes all the way through rather than returning early.
+    // After the load's own browse has landed, as serveList waits: one landing
+    // later puts curDirPath back, and every refresh below returns early.
+    await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
     await page.evaluate(`curDirPath = ${JSON.stringify(CWD)}; refreshPastConversations(${JSON.stringify(CWD)})`);
     await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 2`, null, { timeout: 5_000 }).catch(() => undefined);
     const rows = await readRows();
@@ -32044,6 +32048,1014 @@ PAGE_SCENARIOS.push({
         expect(got[i] === cases[i]![1], `hooksPreview(${JSON.stringify(cases[i]![0])}) is ${JSON.stringify(got[i])}, not ${JSON.stringify(cases[i]![1])}`);
       }
       return `${cases.length} commands, the same words as routes/sessionHooks.ts's commandPreview`;
+    },
+  });
+}
+
+// #255. The list's dot says what each conversation is doing: amber waiting on
+// you, blue working, purple background work, green open, in the status line's
+// colours, with the words as the dot's name and title. It is read from the
+// daemon's live-state on a 1 s tick of its own while the list is on screen and
+// the page is visible, spawn=0 for every folder. Both the listing and the
+// live-state are answered here, as in P37: the harness wires a bare
+// DaemonClient, whose live-state answers 502. In-page code is a plain string.
+{
+  const LD_CWD = '/home/evan/p255-live';
+  const LD_OTHER = '/home/evan/p255-other';
+  const LD = (n: number) => `a2550000-0000-4000-8000-00000000000${n}`;
+  /** The brief's words, verbatim: the page's LIVE_DOT_WORDS must equal them. */
+  const LD_WORDS = { wait: 'waiting on you', run: 'working', bg: 'background work', idle: 'open' } as const;
+  type LdKind = keyof typeof LD_WORDS;
+  type LdEntry = Record<string, unknown>;
+  const ldEntry = (sessionId: string, kind: LdKind): LdEntry => ({
+    sessionId,
+    clientCount: 1,
+    hasActivePrompt: kind === 'run',
+    isWaitingForPermission: kind === 'wait',
+    isWaitingForUserQuestion: false,
+    hasRunningBackgroundTasks: kind === 'bg',
+    updatedAt: new Date().toISOString(),
+  });
+  const ldRow = (sessionId: string, title: string) => ({
+    sessionId,
+    title,
+    titleSource: 'manual',
+    forks: [],
+    updatedAt: new Date().toISOString(),
+    preview: 'p255 ' + title,
+  });
+  type LdRead = { cwd: string; spawn: string | null; at: number };
+  type LdCtl = {
+    /** Each folder's live-state answer, changed as a scenario goes. */
+    live: Map<string, LdEntry[]>;
+    /** How the next live-state reads are answered. */
+    status: number;
+    delayMs: number;
+    /** Every live-state read the page sent, with when it reached the route. */
+    reads: LdRead[];
+    inflight: Map<string, number>;
+    /** The most live-state reads of one folder unanswered at once. */
+    maxInflight: Map<string, number>;
+    /** While set, a listing answer waits for it before it is sent. */
+    hold: Promise<void> | null;
+    /**
+     * While set, a spawning live-state read (no spawn=0: the 30 s read of
+     * the current folder) waits for it, answered with the state it asked in.
+     */
+    holdSpawning: Promise<void> | null;
+  };
+  /**
+   * Serves `folders` (the first is the current folder, the rest the recent
+   * ones) and their live-state, moves the list there through its own refresh
+   * and waits for the rows. `pausePoll` holds off the 30 s poll, which reads
+   * live-state too, for a scenario that counts reads over a window.
+   */
+  const ldServe = async (
+    page: Page,
+    folders: Record<string, ReturnType<typeof ldRow>[]>,
+    live: Record<string, LdEntry[]>,
+    opts: { pausePoll?: boolean } = {},
+  ): Promise<LdCtl> => {
+    const ctl: LdCtl = {
+      live: new Map(Object.entries(live)),
+      status: 200,
+      delayMs: 0,
+      reads: [],
+      inflight: new Map(),
+      maxInflight: new Map(),
+      hold: null,
+      holdSpawning: null,
+    };
+    await page.waitForFunction('curDirPath !== null && pastConvosCwd !== null');
+    if (opts.pausePoll) await page.evaluate('clearInterval(pastConvosPollId); pastConvosPollId = null;');
+    await page.route(/\/rc\/sessions\?/, async (route) => {
+      const u = new URL(route.request().url());
+      const rows = u.searchParams.has('archiveState') ? [] : (folders[u.searchParams.get('cwd') ?? ''] ?? []);
+      if (ctl.hold) await ctl.hold;
+      await route
+        .fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ sessions: rows, truncated: false }) })
+        .catch(() => undefined);
+    });
+    await page.route(/\/rc\/sessions\/live-state\?/, async (route) => {
+      const u = new URL(route.request().url());
+      const cwd = u.searchParams.get('workspace') ?? '';
+      ctl.reads.push({ cwd, spawn: u.searchParams.get('spawn'), at: Date.now() });
+      const n = (ctl.inflight.get(cwd) ?? 0) + 1;
+      ctl.inflight.set(cwd, n);
+      ctl.maxInflight.set(cwd, Math.max(ctl.maxInflight.get(cwd) ?? 0, n));
+      const status = ctl.status;
+      const delayMs = ctl.delayMs;
+      // The answer is the state as it was when the read arrived, however
+      // late it is sent.
+      const sessions = ctl.live.get(cwd) ?? [];
+      const held = u.searchParams.get('spawn') === '0' ? null : ctl.holdSpawning;
+      try {
+        if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+        if (held) await held;
+        await route.fulfill({
+          status,
+          contentType: 'application/json',
+          body: JSON.stringify(
+            status === 200
+              ? { v: 1, catalogVersion: { generation: 'g-p255', revision: 1 }, sessions }
+              : { code: 'daemon_hung', error: 'the daemon did not answer in time' },
+          ),
+        });
+      } catch {
+        /* the page went away first */
+      } finally {
+        ctl.inflight.set(cwd, (ctl.inflight.get(cwd) ?? 1) - 1);
+      }
+    });
+    const names = Object.keys(folders);
+    const current = names[0]!;
+    const rows = new Set(Object.values(folders).flat().map((r) => r.sessionId)).size;
+    await page.evaluate(
+      `localStorage.setItem('qwen-rc-workspaces', ${JSON.stringify(JSON.stringify(names.slice(1)))}); curDirPath = ${JSON.stringify(current)}; refreshPastConversations(${JSON.stringify(current)})`,
+    );
+    await page.waitForFunction(`pastConvosCwd === ${JSON.stringify(current)} && pastConvos.length === ${rows}`, null, { timeout: 10_000 });
+    const view = (await page.evaluate('viewFolders()')) as string[];
+    expect(JSON.stringify(view) === JSON.stringify(names), `the list's folders are ${JSON.stringify(view)}, not ${JSON.stringify(names)}`);
+    return ctl;
+  };
+  type LdDot = { id: string; state: string | null; label: string | null; title: string | null; bg: string | null; h: number };
+  const ldDots = (page: Page) =>
+    page.evaluate(String.raw`Array.from(document.querySelectorAll('#past-list .srow')).map((w) => {
+      const s = w.querySelector('.s');
+      const d = s.querySelector('.dot');
+      return {
+        id: w.dataset.session,
+        state: d ? d.dataset.state || null : null,
+        label: d ? d.getAttribute('aria-label') : null,
+        title: d ? d.title : null,
+        bg: d ? getComputedStyle(d).backgroundColor : null,
+        h: Math.round(s.getBoundingClientRect().height),
+      };
+    })`) as Promise<LdDot[]>;
+  /** Waits until the row's dot reads `state`; false if it never does. */
+  const ldDotIs = (page: Page, id: string, state: LdKind, timeout = 5_000) =>
+    page
+      .waitForFunction(
+        `(() => { const d = document.querySelector('#past-list .s[data-session="${id}"] .dot'); return !!d && d.dataset.state === '${state}'; })()`,
+        null,
+        { timeout },
+      )
+      .then(
+        () => true,
+        () => false,
+      );
+  /** Polls `cond` on this side until it holds; the ms it took, or -1. */
+  const ldUntil = async (cond: () => boolean, ms: number): Promise<number> => {
+    const t0 = Date.now();
+    for (;;) {
+      if (cond()) return Date.now() - t0;
+      if (Date.now() - t0 > ms) return -1;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  };
+  const ldVisible = (page: Page, visible: boolean) =>
+    page.evaluate(String.raw`(() => {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => ${!visible} });
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => '${visible ? 'visible' : 'hidden'}' });
+      document.dispatchEvent(new Event('visibilitychange'));
+    })()`);
+
+  PAGE_SCENARIOS.push({
+    name: 'P550 the list dot is amber waiting, blue working, purple background, green open, in the status line\'s colours and words',
+    waitView: false,
+    run: async ({ page }) => {
+      const kinds: LdKind[] = ['wait', 'run', 'bg', 'idle'];
+      const idOf = (k: LdKind) => LD(kinds.indexOf(k) + 1);
+      await ldServe(
+        page,
+        { [LD_CWD]: kinds.map((k) => ldRow(idOf(k), 'p255 ' + k + ' row with a long title that has to give way to the dot')) },
+        { [LD_CWD]: kinds.map((k) => ldEntry(idOf(k), k)) },
+      );
+      await openList(page);
+      for (const k of kinds) expect(await ldDotIs(page, idOf(k), k), `the ${k} row's dot never read ${k}: ${JSON.stringify(await ldDots(page))}`);
+      const words = (await page.evaluate('LIVE_DOT_WORDS')) as Record<string, string>;
+      expect(JSON.stringify(words) === JSON.stringify(LD_WORDS), `LIVE_DOT_WORDS is ${JSON.stringify(words)}`);
+      // The status line's dot for each state, read off #h1-status itself and
+      // put back as it was.
+      const line = (await page.evaluate(String.raw`(() => {
+        const box = document.getElementById('h1-status');
+        const was = box.getAttribute('data-state');
+        const out = {};
+        for (const st of ['wait', 'run', 'bg', 'idle']) {
+          box.setAttribute('data-state', st);
+          out[st] = getComputedStyle(box.querySelector('.dot')).backgroundColor;
+        }
+        if (was === null) box.removeAttribute('data-state');
+        else box.setAttribute('data-state', was);
+        return out;
+      })()`)) as Record<LdKind, string>;
+      expect(new Set(Object.values(line)).size === 4, `the status line's four dots are not four colours: ${JSON.stringify(line)}`);
+      const check = (dots: LdDot[], at: number) => {
+        const by = Object.fromEntries(dots.map((d) => [d.id, d]));
+        for (const k of kinds) {
+          const d = by[idOf(k)]!;
+          expect(
+            d.state === k && d.label === LD_WORDS[k] && d.title === LD_WORDS[k],
+            `at ${at} the ${k} row's dot reads ${JSON.stringify(d)}, not ${k} named ${JSON.stringify(LD_WORDS[k])}`,
+          );
+          expect(d.bg === line[k], `at ${at} the ${k} dot is ${d.bg}, the status line's ${k} dot ${line[k]}`);
+        }
+        expect(dots.every((d) => d.h === 64), `at ${at} the rows are ${JSON.stringify(dots.map((d) => d.h))}px, not 64`);
+      };
+      const at390 = await ldDots(page);
+      check(at390, 390);
+      // Highest first: waiting over working over background work.
+      const order = (await page.evaluate(String.raw`[
+        liveDotState({ isWaitingForUserQuestion: true, hasActivePrompt: true }),
+        liveDotState({ isWaitingForPermission: true, hasRunningBackgroundTasks: true }),
+        liveDotState({ activeWorkState: 'active' }),
+        liveDotState({ hasActivePrompt: true, hasRunningBackgroundTasks: true }),
+        liveDotState({ hasRunningBackgroundTasks: true }),
+        liveDotState({ hasActivePrompt: false, activeWorkState: 'idle', hasRunningBackgroundTasks: false }),
+        liveDotState({}),
+      ]`)) as string[];
+      expect(
+        JSON.stringify(order) === JSON.stringify(['wait', 'wait', 'run', 'run', 'bg', 'idle', 'idle']),
+        `liveDotState ranks the states ${JSON.stringify(order)}`,
+      );
+      await shot(page, 'p550-dots-390');
+      await closeList(page);
+      await page.setViewportSize(LAPTOP);
+      for (const k of kinds) expect(await ldDotIs(page, idOf(k), k), `at 1280 the ${k} row's dot never read ${k}`);
+      check(await ldDots(page), 1280);
+      await shot(page, 'p550-dots-1280');
+      return `${kinds.map((k) => `${k} "${LD_WORDS[k]}" ${line[k]}`).join(', ')}, the status line's colours; 64px rows at 390 and 1280; ${order.join(' ')}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P551 a conversation that starts working turns blue within 2.5 s with no transcript read',
+    waitView: false,
+    run: async ({ page }) => {
+      const ctl = await ldServe(
+        page,
+        { [LD_CWD]: [ldRow(LD(1), 'p255 quiet'), ldRow(LD(2), 'p255 also quiet')] },
+        { [LD_CWD]: [ldEntry(LD(1), 'idle'), ldEntry(LD(2), 'idle')] },
+      );
+      await openList(page);
+      expect(await ldDotIs(page, LD(1), 'idle'), `the row's dot never read idle: ${JSON.stringify(await ldDots(page))}`);
+      await page.waitForTimeout(300);
+      // When the dot turns blue, on the page's clock, and the row node it is
+      // on, to tell a paint from a rebuild.
+      await page.evaluate(String.raw`(() => {
+        window.__p551 = null;
+        const box = document.getElementById('past-list');
+        window.__p551row = box.querySelector('.s[data-session="${LD(1)}"]');
+        const look = () => {
+          const d = box.querySelector('.s[data-session="${LD(1)}"] .dot');
+          if (window.__p551 === null && d && d.dataset.state === 'run') window.__p551 = Date.now();
+        };
+        new MutationObserver(look).observe(box, { subtree: true, childList: true, attributes: true });
+      })()`);
+      // From the flip on, a listing answer is held until the dot has turned
+      // (R2): the 30 s poll may ask inside the window, but no transcript
+      // read can land before the dot turns, so only the live-state tick can
+      // have turned it.
+      let release: () => void = () => undefined;
+      ctl.hold = new Promise<void>((r) => (release = r));
+      ctl.live.set(LD_CWD, [ldEntry(LD(1), 'run'), ldEntry(LD(2), 'idle')]);
+      const flipAt = Date.now();
+      const turned = await page.waitForFunction('window.__p551 !== null', null, { timeout: 4_000 }).then(
+        () => true,
+        () => false,
+      );
+      const turnedAt = (await page.evaluate('window.__p551')) as number | null;
+      const painted = (await page.evaluate('window.__p551row.isConnected')) as boolean;
+      ctl.hold = null;
+      release();
+      const after = await ldDots(page);
+      expect(turned && turnedAt !== null, `the dot never turned blue: ${JSON.stringify(after)}`);
+      expect(turnedAt! - flipAt <= 2500, `the dot turned blue ${turnedAt! - flipAt}ms after the live-state changed, not within 2.5 s`);
+      expect(
+        after.find((d) => d.id === LD(1))!.label === 'working' && after.find((d) => d.id === LD(2))!.state === 'idle',
+        `after the flip the rows read ${JSON.stringify(after)}`,
+      );
+      expect(painted, 'the row was rebuilt to turn its dot, rather than painted in place');
+      return `blue ${turnedAt! - flipAt}ms after the live-state flipped, no transcript read answered in between, the row painted in place`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P552 the tick stops when the list closes and when the page is hidden',
+    waitView: false,
+    run: async ({ page }) => {
+      const ctl = await ldServe(page, { [LD_CWD]: [ldRow(LD(1), 'p255 one')] }, { [LD_CWD]: [ldEntry(LD(1), 'run')] }, { pausePoll: true });
+      const ticks = (since: number) => ctl.reads.filter((r) => r.at >= since && r.spawn === '0').length;
+      const reads = (since: number) => ctl.reads.filter((r) => r.at >= since).length;
+      let t = Date.now();
+      await openList(page);
+      await page.waitForTimeout(2300);
+      const open = ticks(t);
+      expect(open >= 2, `the list was open 2.3 s and the tick read live-state ${open} times`);
+      await closeList(page);
+      // A read sent as the list shut is not counted.
+      await page.waitForTimeout(200);
+      t = Date.now();
+      await page.waitForTimeout(3000);
+      const shut = reads(t);
+      expect(shut === 0, `${shut} live-state reads in the 3 s after the list shut`);
+      t = Date.now();
+      await openList(page);
+      const reopened = await ldUntil(() => ticks(t) > 0, 1500);
+      expect(reopened >= 0, 'the tick did not resume within 1.5 s of the list opening again');
+      await ldVisible(page, false);
+      await page.waitForTimeout(200);
+      t = Date.now();
+      await page.waitForTimeout(3000);
+      const hidden = reads(t);
+      expect(hidden === 0, `${hidden} live-state reads in 3 s while the page was hidden`);
+      t = Date.now();
+      await ldVisible(page, true);
+      const back = await ldUntil(() => ticks(t) > 0, 1500);
+      expect(back >= 0, 'the tick did not resume within 1.5 s of the page coming back');
+      // The laptop's list is a pane that is always on screen: widened with
+      // the list shut, the tick starts.
+      await closeList(page);
+      await page.waitForTimeout(1200);
+      t = Date.now();
+      await page.setViewportSize(LAPTOP);
+      const pane = await ldUntil(() => ticks(t) > 0, 1500);
+      expect(pane >= 0, 'the tick did not start within 1.5 s of the list becoming a pane');
+      return `${open} ticks in 2.3 s open; 0 in 3 s shut, back ${reopened}ms after reopening; 0 in 3 s hidden, back ${back}ms after showing; ${pane}ms after widening into the pane`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P553 a slow live-state never has two reads in flight for one folder, a failed tick keeps the dots, and a folder that refuses is asked at most once between two 30 s reads',
+    waitView: false,
+    run: async ({ page }) => {
+      const ctl = await ldServe(
+        page,
+        { [LD_CWD]: [ldRow(LD(1), 'p255 asking'), ldRow(LD(2), 'p255 busy')] },
+        { [LD_CWD]: [ldEntry(LD(1), 'wait'), ldEntry(LD(2), 'run')] },
+        { pausePoll: true },
+      );
+      await openList(page);
+      expect(await ldDotIs(page, LD(1), 'wait'), `the asking row never read wait: ${JSON.stringify(await ldDots(page))}`);
+      expect(await ldDotIs(page, LD(2), 'run'), `the busy row never read run: ${JSON.stringify(await ldDots(page))}`);
+      await page.waitForTimeout(300);
+      const before = await ldDots(page);
+      const status = (await page.evaluate(`document.getElementById('status').textContent`)) as string;
+      // From here each read takes 3 s and then fails; had one been answered,
+      // both dots would go green.
+      ctl.delayMs = 3000;
+      ctl.status = 500;
+      ctl.live.set(LD_CWD, [ldEntry(LD(1), 'idle'), ldEntry(LD(2), 'idle')]);
+      ctl.maxInflight.clear();
+      const t = Date.now();
+      // The first slow read fails at about 4 s; the next goes out after it.
+      const second = await ldUntil(() => ctl.reads.filter((r) => r.at >= t).length >= 2, 7000);
+      await page.waitForTimeout(300);
+      const sent = ctl.reads.filter((r) => r.at >= t);
+      const most = ctl.maxInflight.get(LD_CWD) ?? 0;
+      const after = await ldDots(page);
+      const statusAfter = (await page.evaluate(`document.getElementById('status').textContent`)) as string;
+      expect(second >= 0, `only ${sent.length} live-state reads went out in 7 s of slow answers`);
+      expect(most === 1, `${most} live-state reads of ${LD_CWD} were in flight at once`);
+      expect(sent.length === 2, `${sent.length} live-state reads went out in ${Date.now() - t}ms of 3 s answers, not one after the other`);
+      expect(
+        JSON.stringify(after.map((d) => [d.id, d.state, d.label])) === JSON.stringify(before.map((d) => [d.id, d.state, d.label])),
+        `the failed read changed the dots: ${JSON.stringify(before)} -> ${JSON.stringify(after)}`,
+      );
+      expect(statusAfter === status, `the failed tick changed the status line: ${JSON.stringify(status)} -> ${JSON.stringify(statusAfter)}`);
+      const slowMs = Date.now() - t;
+      // R8: a folder whose live-state refuses (a 403, a 502 that says
+      // live_state_unsupported, live_state_unpooled) is not asked again by
+      // the tick until the next 30 s read; any other failure is asked again.
+      const refuses = (await page.evaluate(String.raw`[
+        liveStateRefuses(403, null),
+        liveStateRefuses(502, { code: 'live_state_unsupported' }),
+        liveStateRefuses(501, { code: 'live_state_unpooled' }),
+        liveStateRefuses(502, { code: 'daemon_unavailable' }),
+        liveStateRefuses(500, { code: 'daemon_hung' }),
+        liveStateRefuses(503, { code: 'workspace_pool_full' }),
+      ]`)) as boolean[];
+      expect(
+        JSON.stringify(refuses) === JSON.stringify([true, true, true, false, false, false]),
+        `liveStateRefuses reads 403, 502 unsupported, 501 unpooled, 502, 500, 503 as ${JSON.stringify(refuses)}`,
+      );
+      ctl.delayMs = 0;
+      ctl.status = 403;
+      await ldUntil(() => (ctl.inflight.get(LD_CWD) ?? 0) === 0, 5000);
+      const t403 = Date.now();
+      await page.waitForTimeout(3500);
+      const ticks403 = ctl.reads.filter((r) => r.at >= t403 && r.spawn === '0').length;
+      expect(ticks403 <= 1, `a folder answering 403 was asked ${ticks403} times by the tick in 3.5 s, not at most once`);
+      // Between two 30 s reads (called as the poll calls them), at most one.
+      const r1 = Date.now();
+      await page.evaluate('refreshPastConversations(curDirPath)');
+      await page.waitForTimeout(3000);
+      const r2 = Date.now();
+      await page.evaluate('refreshPastConversations(curDirPath)');
+      const between = ctl.reads.filter((r) => r.at >= r1 && r.at < r2 && r.spawn === '0').length;
+      expect(between <= 1, `the tick asked the refusing folder ${between} times between two 30 s reads`);
+      const thirty = ctl.reads.filter((r) => r.at >= r1 && r.spawn === null).length;
+      expect(thirty === 2, `the two 30 s reads asked live-state ${thirty} times, not twice`);
+      // Answered again, the next 30 s read lets the tick ask once more.
+      ctl.status = 200;
+      await page.evaluate('refreshPastConversations(curDirPath)');
+      const back = Date.now();
+      await page.waitForTimeout(2500);
+      const resumed = ctl.reads.filter((r) => r.at >= back && r.spawn === '0').length;
+      expect(resumed >= 2, `after a 30 s read answered 200 the tick asked ${resumed} times in 2.5 s, not again every second`);
+      const statusEnd = (await page.evaluate(`document.getElementById('status').textContent`)) as string;
+      expect(statusEnd === status, `the refused ticks changed the status line: ${JSON.stringify(status)} -> ${JSON.stringify(statusEnd)}`);
+      return `${sent.length} reads in ${slowMs}ms, at most ${most} in flight; the dots kept ${before.map((d) => d.state).join(' and ')} after the 500; the status line unchanged; a 403 folder asked ${ticks403} times in 3.5 s of ticks and ${between} between two 30 s reads, ${resumed} in 2.5 s once answered`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P554 every tick read is spawn=0, the current folder included',
+    waitView: false,
+    run: async ({ page }) => {
+      const ctl = await ldServe(
+        page,
+        { [LD_CWD]: [ldRow(LD(1), 'p255 here')], [LD_OTHER]: [ldRow(LD(2), 'p255 there')] },
+        { [LD_CWD]: [ldEntry(LD(1), 'run')], [LD_OTHER]: [ldEntry(LD(2), 'bg')] },
+        { pausePoll: true },
+      );
+      await openList(page);
+      expect(await ldDotIs(page, LD(1), 'run'), `the current folder's row never read run: ${JSON.stringify(await ldDots(page))}`);
+      expect(await ldDotIs(page, LD(2), 'bg'), `the other folder's row never read bg: ${JSON.stringify(await ldDots(page))}`);
+      await page.waitForTimeout(300);
+      let t = Date.now();
+      await page.waitForTimeout(3000);
+      const ticked = ctl.reads.filter((r) => r.at >= t);
+      const of = (c: string) => ticked.filter((r) => r.cwd === c).length;
+      expect(
+        ticked.length > 0 && ticked.every((r) => r.spawn === '0'),
+        `the tick's reads were ${JSON.stringify(ticked.map((r) => [r.cwd, r.spawn]))}, not all spawn=0`,
+      );
+      expect(of(LD_CWD) >= 2 && of(LD_OTHER) >= 2, `in 3 s the tick read the current folder ${of(LD_CWD)} times and the other ${of(LD_OTHER)}`);
+      // A gateway that does not say it honours spawn=0: the running tick
+      // stops, and opening the list again starts none. The open's own read
+      // of the current folder (the spawning one) is the read #190 kept.
+      await page.evaluate('caps.remoteControl.liveStateNoSpawn = undefined');
+      await page.waitForTimeout(1200);
+      await closeList(page);
+      t = Date.now();
+      await openList(page);
+      await page.waitForTimeout(3000);
+      const silent = ctl.reads.filter((r) => r.at >= t).map((r) => [r.cwd, r.spawn]);
+      expect(
+        JSON.stringify(silent) === JSON.stringify([[LD_CWD, null]]),
+        `without liveStateNoSpawn the list read live-state ${JSON.stringify(silent)} in 3 s open, not the current folder's spawning read alone`,
+      );
+      return `${ticked.length} tick reads in 3 s, all spawn=0, ${of(LD_CWD)} of the current folder and ${of(LD_OTHER)} of the other; without liveStateNoSpawn only ${JSON.stringify(silent)}`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P565 a 30 s read that lands after a newer tick does not put the dot back',
+    waitView: false,
+    run: async ({ page }) => {
+      // The other folder's conversation is working. The 30 s read asks every
+      // folder at once and draws nothing until all have answered; the
+      // current folder's spawning live-state read is held, so the other
+      // folder's answer ("working") waits in the batch while its ticks go on.
+      const ctl = await ldServe(
+        page,
+        { [LD_CWD]: [ldRow(LD(1), 'p255 here')], [LD_OTHER]: [ldRow(LD(2), 'p255 there')] },
+        { [LD_CWD]: [ldEntry(LD(1), 'idle')], [LD_OTHER]: [ldEntry(LD(2), 'run')] },
+        { pausePoll: true },
+      );
+      await openList(page);
+      expect(await ldDotIs(page, LD(2), 'run'), `the other folder's row never read run: ${JSON.stringify(await ldDots(page))}`);
+      await page.waitForTimeout(300);
+      let release: () => void = () => undefined;
+      ctl.holdSpawning = new Promise<void>((r) => (release = r));
+      const t = Date.now();
+      // The 30 s read, called as the poll calls it.
+      await page.evaluate('window.__p565 = false; refreshPastConversations(curDirPath).then(() => { window.__p565 = true; }); undefined');
+      const asked = await ldUntil(
+        () =>
+          ctl.reads.some((r) => r.at >= t && r.cwd === LD_CWD && r.spawn === null) &&
+          ctl.reads.some((r) => r.at >= t && r.cwd === LD_OTHER),
+        5000,
+      );
+      expect(asked >= 0, `the 30 s read did not ask both folders: ${JSON.stringify(ctl.reads.filter((r) => r.at >= t))}`);
+      // Its answer for the other folder said "working". The turn ends now,
+      // and a tick reads it.
+      await page.waitForTimeout(200);
+      ctl.live.set(LD_OTHER, [ldEntry(LD(2), 'idle')]);
+      expect(await ldDotIs(page, LD(2), 'idle', 4000), `no tick turned the finished row green while the 30 s read was out: ${JSON.stringify(await ldDots(page))}`);
+      // From here, the dot going back to blue at any moment is recorded.
+      await page.evaluate(String.raw`(() => {
+        window.__p565back = 0;
+        const box = document.getElementById('past-list');
+        new MutationObserver(() => {
+          const d = box.querySelector('.s[data-session="${LD(2)}"] .dot');
+          if (d && d.dataset.state === 'run') window.__p565back += 1;
+        }).observe(box, { subtree: true, childList: true, attributes: true });
+      })()`);
+      ctl.holdSpawning = null;
+      release();
+      const landed = await page.waitForFunction('window.__p565 === true', null, { timeout: 5000 }).then(
+        () => true,
+        () => false,
+      );
+      await page.waitForTimeout(1500);
+      const back = (await page.evaluate('window.__p565back')) as number;
+      const after = await ldDots(page);
+      expect(landed, 'the held 30 s read never landed');
+      expect(back === 0, `the 30 s read's older answer put the finished row's dot back to working (${back} times) after a newer tick had turned it green`);
+      expect(after.find((d) => d.id === LD(2))!.state === 'idle', `after the 30 s read the rows read ${JSON.stringify(after)}`);
+      return 'a tick turned the row green while the 30 s read was out; the read landed with its older "working" and the dot stayed green';
+    },
+  });
+
+  // ---- #255: the "N agents" chip on a working row ---------------------------
+  const agChip = (page: Page) =>
+    page.evaluate(String.raw`Array.from(document.querySelectorAll('#past-list .srow')).map((w) => {
+      const s = w.querySelector('.s');
+      const c = s.querySelector('.agchip');
+      const d = s.querySelector('.dot');
+      const tt = s.querySelector('.tt');
+      const b = s.querySelector('.tabbadge');
+      const rr = (e) => (e ? Math.round(e.getBoundingClientRect().right) : 0);
+      return {
+        id: w.dataset.session,
+        chip: c ? c.textContent : null,
+        title: c ? c.title : null,
+        dot: d ? d.dataset.state : null,
+        h: Math.round(s.getBoundingClientRect().height),
+        rowRight: rr(w),
+        chipRight: rr(c),
+        chipFits: c ? c.scrollWidth <= c.clientWidth : true,
+        chipW: c ? Math.round(c.getBoundingClientRect().width) : 0,
+        ttCut: tt ? tt.scrollWidth > tt.clientWidth : false,
+        badge: b ? b.textContent : null,
+        badgeRight: rr(b),
+        badgeW: b ? Math.round(b.getBoundingClientRect().width) : 0,
+      };
+    })`) as Promise<
+      Array<{
+        id: string;
+        chip: string | null;
+        title: string | null;
+        dot: string | null;
+        h: number;
+        rowRight: number;
+        chipRight: number;
+        chipFits: boolean;
+        chipW: number;
+        ttCut: boolean;
+        badge: string | null;
+        badgeRight: number;
+        badgeW: number;
+      }>
+    >;
+  const agChipIs = (page: Page, id: string, text: string | null, timeout = 8_000) =>
+    page
+      .waitForFunction(
+        `(() => { const c = document.querySelector('#past-list .s[data-session="${id}"] .agchip'); return ${text === null ? '!c' : `!!c && c.textContent === ${JSON.stringify(text)}`}; })()`,
+        null,
+        { timeout },
+      )
+      .then(
+        () => true,
+        () => false,
+      );
+  /** Every roster read the page sends, as the session id it is for, with when. */
+  const agAsked = (page: Page) => {
+    const asked: Array<{ id: string; at: number }> = [];
+    page.on('request', (r) => {
+      const m = /\/session\/([^/]+)\/agents$/.exec(new URL(r.url()).pathname);
+      if (m) asked.push({ id: decodeURIComponent(m[1]!), at: Date.now() });
+    });
+    return asked;
+  };
+  const AG_STUB = { capabilitiesFeatures: AGENT_FEATURES };
+
+  PAGE_SCENARIOS.push({
+    name: 'P555 a working row with two running agents says "2 agents" and an idle row is never read',
+    waitView: false,
+    stub: {
+      ...AG_STUB,
+      sessionAgentsResult: (sid: string) =>
+        agentRoster(
+          sid,
+          sid === LD(1)
+            ? [
+                agentTask({ id: 'a-r1', toolUseId: 'tc-r1' }),
+                agentTask({ id: 'a-r2', toolUseId: 'tc-r2' }),
+                agentTask({ id: 'a-d1', toolUseId: 'tc-d1', status: 'completed', endTime: AG_T0 + 9_000 }),
+              ]
+            : [
+                agentTask({ id: 'b-r1', toolUseId: 'tb-r1' }),
+                agentTask({ id: 'b-r2', toolUseId: 'tb-r2' }),
+                agentTask({ id: 'b-r3', toolUseId: 'tb-r3' }),
+              ],
+        ),
+    },
+    run: async ({ page }) => {
+      const asked = agAsked(page);
+      await ldServe(
+        page,
+        { [LD_CWD]: [ldRow(LD(1), 'p255 working'), ldRow(LD(2), 'p255 idle')] },
+        { [LD_CWD]: [ldEntry(LD(1), 'run'), ldEntry(LD(2), 'idle')] },
+        { pausePoll: true },
+      );
+      await openList(page);
+      expect(await agChipIs(page, LD(1), '2 agents'), `the working row's chip never read "2 agents": ${JSON.stringify(await agChip(page))}`);
+      // Two roster ticks more: the idle row must still not have been read.
+      await page.waitForTimeout(5_500);
+      const rows = await agChip(page);
+      const idle = rows.find((r) => r.id === LD(2))!;
+      const work = rows.find((r) => r.id === LD(1))!;
+      expect(idle.chip === null, `the idle row has a chip: ${JSON.stringify(idle)}`);
+      expect(work.title === '2 subagents', `the chip's title is ${JSON.stringify(work.title)}, not "2 subagents"`);
+      expect(!asked.some((a) => a.id === LD(2)), `the idle row's roster was read: ${JSON.stringify(asked)}`);
+      expect(asked.some((a) => a.id === LD(1)), 'the working row was never read');
+      // The roster timer stops with the list: shut, no roster read in 6 s.
+      await closeList(page);
+      await page.waitForTimeout(300);
+      const shutAt = Date.now();
+      await page.waitForTimeout(6_000);
+      const shut = asked.filter((a) => a.at >= shutAt).length;
+      expect(shut === 0, `${shut} roster reads in the 6 s after the list shut`);
+      return `the working row says "2 agents" (title "${work.title}", the finished one not counted); ${asked.length} roster reads, none for the idle row, none in 6 s with the list shut`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P556 an idle parent whose two threads are working says "2 agents"',
+    waitView: false,
+    stub: AG_STUB,
+    run: async ({ page }) => {
+      const asked = agAsked(page);
+      const thread = (id: string, kind: LdKind) => ({ ...ldEntry(id, kind), parentSessionId: LD(1) });
+      // LD(4) is a thread by its transcript alone (spawnedBy): an older
+      // daemon's live-state names no parent. Not open at first.
+      const ctl = await ldServe(
+        page,
+        {
+          [LD_CWD]: [
+            ldRow(LD(1), 'p255 parent'),
+            ldRow(LD(2), 'p255 thread one'),
+            ldRow(LD(3), 'p255 thread two'),
+            Object.assign(ldRow(LD(4), 'p255 thread by transcript'), { spawnedBy: LD(1) }),
+          ],
+        },
+        { [LD_CWD]: [ldEntry(LD(1), 'idle'), thread(LD(2), 'run'), thread(LD(3), 'run')] },
+        { pausePoll: true },
+      );
+      await openList(page);
+      expect(await agChipIs(page, LD(1), '2 agents'), `the idle parent's chip never read "2 agents": ${JSON.stringify(await agChip(page))}`);
+      const rows = await agChip(page);
+      const parent = rows.find((r) => r.id === LD(1))!;
+      expect(parent.dot === 'idle', `the parent's dot is ${parent.dot}, not idle`);
+      expect(parent.title === '2 threads', `the chip's title is ${JSON.stringify(parent.title)}, not "2 threads"`);
+      expect(rows.filter((r) => r.id !== LD(1)).every((r) => r.chip === null), `a thread has a chip: ${JSON.stringify(rows)}`);
+      // One thread finishes: painted in place, down to "1 agent".
+      await page.evaluate(`window.__p556row = document.querySelector('#past-list .s[data-session="${LD(1)}"]'); undefined`);
+      ctl.live.set(LD_CWD, [ldEntry(LD(1), 'idle'), thread(LD(2), 'run'), thread(LD(3), 'idle')]);
+      expect(await agChipIs(page, LD(1), '1 agent', 4_000), `the chip never fell to "1 agent": ${JSON.stringify(await agChip(page))}`);
+      const painted = (await page.evaluate('window.__p556row.isConnected')) as boolean;
+      expect(painted, 'the row was rebuilt to change its chip, rather than painted in place');
+      ctl.live.set(LD_CWD, [ldEntry(LD(1), 'idle'), thread(LD(2), 'idle'), thread(LD(3), 'idle')]);
+      expect(await agChipIs(page, LD(1), null, 4_000), `the chip stayed after both threads finished: ${JSON.stringify(await agChip(page))}`);
+      // R7: the transcript's thread opens and works on a daemon whose
+      // live-state names no parent: counted by its row's spawnedBy.
+      const idleThreads = [ldEntry(LD(1), 'idle'), thread(LD(2), 'idle'), thread(LD(3), 'idle')];
+      ctl.live.set(LD_CWD, [...idleThreads, ldEntry(LD(4), 'run')]);
+      expect(await agChipIs(page, LD(1), '1 agent', 4_000), `a working thread known by its spawnedBy alone is not counted: ${JSON.stringify(await agChip(page))}`);
+      // Open and idle, it is not counted.
+      ctl.live.set(LD_CWD, [...idleThreads, ldEntry(LD(4), 'idle')]);
+      expect(await agChipIs(page, LD(1), null, 4_000), `an idle thread known by its spawnedBy is still counted: ${JSON.stringify(await agChip(page))}`);
+      expect(!asked.some((a) => a.id === LD(1)), `the idle parent's roster was read: ${JSON.stringify(asked)}`);
+      return 'an idle parent with two working threads says "2 agents" (title "2 threads"), "1 agent" when one finishes, none when both do, painted in place; a working thread known by its spawnedBy alone counts "1 agent", idle none; its roster never read';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P557 a roster read that fails draws no chip and keeps the dot',
+    waitView: false,
+    stub: AG_STUB,
+    run: async ({ page }) => {
+      // Six working rows, every roster read answered 500 after 600 ms, so the
+      // reads in flight at once can be counted.
+      let now = 0;
+      let most = 0;
+      const answered = new Set<string>();
+      await page.route(/\/session\/[^/]+\/agents$/, async (route) => {
+        const id = /\/session\/([^/]+)\/agents$/.exec(new URL(route.request().url()).pathname)![1]!;
+        now += 1;
+        most = Math.max(most, now);
+        try {
+          await new Promise((r) => setTimeout(r, 600));
+          answered.add(id);
+          await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ code: 'daemon_hung', error: 'no answer' }) });
+        } catch {
+          /* the page went away first */
+        } finally {
+          now -= 1;
+        }
+      });
+      const ids = [1, 2, 3, 4, 5, 6].map(LD);
+      await ldServe(
+        page,
+        { [LD_CWD]: ids.map((id, i) => ldRow(id, 'p255 working ' + (i + 1))) },
+        { [LD_CWD]: ids.map((id, i) => ldEntry(id, i === 1 ? 'wait' : i === 2 ? 'bg' : 'run')) },
+        { pausePoll: true },
+      );
+      await openList(page);
+      const before = await ldDots(page);
+      const status = (await page.evaluate(`document.getElementById('status').textContent`)) as string;
+      const all = await ldUntil(() => answered.size === 6, 9_000);
+      expect(all >= 0, `only ${answered.size} of 6 roster reads were answered in 9 s`);
+      await page.waitForTimeout(300);
+      const rows = await agChip(page);
+      const after = await ldDots(page);
+      const statusAfter = (await page.evaluate(`document.getElementById('status').textContent`)) as string;
+      expect(rows.every((r) => r.chip === null), `a failed roster read drew a chip: ${JSON.stringify(rows.map((r) => r.chip))}`);
+      expect(
+        JSON.stringify(after.map((d) => [d.id, d.state])) === JSON.stringify(before.map((d) => [d.id, d.state])) && after.every((d) => d.state !== 'idle'),
+        `the dots changed: ${JSON.stringify(before.map((d) => d.state))} -> ${JSON.stringify(after.map((d) => d.state))}`,
+      );
+      expect(statusAfter === status, `the failed read changed the status line: ${JSON.stringify(status)} -> ${JSON.stringify(statusAfter)}`);
+      expect(most <= 4 && most >= 2, `${most} roster reads were in flight at once, not 2 to 4`);
+      return `6 roster reads answered 500: no chip, dots ${after.map((d) => d.state).join('/')} kept, status line unchanged; at most ${most} reads in flight`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P558 dot, chip and a long title fit one 64px row at 390',
+    waitView: false,
+    stub: {
+      ...AG_STUB,
+      hostTabs: {},
+      sessionAgentsResult: (sid: string) =>
+        agentRoster(sid, [
+          agentTask({ id: 'a-r1', toolUseId: 'tc-r1' }),
+          agentTask({ id: 'a-r2', toolUseId: 'tc-r2' }),
+          agentTask({ id: 'a-r3', toolUseId: 'tc-r3' }),
+        ]),
+    },
+    run: async ({ page, viewer }) => {
+      // The row's tab crashed (P520's badge), beside the dot and the chip.
+      const tabs = viewer.hostTabs!;
+      tabs.live.add(7558);
+      const rec = await tabs.registry.start({ sessionId: LD(1), cwd: LD_CWD, pid: 7558 });
+      tabs.live.delete(7558);
+      await tabs.registry.end(rec.tabId, 137);
+      await ldServe(
+        page,
+        { [LD_CWD]: [ldRow(LD(1), 'p255 a very long title that has to give way to the dot, the chip and the badge before it gives way to anything else on this row')] },
+        { [LD_CWD]: [ldEntry(LD(1), 'run')] },
+        { pausePoll: true },
+      );
+      await openList(page);
+      expect(await agChipIs(page, LD(1), '3 agents'), `the chip never read "3 agents": ${JSON.stringify(await agChip(page))}`);
+      await page.waitForFunction(`!!document.querySelector('#past-list .tabbadge')`, null, { timeout: 10_000 });
+      const check = async (at: number) => {
+        const r = (await agChip(page))[0]!;
+        expect(r.h === 64, `at ${at} the row is ${r.h}px, not 64`);
+        expect(r.chipFits && r.chipW > 0, `at ${at} the chip is cut (${JSON.stringify(r)})`);
+        expect(r.chipRight <= r.rowRight, `at ${at} the chip runs off the row (${r.chipRight} > ${r.rowRight})`);
+        expect(r.ttCut, `at ${at} the long title was not ellipsized`);
+        expect(r.dot === 'run', `at ${at} the dot reads ${r.dot}`);
+        expect(r.badge === 'tab crashed' && r.badgeW > 0 && r.badgeRight <= r.rowRight, `at ${at} the tab badge does not fit beside them (${JSON.stringify(r)})`);
+        return r;
+      };
+      const at390 = await check(390);
+      await shot(page, 'p558-chip-390');
+      await closeList(page);
+      await page.setViewportSize(LAPTOP);
+      await agChipIs(page, LD(1), '3 agents');
+      await check(1280);
+      await shot(page, 'p558-chip-1280');
+      return `dot, "3 agents" (${at390.chipW}px, whole) and "tab crashed" beside an ellipsized title in one 64px row at 390 and 1280`;
+    },
+  });
+
+  // ---- #255: "Hide subagent threads" in the folder drop-down ---------------
+  // A thread is a row a create_sub_session spawned: `spawnedBy` on its row, or
+  // a live-state entry that names a parent. A fork is not one.
+  const htRow = (id: string, title: string, extra: Record<string, unknown> = {}) => ({ ...ldRow(id, title), ...extra });
+  const htThread = (id: string, kind: LdKind) => ({ ...ldEntry(id, kind), parentSessionId: LD(1) });
+  const htIds = (page: Page) =>
+    page.evaluate(`Array.from(document.querySelectorAll('#past-list .srow')).map((w) => w.dataset.session)`) as Promise<string[]>;
+  const htSwitch = (page: Page) =>
+    page.evaluate(String.raw`(() => {
+      const b = document.querySelector('#list-folders [role="menuitemcheckbox"]');
+      if (!b) return null;
+      const lbl = b.querySelector('.lbl');
+      const n = b.querySelector('.n');
+      return { checked: b.getAttribute('aria-checked'), label: lbl ? lbl.textContent : null, count: n ? n.textContent : null, h: Math.round(b.getBoundingClientRect().height) };
+    })()`) as Promise<{ checked: string | null; label: string | null; count: string | null; h: number } | null>;
+  const htOpenMenu = async (page: Page) => {
+    await page.click('#list-folder');
+    await page.waitForSelector('#list-folders:not([hidden])');
+  };
+  /** The same six rows in two folders: two roots, a fork, three threads. */
+  const htFolders = () => ({
+    [LD_CWD]: [
+      htRow(LD(1), 'p255 root one'),
+      htRow(LD(3), 'p255 a fork', { parentSessionId: LD(1) }),
+      htRow(LD(4), 'p255 thread by spawnedBy', { spawnedBy: LD(1) }),
+      htRow(LD(5), 'p255 thread by live parent'),
+    ],
+    [LD_OTHER]: [htRow(LD(2), 'p255 root two'), htRow(LD(6), 'p255 other thread', { spawnedBy: LD(1) })],
+  });
+  const htLive = () => ({
+    [LD_CWD]: [ldEntry(LD(1), 'idle'), htThread(LD(4), 'run'), htThread(LD(5), 'run')],
+    [LD_OTHER]: [],
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P559 by default thread rows are hidden, the menu says how many, and a fork stays, a fork of a thread too',
+    waitView: false,
+    stub: AG_STUB,
+    run: async ({ page }) => {
+      const folders = htFolders();
+      const ctl = await ldServe(page, folders, htLive(), { pausePoll: true });
+      await openList(page);
+      await page.waitForFunction('uiHideThreads === true', null, { timeout: 10_000 });
+      await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 3`, null, { timeout: 5_000 });
+      const ids = (await htIds(page)).sort();
+      const want = [LD(1), LD(2), LD(3)].sort();
+      expect(JSON.stringify(ids) === JSON.stringify(want), `the list shows ${JSON.stringify(ids)}, not the two roots and the fork ${JSON.stringify(want)}`);
+      // R1: the parent's chip still counts its threads, hidden as they are.
+      expect(await agChipIs(page, LD(1), '2 agents'), `the parent whose threads are hidden does not say "2 agents": ${JSON.stringify(await agChip(page))}`);
+      await htOpenMenu(page);
+      const sw = await htSwitch(page);
+      expect(!!sw, 'the folder menu has no menuitemcheckbox');
+      expect(sw!.checked === 'true', `the switch is aria-checked=${sw!.checked}, not true`);
+      expect(sw!.label === 'Hide subagent threads', `the switch reads ${JSON.stringify(sw!.label)}`);
+      expect(sw!.count === '3 hidden', `the switch counts ${JSON.stringify(sw!.count)}, not "3 hidden"`);
+      expect(sw!.h >= 44, `the switch is ${sw!.h}px tall, under the 44px tap floor`);
+      const counts = (await page.evaluate(
+        `Object.fromEntries(Array.from(document.querySelectorAll('#list-folders [role="menuitemradio"]')).map((b) => [b.dataset.folder, b.querySelector('.n').textContent]))`,
+      )) as Record<string, string>;
+      expect(
+        counts[''] === '3' && counts[LD_CWD] === '2' && counts[LD_OTHER] === '1',
+        `the folder counts are ${JSON.stringify(counts)}, not the rows shown (3, 2, 1)`,
+      );
+      // Arrow keys reach it: it is the last item in the menu.
+      await page.keyboard.press('End');
+      const last = (await page.evaluate(`document.activeElement.getAttribute('role')`)) as string;
+      expect(last === 'menuitemcheckbox', `End focused a ${last}, not the switch`);
+      // A fork of the thread LD(4), made before the fork route dropped the
+      // copied parent_session: an older gateway lists it with both marks, and
+      // the daemon that loaded it names the thread's spawner as its parent.
+      // A fork is never a thread: listed, not counted hidden, not counted in
+      // the spawner's chip.
+      folders[LD_CWD].push(htRow(LD(8), 'p255 fork of a thread', { parentSessionId: LD(4), spawnedBy: LD(1) }));
+      ctl.live.set(LD_CWD, [...htLive()[LD_CWD], htThread(LD(8), 'run')]);
+      await page.evaluate(`refreshPastConversations(${JSON.stringify(LD_CWD)})`);
+      await page.waitForFunction(`pastConvos.some((s) => s.sessionId === ${JSON.stringify(LD(8))} && s.live)`, null, { timeout: 10_000 });
+      // A second's ticks, so a chip that counts the fork has had time to say so.
+      await page.waitForTimeout(1500);
+      const withFork = (await htIds(page)).sort();
+      const wantFork = [LD(1), LD(2), LD(3), LD(8)].sort();
+      expect(JSON.stringify(withFork) === JSON.stringify(wantFork), `with a fork of a thread the list shows ${JSON.stringify(withFork)}, not ${JSON.stringify(wantFork)}`);
+      const hiddenNow = (await page.evaluate('threadsInView()')) as number;
+      expect(hiddenNow === 3, `with a fork of a thread ${hiddenNow} rows are hidden, not the 3 threads`);
+      const parentChip = (await agChip(page)).find((r) => r.id === LD(1))!;
+      expect(parentChip.chip === '2 agents', `the spawner counts the working fork of its thread: its chip reads ${JSON.stringify(parentChip.chip)}, not "2 agents"`);
+      return 'threads (by spawnedBy and by live-state parent) hidden, the fork and both roots shown; "3 hidden"; counts 3/2/1; the parent still says "2 agents"; End reaches the switch; a working fork of a thread with both marks listed, not hidden, not in the chip';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P560 unticking shows the threads and the choice survives a reload',
+    waitView: false,
+    run: async ({ page }) => {
+      const puts: string[] = [];
+      page.on('request', (r) => {
+        if (r.method() === 'PUT' && /\/rc\/ui-prefs$/.test(new URL(r.url()).pathname)) puts.push(r.postData() ?? '');
+      });
+      await ldServe(page, htFolders(), htLive(), { pausePoll: true });
+      await openList(page);
+      await page.waitForFunction('uiHideThreads === true', null, { timeout: 10_000 });
+      await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 3`, null, { timeout: 5_000 });
+      try {
+        await htOpenMenu(page);
+        await page.click('#list-folders [role="menuitemcheckbox"]');
+        await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 6`, null, { timeout: 5_000 });
+        expect(puts.length === 1 && JSON.parse(puts[0]!).hideThreads === false, `the PUTs were ${JSON.stringify(puts)}, not one { hideThreads: false }`);
+        const sw = await htSwitch(page);
+        expect(sw!.checked === 'false', `the switch is aria-checked=${sw!.checked} after unticking`);
+        // The menu counts the rows shown, now all six.
+        const all = (await page.evaluate(`document.querySelector('#list-folders [role="menuitemradio"][data-folder=""] .n').textContent`)) as string;
+        expect(all === '6', `All folders counts ${all}, not 6`);
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await ldServe(page, htFolders(), htLive(), { pausePoll: true });
+        await openList(page);
+        await page.waitForFunction('uiHideThreads === false', null, { timeout: 10_000 });
+        await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 6`, null, { timeout: 5_000 });
+        await htOpenMenu(page);
+        const after = await htSwitch(page);
+        expect(after!.checked === 'false', `after a reload the switch is aria-checked=${after!.checked}`);
+        return 'unticking sent { hideThreads: false }, showed all 6 rows (counts 6), and after a reload still 6 with the switch unticked';
+      } finally {
+        // The gateway's store is per token; leave it as found.
+        await page
+          .evaluate(`fetch('/rc/ui-prefs', { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token() }, body: JSON.stringify({ hideThreads: null }) })`)
+          .catch(() => undefined);
+      }
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P561 a live-only thread with no transcript is hidden by its live-state parent',
+    waitView: false,
+    run: async ({ page }) => {
+      // LD(7) is open on the daemon and has no transcript yet: only its
+      // live-state entry says it is a thread.
+      // ldServe waits for every row it was given, so LD(7) is listed at first
+      // and taken out of the listing (the object is read on every request).
+      const folders = { [LD_CWD]: [htRow(LD(1), 'p255 root one'), htRow(LD(7), 'p255 live only')] };
+      await ldServe(page, folders, { [LD_CWD]: [ldEntry(LD(1), 'idle'), htThread(LD(7), 'run')] }, { pausePoll: true });
+      folders[LD_CWD].pop();
+      await page.evaluate(`refreshPastConversations(${JSON.stringify(LD_CWD)})`);
+      await page.waitForFunction(`pastConvos.some((s) => s.liveOnly)`, null, { timeout: 10_000 });
+      await openList(page);
+      await page.waitForFunction('uiHideThreads === true', null, { timeout: 10_000 });
+      const live = (await page.evaluate(`pastConvos.filter((s) => s.liveOnly).map((s) => s.sessionId)`)) as string[];
+      expect(JSON.stringify(live) === JSON.stringify([LD(7)]), `the live-only row is not in the list's rows: ${JSON.stringify(live)}`);
+      await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 1`, null, { timeout: 5_000 });
+      const ids = await htIds(page);
+      expect(JSON.stringify(ids) === JSON.stringify([LD(1)]), `the list shows ${JSON.stringify(ids)}, not the root alone`);
+      await htOpenMenu(page);
+      const sw = await htSwitch(page);
+      expect(sw!.count === '1 hidden', `the switch counts ${JSON.stringify(sw!.count)}, not "1 hidden"`);
+      return 'a live-only row whose live-state names a parent is hidden and counted ("1 hidden"), the root stays';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P562 the thread on screen stays listed while threads are hidden',
+    waitView: false,
+    run: async ({ page }) => {
+      await ldServe(page, htFolders(), htLive(), { pausePoll: true });
+      await openList(page);
+      await page.waitForFunction('uiHideThreads === true', null, { timeout: 10_000 });
+      await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 3`, null, { timeout: 5_000 });
+      // The reader is looking at a thread, as a switch of conversation does.
+      await page.evaluate(`watchedSessionId = ${JSON.stringify(LD(4))}; renderList(); undefined`);
+      const ids = (await htIds(page)).sort();
+      const want = [LD(1), LD(2), LD(3), LD(4)].sort();
+      expect(JSON.stringify(ids) === JSON.stringify(want), `the list shows ${JSON.stringify(ids)}, not the watched thread with the rest ${JSON.stringify(want)}`);
+      await htOpenMenu(page);
+      const sw = await htSwitch(page);
+      expect(sw!.count === '2 hidden', `the switch counts ${JSON.stringify(sw!.count)}, not "2 hidden" (the watched one is shown)`);
+      // Leaving it hides it again.
+      await page.evaluate(`watchedSessionId = null; renderList(); undefined`);
+      expect((await htIds(page)).length === 3, 'with nothing watched the thread was not hidden again');
+      return 'the watched thread is listed with the roots and the fork (and not counted hidden), and goes again when it is no longer on screen';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P563 a gateway whose ui-prefs carry no hideThreads draws no switch and hides nothing',
+    waitView: false,
+    run: async ({ page }) => {
+      await page.route('**/rc/ui-prefs', (route) =>
+        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ stampZone: 'UTC' }) }),
+      );
+      await ldServe(page, htFolders(), htLive(), { pausePoll: true });
+      await page.evaluate('loadStampZone()');
+      await page.waitForFunction('uiHideThreads === null', null, { timeout: 10_000 });
+      await openList(page);
+      await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 6`, null, { timeout: 5_000 });
+      await htOpenMenu(page);
+      const sw = await htSwitch(page);
+      expect(sw === null, `an old gateway's menu has a switch: ${JSON.stringify(sw)}`);
+      const all = (await page.evaluate(`document.querySelector('#list-folders [role="menuitemradio"][data-folder=""] .n').textContent`)) as string;
+      expect(all === '6', `All folders counts ${all}, not 6`);
+      return 'without hideThreads in the answer: no switch in the menu, all 6 rows listed and counted';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P564 a PUT that fails puts the switch back and says why',
+    waitView: false,
+    run: async ({ page }) => {
+      await page.route('**/rc/ui-prefs', (route) =>
+        route.request().method() === 'PUT'
+          ? route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ code: 'x', error: 'disk full' }) })
+          : route.fallback(),
+      );
+      await ldServe(page, htFolders(), htLive(), { pausePoll: true });
+      await openList(page);
+      await page.waitForFunction('uiHideThreads === true', null, { timeout: 10_000 });
+      await page.waitForFunction(`document.querySelectorAll('#past-list .srow').length === 3`, null, { timeout: 5_000 });
+      await htOpenMenu(page);
+      await page.click('#list-folders [role="menuitemcheckbox"]');
+      await page.waitForFunction(`document.getElementById('status').textContent.includes('disk full')`, null, { timeout: 5_000 }).catch(() => undefined);
+      const status = (await page.evaluate(`document.getElementById('status').textContent`)) as string;
+      expect(status.includes('disk full'), `the status line reads ${JSON.stringify(status)}, which does not name the cause`);
+      const sw = await htSwitch(page);
+      expect(sw!.checked === 'true', `the switch is aria-checked=${sw!.checked}, not back to true`);
+      expect((await htIds(page)).length === 3, 'the threads came back although the save failed');
+      return `the switch went back to ticked, the 3 rows stayed, the status line reads ${JSON.stringify(status.slice(0, 80))}`;
     },
   });
 }
