@@ -13939,11 +13939,16 @@ class QwenAgent implements Agent {
           registry.getAll().find((t) => t.toolUseId === taskId);
         let result: ServeSubagentAbandonResult;
         if (!task) {
-          result = {
-            outcome: 'refused',
-            code: 'agent_not_found',
-            reason: `No background agent "${taskId}" is registered in this session.`,
-          };
+          // The roster also shows an interrupted run that was never restored,
+          // read back from its sidecar as paused; the service abandons it
+          // through that sidecar, or finds nothing to abandon.
+          result = config.abandonBackgroundAgent(taskId)
+            ? { outcome: 'abandoned', status: 'cancelled' }
+            : {
+                outcome: 'refused',
+                code: 'agent_not_found',
+                reason: `No background agent "${taskId}" is registered in this session.`,
+              };
         } else if (task.status !== 'paused') {
           result = {
             outcome: 'refused',

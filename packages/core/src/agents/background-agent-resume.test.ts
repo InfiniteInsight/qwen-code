@@ -3161,6 +3161,52 @@ describe('BackgroundAgentResumeService', () => {
       ).resolves.toEqual([]);
     });
 
+    // #259 review: the roster shows a backgrounded `running` sidecar that is
+    // not in the registry as paused; abandoning it must work, or its row can
+    // never be removed.
+    it('abandons a paused agent known only from its sidecar', () => {
+      const sessionId = 'session-1';
+      const agentId = 'agent-sidecar-only';
+      const { metaPath, outputFile } = seedSidecar(
+        sessionId,
+        agentId,
+        'Interrupted, not restored',
+        { isBackgrounded: true },
+      );
+      const { service } = createService();
+      expect(registry.get(agentId)).toBeUndefined();
+
+      expect(service.abandonBackgroundAgent(agentId)).toBe(true);
+
+      const meta = readAgentMeta(metaPath);
+      expect(meta?.status).toBe('cancelled');
+      expect(typeof meta?.abandonedAt).toBe('string');
+      expect(fs.existsSync(outputFile)).toBe(true);
+      // Already abandoned: a second abandon finds nothing to abandon.
+      expect(service.abandonBackgroundAgent(agentId)).toBe(false);
+    });
+
+    it.each([
+      ['a completed sidecar', { status: 'completed', isBackgrounded: true }],
+      ['a foreground running sidecar', { isBackgrounded: false }],
+      [
+        "another session's sidecar",
+        { isBackgrounded: true, parentSessionId: 'session-other' },
+      ],
+    ] as const)('does not abandon %s', (_label, fields) => {
+      const agentId = 'agent-sidecar-other';
+      const { metaPath } = seedSidecar(
+        'session-1',
+        agentId,
+        'Not a paused row',
+        fields as Partial<AgentMeta>,
+      );
+      const { service } = createService();
+
+      expect(service.abandonBackgroundAgent(agentId)).toBe(false);
+      expect(readAgentMeta(metaPath)?.abandonedAt).toBeUndefined();
+    });
+
     it('refuses an agent that is not paused', () => {
       register('agent-abandon-running', 'Running', {
         status: 'running',

@@ -17964,7 +17964,30 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         reason:
           'No background agent "agent-gone" is registered in this session.',
       });
-      expect(abandonBackgroundAgent).not.toHaveBeenCalled();
+      // The running agent is never abandoned; the unknown id is offered to
+      // the sidecar fallback, which finds nothing.
+      expect(abandonBackgroundAgent.mock.calls).toEqual([['agent-gone']]);
+      expect(registry.abandon).not.toHaveBeenCalled();
+
+      await stop();
+    });
+
+    // #259 review: a paused row the roster shows only from its sidecar.
+    it('abandons a paused agent known only from its sidecar', async () => {
+      const registry = registryWith([]);
+      const abandonBackgroundAgent = vi.fn().mockReturnValue(true);
+      const { agent, stop } = await startAgent({
+        getBackgroundTaskRegistry: vi.fn().mockReturnValue(registry),
+        abandonBackgroundAgent,
+      });
+
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskAbandon, {
+          sessionId,
+          taskId: 'agent-sidecar-only',
+        }),
+      ).resolves.toEqual({ outcome: 'abandoned', status: 'cancelled' });
+      expect(abandonBackgroundAgent).toHaveBeenCalledWith('agent-sidecar-only');
       expect(registry.abandon).not.toHaveBeenCalled();
 
       await stop();

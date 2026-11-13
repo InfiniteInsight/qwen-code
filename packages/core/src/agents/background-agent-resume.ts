@@ -1963,12 +1963,15 @@ export class BackgroundAgentResumeService {
   /**
    * Discard a paused agent the user chose not to resume. The sidecar records
    * `abandonedAt` so rosters that read sidecars leave the agent out, and the
-   * registry drops the entry; the sidecar and transcript stay on disk.
+   * registry drops the entry; the sidecar and transcript stay on disk. An
+   * agent with no registry entry is abandoned through its sidecar when the
+   * agent roster shows that sidecar as paused.
    */
   abandonBackgroundAgent(agentId: string): boolean {
     const registry = this.config.getBackgroundTaskRegistry();
     const entry = registry.get(agentId);
-    if (!entry || entry.status !== 'paused' || !entry.metaPath) {
+    if (!entry) return this.abandonPausedSidecar(agentId);
+    if (entry.status !== 'paused' || !entry.metaPath) {
       return false;
     }
 
@@ -1980,6 +1983,40 @@ export class BackgroundAgentResumeService {
       abandonedAt: now,
     });
     registry.abandon(agentId);
+    return true;
+  }
+
+  /**
+   * Mark this session's sidecar for `agentId` abandoned when the agent roster
+   * lists it as paused without a registry entry: a backgrounded `running`
+   * sidecar (an interrupted run never restored) or a `paused` one. Same
+   * checks as the roster, so only a row it shows can be abandoned this way.
+   */
+  private abandonPausedSidecar(agentId: string): boolean {
+    const projectDir = this.config.storage?.getProjectDir?.();
+    const sessionId = this.config.getSessionId?.();
+    if (!projectDir || !sessionId) return false;
+    const metaPath = getAgentMetaPath(projectDir, sessionId, agentId);
+    const meta = readAgentMeta(metaPath);
+    const shownPaused =
+      meta?.status === 'paused' ||
+      (meta?.status === 'running' && meta.isBackgrounded === true);
+    if (
+      !meta ||
+      meta.agentId !== agentId ||
+      meta.parentSessionId !== sessionId ||
+      meta.abandonedAt !== undefined ||
+      !shownPaused
+    ) {
+      return false;
+    }
+    const now = new Date().toISOString();
+    patchAgentMeta(metaPath, {
+      status: 'cancelled',
+      lastUpdatedAt: now,
+      lastError: undefined,
+      abandonedAt: now,
+    });
     return true;
   }
 
