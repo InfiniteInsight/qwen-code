@@ -2301,6 +2301,19 @@
       #past-list .s .dot[data-state='idle'] {
         background: #3fb950;
       }
+      /* #255. How many agents a working row has running: "2 agents", words
+         in a pill after the dot. It never shrinks; the title gives way. */
+      #past-list .s .agchip {
+        flex: none;
+        padding: 0 6px;
+        border: 1px solid var(--g1-ink-mid);
+        border-radius: 8px;
+        font-size: 11px;
+        line-height: 16px;
+        font-weight: 600;
+        white-space: nowrap;
+        color: var(--g1-ink-mid);
+      }
       /* #212. The conversation's tab on the host crashed or was lost: a word
          in a pill after the title, red for crashed, amber for lost. It never
          shrinks; the title gives way instead. */
@@ -22848,6 +22861,7 @@
           // cannot. A dot as drawn, named for a screen reader. #255: coloured
           // and named for what the conversation is doing (liveDot).
           if (s.live) head.appendChild(liveDot(s));
+          paintAgentChip(head, s); // #255: after the dot, before the tab badge
           // #212: its terminal tab on the host crashed or was lost. Words,
           // not a colour alone, and part of the row's name for a screen
           // reader; the sheet's Host tab line has the verbs.
@@ -23954,7 +23968,61 @@
           if (s.live && dot) paintLiveDot(dot, s);
           else if (s.live) head.querySelector('.tt').after(liveDot(s));
           else if (dot) dot.remove();
+          paintAgentChip(head, s);
         }
+      }
+      // #255. The "N agents" chip after the dot: the subagents the roster
+      // says are running plus the working threads of this conversation
+      // (rowAgentCount). Painted on the node it is on, so the same call
+      // serves a row being built and a row being kept.
+      function paintAgentChip(head, s) {
+        const n = rowAgentCount(s);
+        let chip = head.querySelector('.agchip');
+        if (n <= 0) {
+          if (chip) chip.remove();
+          return;
+        }
+        if (!chip) {
+          chip = document.createElement('span');
+          chip.className = 'agchip';
+        }
+        const anchor = head.querySelector('.dot') || head.querySelector('.tt');
+        if (chip.previousElementSibling !== anchor) anchor.after(chip);
+        const text = agentsChipText(n);
+        if (chip.textContent !== text) chip.textContent = text;
+        const title = rowAgentWords(s);
+        if (chip.title !== title) chip.title = title;
+      }
+      // The threads of `s` that are working now: rows anywhere in the list
+      // whose live-state names `s` as their parent and whose dot is not idle.
+      function rowThreadCount(s) {
+        let n = 0;
+        for (const x of pastConvos) {
+          const st = x && x.liveState;
+          if (!st || st.parentSessionId !== s.sessionId) continue;
+          if (liveDotState(st) !== 'idle') n += 1;
+        }
+        return n;
+      }
+      // The subagents running in `s`: the open conversation's own roster
+      // when it is the one watched, else the last roster read for the row
+      // (rosterCounts), which only a working row has and only while it works.
+      function rowRosterCount(s) {
+        if (!agentsOn()) return 0;
+        if (s.sessionId === watchedSessionId) return agentsRunningCount();
+        if (liveDotState(s.liveState) === 'idle') return 0;
+        return rosterCounts.get(String(s.sessionId)) || 0;
+      }
+      function rowAgentCount(s) {
+        return rowRosterCount(s) + rowThreadCount(s);
+      }
+      function rowAgentWords(s) {
+        const subs = rowRosterCount(s);
+        const threads = rowThreadCount(s);
+        const out = [];
+        if (subs > 0) out.push(subs + (subs === 1 ? ' subagent' : ' subagents'));
+        if (threads > 0) out.push(threads + (threads === 1 ? ' thread' : ' threads'));
+        return out.join(', ');
       }
 
       // One folder's rows, or null when its listing could not be read, with
@@ -24110,11 +24178,13 @@
       function startLiveTick() {
         if (liveTickId !== null || !liveTickWanted()) return;
         liveTickId = setInterval(liveTick, LIVE_TICK_MS);
+        startListRosterTick();
       }
       function stopLiveTick() {
         if (liveTickId === null) return;
         clearInterval(liveTickId);
         liveTickId = null;
+        stopListRosterTick();
       }
       function liveTick() {
         if (!liveTickWanted()) {
@@ -24149,10 +24219,104 @@
         pastConvos = withCatalog(mergeFolderRows(folders), folders);
         if (liveSessionIds() === was) {
           paintRowMarks();
+          listRosterTick(true); // a row that began to work is read now
           return;
         }
         renderList();
         syncFolderMenuCounts();
+        listRosterTick(true);
+      }
+      // #255. The roster behind each working row's "N agents" chip. Read
+      // every AGENTS_POLL_MS for the rows on the page drawn that are
+      // waiting, working or on background work (an idle row is never read),
+      // the open conversation excepted (it has its roster already), at most
+      // ROSTER_READS_MAX at once; the rest wait for a free read, so a long
+      // list is read through rather than its first rows again. It starts and
+      // stops with the live tick: the list off screen or the page hidden,
+      // no roster reads. A row not read yet since the timer started is read
+      // as soon as a tick sees it work (listRosterTick(true)). A read that fails
+      // leaves the row without a roster count, so it draws no chip for it,
+      // and says nothing: the dot is the live-state's, not the roster's.
+      const ROSTER_READS_MAX = 4;
+      const rosterCounts = new Map(); // sessionId -> running subagents
+      let listRosterTimerId = null;
+      let listRosterGen = 0; // a read from before a stop lands nowhere
+      let listRosterQueue = [];
+      const listRosterReading = new Set();
+      const listRosterAsked = new Set(); // read since the timer started
+      function startListRosterTick() {
+        if (listRosterTimerId !== null) return;
+        listRosterTimerId = setInterval(() => listRosterTick(false), AGENTS_POLL_MS);
+        listRosterTick(false);
+      }
+      function stopListRosterTick() {
+        if (listRosterTimerId === null) return;
+        clearInterval(listRosterTimerId);
+        listRosterTimerId = null;
+        listRosterGen += 1;
+        listRosterQueue = [];
+        listRosterReading.clear();
+        listRosterAsked.clear();
+        rosterCounts.clear();
+      }
+      function listRosterRowsWanted(onlyNew) {
+        const by = new Map();
+        for (const s of pastConvos) {
+          if (s && s.sessionId) by.set(String(s.sessionId), s);
+        }
+        const out = [];
+        for (const row of $('past-list').querySelectorAll('.s[data-session]')) {
+          const id = row.dataset.session;
+          const s = by.get(id);
+          if (!s || !s.live || id === watchedSessionId) continue;
+          if (liveDotState(s.liveState) === 'idle') continue;
+          if (onlyNew && listRosterAsked.has(id)) continue;
+          if (!listRosterReading.has(id)) out.push(id);
+        }
+        return out;
+      }
+      function listRosterTick(onlyNew) {
+        if (listRosterTimerId === null || !agentsOn() || !token()) return;
+        const ids = listRosterRowsWanted(onlyNew);
+        if (!onlyNew) {
+          // A whole tick: a row no longer working drops its count.
+          const keep = new Set(listRosterRowsWanted(false).concat([...listRosterReading]));
+          for (const id of [...rosterCounts.keys()]) {
+            if (!keep.has(id)) rosterCounts.delete(id);
+          }
+          listRosterQueue = ids;
+        } else {
+          for (const id of ids) if (!listRosterQueue.includes(id)) listRosterQueue.push(id);
+        }
+        listRosterPump();
+      }
+      function listRosterPump() {
+        while (listRosterReading.size < ROSTER_READS_MAX && listRosterQueue.length) {
+          const id = listRosterQueue.shift();
+          if (listRosterReading.has(id)) continue;
+          void listRosterRead(id);
+        }
+      }
+      async function listRosterRead(id) {
+        const gen = listRosterGen;
+        listRosterReading.add(id);
+        listRosterAsked.add(id);
+        const r = await rcCall('/session/' + encodeURIComponent(id) + '/agents');
+        if (gen !== listRosterGen) return; // stopped meanwhile
+        listRosterReading.delete(id);
+        if (r.ok) {
+          const tasks = r.body && Array.isArray(r.body.tasks) ? r.body.tasks : [];
+          rosterCounts.set(
+            id,
+            tasks.filter(
+              (t) => t && t.kind === 'agent' && t.status === 'running',
+            ).length,
+          );
+        } else {
+          rosterCounts.delete(id);
+        }
+        paintRowMarks();
+        listRosterPump();
       }
       document.addEventListener('visibilitychange', () => {
         if (document.hidden) stopLiveTick();

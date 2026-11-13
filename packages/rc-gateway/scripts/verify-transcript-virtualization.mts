@@ -32526,6 +32526,254 @@ PAGE_SCENARIOS.push({
       return 'a tick turned the row green while the 30 s read was out; the read landed with its older "working" and the dot stayed green';
     },
   });
+
+  // ---- #255: the "N agents" chip on a working row ---------------------------
+  const agChip = (page: Page) =>
+    page.evaluate(String.raw`Array.from(document.querySelectorAll('#past-list .srow')).map((w) => {
+      const s = w.querySelector('.s');
+      const c = s.querySelector('.agchip');
+      const d = s.querySelector('.dot');
+      const tt = s.querySelector('.tt');
+      const b = s.querySelector('.tabbadge');
+      const rr = (e) => (e ? Math.round(e.getBoundingClientRect().right) : 0);
+      return {
+        id: w.dataset.session,
+        chip: c ? c.textContent : null,
+        title: c ? c.title : null,
+        dot: d ? d.dataset.state : null,
+        h: Math.round(s.getBoundingClientRect().height),
+        rowRight: rr(w),
+        chipRight: rr(c),
+        chipFits: c ? c.scrollWidth <= c.clientWidth : true,
+        chipW: c ? Math.round(c.getBoundingClientRect().width) : 0,
+        ttCut: tt ? tt.scrollWidth > tt.clientWidth : false,
+        badge: b ? b.textContent : null,
+        badgeRight: rr(b),
+        badgeW: b ? Math.round(b.getBoundingClientRect().width) : 0,
+      };
+    })`) as Promise<
+      Array<{
+        id: string;
+        chip: string | null;
+        title: string | null;
+        dot: string | null;
+        h: number;
+        rowRight: number;
+        chipRight: number;
+        chipFits: boolean;
+        chipW: number;
+        ttCut: boolean;
+        badge: string | null;
+        badgeRight: number;
+        badgeW: number;
+      }>
+    >;
+  const agChipIs = (page: Page, id: string, text: string | null, timeout = 8_000) =>
+    page
+      .waitForFunction(
+        `(() => { const c = document.querySelector('#past-list .s[data-session="${id}"] .agchip'); return ${text === null ? '!c' : `!!c && c.textContent === ${JSON.stringify(text)}`}; })()`,
+        null,
+        { timeout },
+      )
+      .then(
+        () => true,
+        () => false,
+      );
+  /** Every roster read the page sends, as the session id it is for, with when. */
+  const agAsked = (page: Page) => {
+    const asked: Array<{ id: string; at: number }> = [];
+    page.on('request', (r) => {
+      const m = /\/session\/([^/]+)\/agents$/.exec(new URL(r.url()).pathname);
+      if (m) asked.push({ id: decodeURIComponent(m[1]!), at: Date.now() });
+    });
+    return asked;
+  };
+  const AG_STUB = { capabilitiesFeatures: AGENT_FEATURES };
+
+  PAGE_SCENARIOS.push({
+    name: 'P555 a working row with two running agents says "2 agents" and an idle row is never read',
+    waitView: false,
+    stub: {
+      ...AG_STUB,
+      sessionAgentsResult: (sid: string) =>
+        agentRoster(
+          sid,
+          sid === LD(1)
+            ? [
+                agentTask({ id: 'a-r1', toolUseId: 'tc-r1' }),
+                agentTask({ id: 'a-r2', toolUseId: 'tc-r2' }),
+                agentTask({ id: 'a-d1', toolUseId: 'tc-d1', status: 'completed', endTime: AG_T0 + 9_000 }),
+              ]
+            : [
+                agentTask({ id: 'b-r1', toolUseId: 'tb-r1' }),
+                agentTask({ id: 'b-r2', toolUseId: 'tb-r2' }),
+                agentTask({ id: 'b-r3', toolUseId: 'tb-r3' }),
+              ],
+        ),
+    },
+    run: async ({ page }) => {
+      const asked = agAsked(page);
+      await ldServe(
+        page,
+        { [LD_CWD]: [ldRow(LD(1), 'p255 working'), ldRow(LD(2), 'p255 idle')] },
+        { [LD_CWD]: [ldEntry(LD(1), 'run'), ldEntry(LD(2), 'idle')] },
+        { pausePoll: true },
+      );
+      await openList(page);
+      expect(await agChipIs(page, LD(1), '2 agents'), `the working row's chip never read "2 agents": ${JSON.stringify(await agChip(page))}`);
+      // Two roster ticks more: the idle row must still not have been read.
+      await page.waitForTimeout(5_500);
+      const rows = await agChip(page);
+      const idle = rows.find((r) => r.id === LD(2))!;
+      const work = rows.find((r) => r.id === LD(1))!;
+      expect(idle.chip === null, `the idle row has a chip: ${JSON.stringify(idle)}`);
+      expect(work.title === '2 subagents', `the chip's title is ${JSON.stringify(work.title)}, not "2 subagents"`);
+      expect(!asked.some((a) => a.id === LD(2)), `the idle row's roster was read: ${JSON.stringify(asked)}`);
+      expect(asked.some((a) => a.id === LD(1)), 'the working row was never read');
+      // The roster timer stops with the list: shut, no roster read in 6 s.
+      await closeList(page);
+      await page.waitForTimeout(300);
+      const shutAt = Date.now();
+      await page.waitForTimeout(6_000);
+      const shut = asked.filter((a) => a.at >= shutAt).length;
+      expect(shut === 0, `${shut} roster reads in the 6 s after the list shut`);
+      return `the working row says "2 agents" (title "${work.title}", the finished one not counted); ${asked.length} roster reads, none for the idle row, none in 6 s with the list shut`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P556 an idle parent whose two threads are working says "2 agents"',
+    waitView: false,
+    stub: AG_STUB,
+    run: async ({ page }) => {
+      const asked = agAsked(page);
+      const thread = (id: string, kind: LdKind) => ({ ...ldEntry(id, kind), parentSessionId: LD(1) });
+      const ctl = await ldServe(
+        page,
+        { [LD_CWD]: [ldRow(LD(1), 'p255 parent'), ldRow(LD(2), 'p255 thread one'), ldRow(LD(3), 'p255 thread two')] },
+        { [LD_CWD]: [ldEntry(LD(1), 'idle'), thread(LD(2), 'run'), thread(LD(3), 'run')] },
+        { pausePoll: true },
+      );
+      await openList(page);
+      expect(await agChipIs(page, LD(1), '2 agents'), `the idle parent's chip never read "2 agents": ${JSON.stringify(await agChip(page))}`);
+      const rows = await agChip(page);
+      const parent = rows.find((r) => r.id === LD(1))!;
+      expect(parent.dot === 'idle', `the parent's dot is ${parent.dot}, not idle`);
+      expect(parent.title === '2 threads', `the chip's title is ${JSON.stringify(parent.title)}, not "2 threads"`);
+      expect(rows.filter((r) => r.id !== LD(1)).every((r) => r.chip === null), `a thread has a chip: ${JSON.stringify(rows)}`);
+      // One thread finishes: painted in place, down to "1 agent".
+      await page.evaluate(`window.__p556row = document.querySelector('#past-list .s[data-session="${LD(1)}"]'); undefined`);
+      ctl.live.set(LD_CWD, [ldEntry(LD(1), 'idle'), thread(LD(2), 'run'), thread(LD(3), 'idle')]);
+      expect(await agChipIs(page, LD(1), '1 agent', 4_000), `the chip never fell to "1 agent": ${JSON.stringify(await agChip(page))}`);
+      const painted = (await page.evaluate('window.__p556row.isConnected')) as boolean;
+      expect(painted, 'the row was rebuilt to change its chip, rather than painted in place');
+      ctl.live.set(LD_CWD, [ldEntry(LD(1), 'idle'), thread(LD(2), 'idle'), thread(LD(3), 'idle')]);
+      expect(await agChipIs(page, LD(1), null, 4_000), `the chip stayed after both threads finished: ${JSON.stringify(await agChip(page))}`);
+      expect(!asked.some((a) => a.id === LD(1)), `the idle parent's roster was read: ${JSON.stringify(asked)}`);
+      return 'an idle parent with two working threads says "2 agents" (title "2 threads"), "1 agent" when one finishes, none when both do, painted in place; its roster never read';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P557 a roster read that fails draws no chip and keeps the dot',
+    waitView: false,
+    stub: AG_STUB,
+    run: async ({ page }) => {
+      // Six working rows, every roster read answered 500 after 600 ms, so the
+      // reads in flight at once can be counted.
+      let now = 0;
+      let most = 0;
+      const answered = new Set<string>();
+      await page.route(/\/session\/[^/]+\/agents$/, async (route) => {
+        const id = /\/session\/([^/]+)\/agents$/.exec(new URL(route.request().url()).pathname)![1]!;
+        now += 1;
+        most = Math.max(most, now);
+        try {
+          await new Promise((r) => setTimeout(r, 600));
+          answered.add(id);
+          await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ code: 'daemon_hung', error: 'no answer' }) });
+        } catch {
+          /* the page went away first */
+        } finally {
+          now -= 1;
+        }
+      });
+      const ids = [1, 2, 3, 4, 5, 6].map(LD);
+      await ldServe(
+        page,
+        { [LD_CWD]: ids.map((id, i) => ldRow(id, 'p255 working ' + (i + 1))) },
+        { [LD_CWD]: ids.map((id, i) => ldEntry(id, i === 1 ? 'wait' : i === 2 ? 'bg' : 'run')) },
+        { pausePoll: true },
+      );
+      await openList(page);
+      const before = await ldDots(page);
+      const status = (await page.evaluate(`document.getElementById('status').textContent`)) as string;
+      const all = await ldUntil(() => answered.size === 6, 9_000);
+      expect(all >= 0, `only ${answered.size} of 6 roster reads were answered in 9 s`);
+      await page.waitForTimeout(300);
+      const rows = await agChip(page);
+      const after = await ldDots(page);
+      const statusAfter = (await page.evaluate(`document.getElementById('status').textContent`)) as string;
+      expect(rows.every((r) => r.chip === null), `a failed roster read drew a chip: ${JSON.stringify(rows.map((r) => r.chip))}`);
+      expect(
+        JSON.stringify(after.map((d) => [d.id, d.state])) === JSON.stringify(before.map((d) => [d.id, d.state])) && after.every((d) => d.state !== 'idle'),
+        `the dots changed: ${JSON.stringify(before.map((d) => d.state))} -> ${JSON.stringify(after.map((d) => d.state))}`,
+      );
+      expect(statusAfter === status, `the failed read changed the status line: ${JSON.stringify(status)} -> ${JSON.stringify(statusAfter)}`);
+      expect(most <= 4 && most >= 2, `${most} roster reads were in flight at once, not 2 to 4`);
+      return `6 roster reads answered 500: no chip, dots ${after.map((d) => d.state).join('/')} kept, status line unchanged; at most ${most} reads in flight`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P558 dot, chip and a long title fit one 64px row at 390',
+    waitView: false,
+    stub: {
+      ...AG_STUB,
+      hostTabs: {},
+      sessionAgentsResult: (sid: string) =>
+        agentRoster(sid, [
+          agentTask({ id: 'a-r1', toolUseId: 'tc-r1' }),
+          agentTask({ id: 'a-r2', toolUseId: 'tc-r2' }),
+          agentTask({ id: 'a-r3', toolUseId: 'tc-r3' }),
+        ]),
+    },
+    run: async ({ page, viewer }) => {
+      // The row's tab crashed (P520's badge), beside the dot and the chip.
+      const tabs = viewer.hostTabs!;
+      tabs.live.add(7558);
+      const rec = await tabs.registry.start({ sessionId: LD(1), cwd: LD_CWD, pid: 7558 });
+      tabs.live.delete(7558);
+      await tabs.registry.end(rec.tabId, 137);
+      await ldServe(
+        page,
+        { [LD_CWD]: [ldRow(LD(1), 'p255 a very long title that has to give way to the dot, the chip and the badge before it gives way to anything else on this row')] },
+        { [LD_CWD]: [ldEntry(LD(1), 'run')] },
+        { pausePoll: true },
+      );
+      await openList(page);
+      expect(await agChipIs(page, LD(1), '3 agents'), `the chip never read "3 agents": ${JSON.stringify(await agChip(page))}`);
+      await page.waitForFunction(`!!document.querySelector('#past-list .tabbadge')`, null, { timeout: 10_000 });
+      const check = async (at: number) => {
+        const r = (await agChip(page))[0]!;
+        expect(r.h === 64, `at ${at} the row is ${r.h}px, not 64`);
+        expect(r.chipFits && r.chipW > 0, `at ${at} the chip is cut (${JSON.stringify(r)})`);
+        expect(r.chipRight <= r.rowRight, `at ${at} the chip runs off the row (${r.chipRight} > ${r.rowRight})`);
+        expect(r.ttCut, `at ${at} the long title was not ellipsized`);
+        expect(r.dot === 'run', `at ${at} the dot reads ${r.dot}`);
+        expect(r.badge === 'tab crashed' && r.badgeW > 0 && r.badgeRight <= r.rowRight, `at ${at} the tab badge does not fit beside them (${JSON.stringify(r)})`);
+        return r;
+      };
+      const at390 = await check(390);
+      await shot(page, 'p558-chip-390');
+      await closeList(page);
+      await page.setViewportSize(LAPTOP);
+      await agChipIs(page, LD(1), '3 agents');
+      await check(1280);
+      await shot(page, 'p558-chip-1280');
+      return `dot, "3 agents" (${at390.chipW}px, whole) and "tab crashed" beside an ellipsized title in one 64px row at 390 and 1280`;
+    },
+  });
 }
 
 async function runPageSection(): Promise<Result[]> {
