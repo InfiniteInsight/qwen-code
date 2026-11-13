@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as v8 from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CHANNEL_LIVENESS_VERSION } from './bridgeTypes.js';
 import {
@@ -263,5 +265,47 @@ describe('startChannelLivenessMonitor', () => {
 
     expect(probe).toHaveBeenCalledOnce();
     expect(onFailure).not.toHaveBeenCalled();
+  });
+
+  it('lets the responses of answered probes be collected while it runs', async () => {
+    vi.useFakeTimers();
+    const refs: Array<WeakRef<object>> = [];
+    // A plain function: a vi.fn would record, and so retain, every result.
+    const probe = async (nonce: number) => {
+      const response = {
+        v: CHANNEL_LIVENESS_VERSION,
+        nonce,
+        body: 'x'.repeat(1024),
+      };
+      refs.push(new WeakRef(response));
+      return response;
+    };
+    const onFailure = vi.fn();
+    const monitor = startChannelLivenessMonitor({
+      probe,
+      onFailure,
+      isActive: () => true,
+      now: () => 0,
+    });
+
+    for (let i = 0; i < 20; i++) {
+      await vi.advanceTimersByTimeAsync(CHANNEL_LIVENESS_INTERVAL_MS);
+    }
+    expect(refs).toHaveLength(20);
+    expect(onFailure).not.toHaveBeenCalled();
+
+    vi.useRealTimers();
+    v8.setFlagsFromString('--expose_gc');
+    const gc = runInNewContext('gc') as () => void;
+    // deref() keeps a live target alive past the current job, so dereference
+    // nothing until the collections are done.
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await tick();
+      gc();
+    }
+    await tick();
+    expect(refs.filter((ref) => ref.deref() !== undefined)).toHaveLength(0);
+    monitor.stop();
   });
 });
