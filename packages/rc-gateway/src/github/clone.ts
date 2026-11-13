@@ -61,7 +61,9 @@ const TOKEN_HELPER =
  * list built from the owner's config files (scoped and unscoped alike); the
  * token helper then answers `https://github.com` only, so a redirect or an
  * `insteadOf` rewrite to another host gets no token; redirects are refused
- * outright as well.
+ * outright as well. An empty `core.askPass` stops git from running the
+ * owner's askpass (or `SSH_ASKPASS`) when no helper answers, which could
+ * otherwise hold the clone on a prompt nobody sees.
  */
 export const CLONE_GIT_CONFIG_ARGS: readonly string[] = [
   '-c',
@@ -70,6 +72,8 @@ export const CLONE_GIT_CONFIG_ARGS: readonly string[] = [
   `credential.https://github.com.helper=${TOKEN_HELPER}`,
   '-c',
   'http.followRedirects=false',
+  '-c',
+  'core.askPass=',
 ];
 
 /** The full git argv after the program name. */
@@ -91,6 +95,8 @@ function droppedEnvKey(key: string): boolean {
     key === 'GIT_INDEX_FILE' ||
     key === 'GIT_CONFIG_PARAMETERS' ||
     key === 'GIT_CONFIG_COUNT' ||
+    key === 'GIT_ASKPASS' ||
+    key === 'SSH_ASKPASS' ||
     key.startsWith('GIT_CONFIG_KEY_') ||
     key.startsWith('GIT_CONFIG_VALUE_')
   );

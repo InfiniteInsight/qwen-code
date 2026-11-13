@@ -283,6 +283,8 @@ describe('CloneJobs with real git', () => {
       'credential.https://github.com.helper=!f() { echo username=x-access-token; echo "password=$QWEN_RC_GIT_TOKEN"; }; f',
       '-c',
       'http.followRedirects=false',
+      '-c',
+      'core.askPass=',
       'clone',
       '--progress',
       '--',
@@ -352,6 +354,78 @@ describe('CloneJobs with real git', () => {
     }
   });
 
+  it("neither the owner's core.askPass nor GIT_ASKPASS or SSH_ASKPASS is run", async () => {
+    const server = createServer((_req, res) => {
+      res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="x"' });
+      res.end();
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const env = gitEnv();
+      const home = env['HOME']!;
+      const marker = join(home, 'marker');
+      const askpass = (name: string) => {
+        const path = join(home, `${name}.sh`);
+        writeFileSync(
+          path,
+          `#!/bin/sh\necho ${name} >> ${marker}\necho nope\n`,
+          {
+            mode: 0o755,
+          },
+        );
+        return path;
+      };
+      writeFileSync(
+        env['GIT_CONFIG_GLOBAL']!,
+        `[core]\n\taskPass = ${askpass('askpass-core')}\n`,
+      );
+      const askEnv = {
+        ...env,
+        GIT_ASKPASS: askpass('askpass-env'),
+        SSH_ASKPASS: askpass('askpass-ssh'),
+      };
+      const url = `http://127.0.0.1:${port}/acme/widget.git`;
+      const control = (e: NodeJS.ProcessEnv) =>
+        new Promise<string>((res) => {
+          writeFileSync(marker, '');
+          execFile(
+            'git',
+            ['clone', '--', url, freshDest()],
+            { env: { ...e, GIT_TERMINAL_PROMPT: '0' }, timeout: 10_000 },
+            () => res(readFileSync(marker, 'utf8')),
+          );
+        });
+
+      // Controls: each of the three would be run by a plain git clone.
+      expect(await control(askEnv)).toContain('askpass-env');
+      const { GIT_ASKPASS: _g, ...noGitAskpass } = askEnv;
+      expect(await control(noGitAskpass)).toContain('askpass-core');
+      expect(
+        await control({ ...noGitAskpass, GIT_CONFIG_GLOBAL: '/dev/null' }),
+      ).toContain('askpass-ssh');
+
+      writeFileSync(marker, '');
+      const jobs = new CloneJobs({ env: askEnv, urlFor: () => url });
+      const s = await waitDone(
+        jobs,
+        jobIdOf(
+          await jobs.start({
+            ref: REF,
+            dest: freshDest(),
+            token: TOKEN,
+            account: ACCOUNT,
+          }),
+        ),
+      );
+      expect(s.state).toBe('failed');
+      expect(readFileSync(marker, 'utf8')).toBe('');
+    } finally {
+      server.close();
+    }
+  });
+
   it.skipIf(process.platform !== 'linux')(
     'a stalled clone that times out leaves no process of its group behind',
     async () => {
@@ -406,16 +480,12 @@ describe('CloneJobs with real git', () => {
   it('the token helper answers github.com and nothing else', () => {
     const env = cloneEnv(gitEnv(), TOKEN);
     const fill = (host: string) =>
-      execFileSync(
-        'git',
-        ['-c', 'core.askPass=', ...CLONE_GIT_CONFIG_ARGS, 'credential', 'fill'],
-        {
-          env,
-          input: `protocol=https\nhost=${host}\n\n`,
-          encoding: 'utf8',
-          stdio: ['pipe', 'pipe', 'ignore'],
-        },
-      );
+      execFileSync('git', [...CLONE_GIT_CONFIG_ARGS, 'credential', 'fill'], {
+        env,
+        input: `protocol=https\nhost=${host}\n\n`,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'ignore'],
+      });
     expect(fill('github.com')).toContain(`password=${TOKEN}`);
     expect(() => fill('example.com')).toThrow();
   });
@@ -798,6 +868,8 @@ describe('CloneJobs environment', () => {
         GIT_CONFIG_COUNT: '1',
         GIT_CONFIG_KEY_0: 'credential.helper',
         GIT_CONFIG_VALUE_0: 'store',
+        GIT_ASKPASS: '/x/askpass',
+        SSH_ASKPASS: '/x/ssh-askpass',
         KEEP_ME: 'yes',
       },
     });
@@ -826,6 +898,8 @@ describe('CloneJobs environment', () => {
             'GIT_INDEX_FILE',
             'GIT_CONFIG_PARAMETERS',
             'GIT_CONFIG_COUNT',
+            'GIT_ASKPASS',
+            'SSH_ASKPASS',
           ].includes(k),
       ),
     ).toEqual([]);
