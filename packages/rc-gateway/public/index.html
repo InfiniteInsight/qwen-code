@@ -1327,6 +1327,12 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+      /* The end of a path names the folder, so a long one loses its start
+         (as the list's and the header's folders do). */
+      #closed-tabs-list .ct-folder {
+        direction: rtl;
+        text-align: left;
+      }
       #closed-tabs-list .ct-entry button {
         flex: none;
         min-height: 44px;
@@ -7015,7 +7021,16 @@
         renderMoreValues();
         if (!refocus) return;
         const row = moreRow(key);
-        if (row) row.focus({ preventScroll: true });
+        // A row that went while its panel was open (the last closed tab was
+        // reopened) is hidden and takes no focus: the Host group's heading
+        // does, so focus stays on the More screen.
+        if (row && row.getClientRects().length > 0) {
+          row.focus({ preventScroll: true });
+        } else if (row) {
+          const head = $('more-g-host');
+          head.tabIndex = -1;
+          head.focus({ preventScroll: true });
+        }
       }
       $('more-screen').addEventListener('click', (e) => {
         const row = e.target.closest('.row[data-panel]');
@@ -9330,7 +9345,8 @@
         for (const t of body.tabs) {
           if (!t || typeof t.tabId !== 'string') continue;
           if (typeof t.sessionId !== 'string') continue;
-          // Live, quit, closed and replaced are shown nowhere; a dismissed
+          // Live, quit, closed and replaced draw no badge on the list (closed
+          // and quit ones are listed by closedTabsOf below); a dismissed
           // record keeps its place on the host and loses its badge here.
           if (t.state !== 'crashed' && t.state !== 'ghost') continue;
           if (t.dismissed === true) continue;
@@ -9340,7 +9356,7 @@
           }
         }
         hostTabs.bySession = by;
-        hostTabs.closed = closedTabsOf(body.tabs);
+        hostTabs.closed = closedTabsOf(body.tabs, body.now);
         hostTabs.launcher =
           body.launcher && typeof body.launcher.state === 'string'
             ? body.launcher
@@ -9555,9 +9571,14 @@
       // conversation that has a newer tab, crashed or live, is not listed.
       // A record a reopen was asked for in the last 10 minutes that no new tab
       // has answered yet is held back, so an entry does not come back while its
-      // tab is opening.
+      // tab is opening. The mechanism is the record's own reopenedAt (newer
+      // than its end) and the newest-record rule above: a tab that attaches
+      // starts a newer record, which then is the one listed or not. The
+      // minutes are counted on the gateway's clock (`now` in the list answer),
+      // the one that wrote reopenedAt; an older gateway sends none and the
+      // phone's clock stands in.
       const CLOSED_TAB_PENDING_MS = 10 * 60 * 1000;
-      function closedTabsOf(tabs) {
+      function closedTabsOf(tabs, gatewayNow) {
         const newest = new Map();
         for (const t of tabs) {
           if (!t || typeof t.tabId !== 'string') continue;
@@ -9567,14 +9588,13 @@
             newest.set(t.sessionId, t);
           }
         }
-        const now = Date.now();
+        const now = Number.isFinite(gatewayNow) ? gatewayNow : Date.now();
         return [...newest.values()]
           .filter((t) => {
             if (t.state !== 'closed' && t.state !== 'quit') return false;
             if (t.dismissed === true) return false;
             return !(
               Number.isFinite(t.reopenedAt) &&
-              t.reopenedBy === undefined &&
               t.reopenedAt >= (t.endedAt || 0) &&
               now - t.reopenedAt < CLOSED_TAB_PENDING_MS
             );
@@ -9641,7 +9661,10 @@
           b.type = 'button';
           b.textContent = r.busy ? 'reopening…' : 'Reopen';
           b.disabled = r.busy;
-          b.setAttribute('aria-label', 'Reopen ' + r.title);
+          b.setAttribute(
+            'aria-label',
+            (r.busy ? 'Reopening ' : 'Reopen ') + r.title,
+          );
           el.append(text, b);
           box.append(el);
         }

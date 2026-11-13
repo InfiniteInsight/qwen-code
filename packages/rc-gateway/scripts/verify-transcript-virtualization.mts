@@ -13606,7 +13606,20 @@ PAGE_SCENARIOS.push({
     'perms', 'mcp', 'tools', 'trust', 'memory',
     'daemons', 'sessions', 'runs', 'bridges', 'diag',
     'notify', 'dictation', 'zone', 'devices', 'install',
+    'closed-tabs',
   ] as const;
+  // #256: the Closed tabs panel lists nothing without a closed host tab, so
+  // the two scenarios that read every panel boot with the host tab routes and
+  // seed one, and its entry and Reopen button are read like any other row.
+  const seedClosedTabForPanels = async (viewer: Viewer): Promise<void> => {
+    const t = viewer.hostTabs;
+    if (!t) throw new Error('booted without hostTabs');
+    const pid = 7990;
+    t.live.add(pid);
+    const rec = await t.registry.start({ sessionId: 'aaaa0256-0000-4000-8000-0000000000a1', cwd: '/home/evan/scratch', pid });
+    t.live.delete(pid);
+    await t.registry.end(rec.tabId, 129);
+  };
   type PanelSurface = `panel:${(typeof PANEL_KEYS_ALL)[number]}`;
   type ShellSurface =
     | 'chat'
@@ -13794,7 +13807,9 @@ PAGE_SCENARIOS.push({
     // forgets to name a colour inherits the UA default black and computes
     // 1.11:1, which reads as an empty box rather than as a broken style.
     waitView: false,
+    stub: { hostTabs: {} },
     run: async ({ page, viewer }) => {
+      await seedClosedTabForPanels(viewer);
       await watch(page, viewer.sessionId);
       await page.waitForSelector('#composer', { state: 'visible' });
       await page.evaluate(() => {
@@ -14736,7 +14751,9 @@ PAGE_SCENARIOS.push({
   PAGE_SCENARIOS.push({
     name: 'P131 every restyled band sits on the sheet shell, nothing large is light, no page title at any width, and export lives in the ⋯ menu',
     waitView: false,
+    stub: { hostTabs: {} },
     run: async ({ page, viewer }) => {
+      await seedClosedTabForPanels(viewer);
       await watch(page, viewer.sessionId);
       await page.waitForSelector('#composer', { state: 'visible' });
       await page.evaluate(String.raw`__pg.liveTurn('what is the plan', 'here is the plan', 'tc-1')`);
@@ -14763,7 +14780,10 @@ PAGE_SCENARIOS.push({
             [
               ['#panel-screen', 'page'],
               ['#panel-screen .scr-head', 'band'],
-              ['#panel-screen .panel:not([hidden]) .ops-card', 'band'],
+              // #256: the Closed tabs panel holds entries, not cards.
+              s === 'panel:closed-tabs'
+                ? ['#closed-tabs-list .ct-entry', 'band']
+                : ['#panel-screen .panel:not([hidden]) .ops-card', 'band'],
             ],
           ]),
         ) as Record<PanelSurface, [string, keyof typeof G1][]>),
@@ -31258,11 +31278,12 @@ PAGE_SCENARIOS.push({
     sessionId: string,
     kind: 'crashed' | 'lost' | 'live' | 'quit' | 'closed',
     exitCode = 137,
+    cwd = TB_CWD,
   ): Promise<string> => {
     const t = tabsOf(viewer);
     const pid = ++tbPid;
     t.live.add(pid);
-    const rec = await t.registry.start({ sessionId, cwd: TB_CWD, pid });
+    const rec = await t.registry.start({ sessionId, cwd, pid });
     if (kind === 'live') return rec.tabId;
     if (kind === 'lost') {
       t.live.delete(pid);
@@ -31744,7 +31765,7 @@ PAGE_SCENARIOS.push({
   });
 
   PAGE_SCENARIOS.push({
-    name: 'P567 Reopen on a closed tab queues it for that conversation and folder, and the entry and count go',
+    name: 'P567 Reopen on a closed tab queues it for that conversation and folder, and the entry and count go; a reopen that is never answered comes back on the gateway clock; a gone folder is named',
     waitView: false,
     stub: { hostTabs: {}, hostActions: true },
     run: async ({ page, viewer }) => {
@@ -31777,7 +31798,31 @@ PAGE_SCENARIOS.push({
       const dom = (await page.evaluate(`document.querySelector('#more-screen .row[data-panel="closed-tabs"] .val').textContent`)) as string;
       expect(dom === '2', `the row reads ${JSON.stringify(dom)} (visible value ${JSON.stringify(val)})`);
       expect(sent.filter((s) => s.startsWith('POST')).length === 1, 'a second POST went out');
-      return 'one POST for A, one request queued for its conversation and folder, "tab reopening on the host…"; after the next read A is gone and the row reads 2';
+      // The hold-back counts on the gateway's clock (`now` in the list answer),
+      // not the phone's: move only the gateway's clock past the 10 minutes and
+      // A, whose reopen no new tab ever answered, is listed again. The phone's
+      // own Date.now() has not moved, so on its clock A would still be held.
+      const phoneBefore = (await page.evaluate('Date.now()')) as number;
+      t.advance(11 * 60_000);
+      await t.poll();
+      await page.evaluate('readHostTabs()');
+      await page.waitForFunction(`document.querySelectorAll('#closed-tabs-list .ct-entry[data-session="${TB(1)}"]').length === 1`, null, { timeout: 10_000 });
+      const phoneAfter = (await page.evaluate('Date.now()')) as number;
+      expect(phoneAfter - phoneBefore < 60_000, 'the phone clock moved with the gateway clock; the check proves nothing');
+      // A closed tab whose folder was deleted: Reopen names the cause and queues nothing.
+      const goneDir = '/home/evan/projects/deleted-project';
+      t.gone.add(goneDir);
+      t.advance(1000);
+      await tbSeed(viewer, TB(4), 'closed', 137, goneDir);
+      await page.evaluate('readHostTabs()');
+      await page.waitForFunction(`document.querySelectorAll('#closed-tabs-list .ct-entry[data-session="${TB(4)}"]').length === 1`, null, { timeout: 10_000 });
+      const queuedBefore = (await t.requests.readAll()).length;
+      await page.click(`#closed-tabs-list .ct-entry[data-session="${TB(4)}"] button`);
+      const want = `reopen of the host tab failed: folder_gone (HTTP 409): The folder this tab ran in is gone: ${goneDir}`;
+      await page.waitForFunction(`document.getElementById('status').textContent.startsWith(${JSON.stringify(want)})`, null, { timeout: 10_000 });
+      expect((await t.requests.readAll()).length === queuedBefore, 'a reopen into a gone folder queued a request');
+      expect((await ctEntries(page)).some((e) => e.session === TB(4)), 'the entry went after a refused reopen');
+      return 'one POST for A, one request queued for its conversation and folder, "tab reopening on the host…"; after the next read A is gone and the row reads 2; 11 minutes on the gateway clock bring A back; a closed tab in a deleted folder says folder_gone with the folder and queues nothing';
     },
   });
 
@@ -31841,7 +31886,8 @@ PAGE_SCENARIOS.push({
     run: async ({ page, viewer }) => {
       const t = tabsOf(viewer);
       await t.poll();
-      await tbSeed(viewer, TB(1), 'closed');
+      const longFolder = '/home/evan/projects/qwen-code/.worktrees/256-closed-tabs';
+      await tbSeed(viewer, TB(1), 'closed', 137, longFolder);
       t.advance(1000);
       await tbSeed(viewer, TB(2), 'quit');
       await serveList(page, TB_CWD, { list: [tbRow(TB(1), 'p256 fix the parser')] });
@@ -31855,7 +31901,31 @@ PAGE_SCENARIOS.push({
       expect(!!a && !!b && entries.length === 2, `the entries are ${JSON.stringify(entries)}`);
       expect(a!.title === 'p256 fix the parser', `A is titled ${JSON.stringify(a!.title)}`);
       expect(b!.title === ctShort(TB(2)), `B is titled ${JSON.stringify(b!.title)}, not its short id`);
-      expect(a!.folder.includes('/scratch') && b!.folder.includes('/scratch'), `the folders are ${JSON.stringify([a!.folder, b!.folder])}`);
+      expect(a!.folder.includes('256-closed-tabs') && b!.folder.includes('/scratch'), `the folders are ${JSON.stringify([a!.folder, b!.folder])}`);
+      // A long folder is cut at its START, so the end that names it stays: the
+      // text overflows its box, and its last words sit inside the box.
+      const fit = (await page.evaluate(String.raw`(() => {
+        const el = document.querySelector('#closed-tabs-list .ct-entry[data-session="${TB(1)}"] .ct-folder');
+        const box = el.getBoundingClientRect();
+        const node = el.firstChild;
+        const text = node.textContent;
+        const from = text.indexOf('256-closed-tabs');
+        const r = document.createRange();
+        r.setStart(node, from);
+        r.setEnd(node, from + '256-closed-tabs'.length);
+        const end = r.getBoundingClientRect();
+        const h = document.createRange();
+        h.setStart(node, text.indexOf('/home'));
+        h.setEnd(node, text.indexOf('/home') + '/home'.length);
+        const head = h.getBoundingClientRect();
+        return {
+          clipped: el.scrollWidth > el.clientWidth,
+          endInside: end.width > 0 && end.left >= box.left - 1 && end.right <= box.right + 1,
+          headInside: head.left >= box.left - 1 && head.right <= box.right + 1,
+          dir: getComputedStyle(el).direction,
+        };
+      })()`)) as { clipped: boolean; endInside: boolean; headInside: boolean; dir: string };
+      expect(fit.clipped && fit.endInside && !fit.headInside && fit.dir === 'rtl', `the long folder reads ${JSON.stringify(fit)}: its end should show and its start be cut`);
       expect(a!.how.startsWith('window closed'), `A ended ${JSON.stringify(a!.how)}`);
       expect(b!.how.startsWith('quit with /quit'), `B ended ${JSON.stringify(b!.how)}`);
       expect(entries.every((e) => e.btn === 'Reopen' && e.btnH >= 44), `the buttons are ${JSON.stringify(entries.map((e) => [e.btn, e.btnH]))}`);
