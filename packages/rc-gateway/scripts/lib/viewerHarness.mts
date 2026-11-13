@@ -360,6 +360,8 @@ export interface Viewer {
     requests: TerminalRequestLog;
     /** Pids the probe reads as live tabs; edit it to kill or start one. */
     live: Set<number>;
+    /** Folders that no longer exist: a reopen into one is refused. */
+    gone: Set<string>;
     /** The registry's clock: `advance(ms)` moves it on. */
     advance(ms: number): void;
     /** A launcher poll, now on the registry's clock. */
@@ -568,6 +570,7 @@ export async function bootViewer(
       })
     : undefined;
   const mirrored = new Set(opts.hostTabs?.mirrored ?? []);
+  const goneFolders = new Set<string>();
   const { app } = createGatewayApp({
     ...(tabRegistry && tabRequests
       ? {
@@ -584,6 +587,9 @@ export async function bootViewer(
               },
             }),
             isMirrored: async (id: string) => mirrored.has(id),
+            // The harness's folders are made up: all exist but the ones a
+            // scenario puts in `gone`.
+            folderExists: async (cwd: string) => !goneFolders.has(cwd),
           },
         }
       : {}),
@@ -632,6 +638,7 @@ export async function bootViewer(
             registry: tabRegistry,
             requests: tabRequests,
             live: tabLive,
+            gone: goneFolders,
             advance: (ms: number) => {
               tabClock += ms;
             },

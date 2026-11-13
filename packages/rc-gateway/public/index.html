@@ -1277,6 +1277,72 @@
       #h1-host-tab #host-tab-remove {
         color: var(--g1-danger);
       }
+      /* #256. More > Host > Closed tabs: one entry per conversation, its
+         title, folder and how the tab ended, and a 44px Reopen. */
+      #closed-tabs-note {
+        margin: 0 4px 12px;
+        font-size: 13px;
+        line-height: 1.4;
+        color: var(--g1-warn);
+      }
+      #closed-tabs-note[hidden],
+      #closed-tabs-empty[hidden] {
+        display: none;
+      }
+      #closed-tabs-empty {
+        margin: 0 4px;
+        font-size: 14px;
+        color: var(--g1-ink-mid);
+      }
+      #closed-tabs-list .ct-entry {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-height: 64px;
+        box-sizing: border-box;
+        padding: 10px 12px;
+        margin-bottom: 8px;
+        border-radius: 10px;
+        background: var(--g1-band);
+      }
+      #closed-tabs-list .ct-text {
+        flex: 1 1 auto;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      #closed-tabs-list .ct-title {
+        color: var(--g1-ink-hi);
+        font-size: 15px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #closed-tabs-list .ct-folder,
+      #closed-tabs-list .ct-how {
+        color: var(--g1-ink-mid);
+        font-size: 12px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      /* The end of a path names the folder, so a long one loses its start
+         (as the list's and the header's folders do). */
+      #closed-tabs-list .ct-folder {
+        direction: rtl;
+        text-align: left;
+      }
+      #closed-tabs-list .ct-entry button {
+        flex: none;
+        min-height: 44px;
+        min-width: 44px;
+        padding: 0 14px;
+        border-radius: 8px;
+        background: var(--g1-page);
+        color: var(--g1-ink-hi);
+        font-size: 14px;
+      }
       #wt-reset {
         align-self: flex-start;
         min-height: 40px;
@@ -4131,6 +4197,15 @@
               <span class="lbl">Diagnostics</span><span class="val"></span>
               <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
             </button>
+            <!-- #256. The host terminal tabs closed or ended with /quit in the
+                 last 7 days, each with Reopen. Kept last in the group: the host
+                 action rows (the launcher first) are drawn in before it, so it
+                 sits right after them. Hidden at none, and for a token that
+                 cannot read the host's tabs. -->
+            <button type="button" class="row" id="more-closed-tabs" data-panel="closed-tabs" hidden>
+              <span class="lbl">Closed tabs</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
           </div>
           <div class="mgrp" role="group" aria-labelledby="more-g-phone">
             <div class="grp" id="more-g-phone">This phone</div>
@@ -4833,6 +4908,12 @@
               </div>
               <div id="bridges-out">(not listed)</div>
             </section>
+          </div>
+          <div class="panel" id="panel-closed-tabs" data-panel="closed-tabs" hidden>
+            <p class="lede">Terminal tabs on the host that you closed, or ended with /quit, in the last 7 days. Reopen opens one again on the same conversation and folder.</p>
+            <div id="closed-tabs-note" role="status" hidden></div>
+            <div id="closed-tabs-list"></div>
+            <div id="closed-tabs-empty" hidden>No closed tabs in the last 7 days.</div>
           </div>
           <div class="panel" id="panel-diag" data-panel="diag" hidden>
             <p class="lede">What the daemon says about the machine it runs on, the live connections to it, and the gateway's audit history.</p>
@@ -6897,6 +6978,7 @@
         else setListOpen(false);
         renderMoreValues();
         void readHostActions(); // #192: the Host rows, read as More opens
+        void readHostTabs(); // #256: the Closed tabs row's count, read as More opens
         if (quiet) return;
         const first = scr.querySelector('.row');
         if (first) first.focus({ preventScroll: true });
@@ -6939,7 +7021,16 @@
         renderMoreValues();
         if (!refocus) return;
         const row = moreRow(key);
-        if (row) row.focus({ preventScroll: true });
+        // A row that went while its panel was open (the last closed tab was
+        // reopened) is hidden and takes no focus: the Host group's heading
+        // does, so focus stays on the More screen.
+        if (row && row.getClientRects().length > 0) {
+          row.focus({ preventScroll: true });
+        } else if (row) {
+          const head = $('more-g-host');
+          head.tabIndex = -1;
+          head.focus({ preventScroll: true });
+        }
       }
       $('more-screen').addEventListener('click', (e) => {
         const row = e.target.closest('.row[data-panel]');
@@ -6962,6 +7053,10 @@
           syncArtifactsControl(); // #127: hidden on a gateway without the reads
         }
         if (key === 'share') $('more-export').disabled = !watchedSessionId;
+        if (key === 'closed-tabs') {
+          renderClosedTabs();
+          void readHostTabs();
+        }
       }
 
       // #138. Find in conversation. The model finds the rows (it holds all of
@@ -7288,6 +7383,9 @@
           const now = Date.now();
           const up = daemons.filter((d) => healthDotState(d, now) === 'green');
           v.daemons = up.length + ' of ' + daemons.length;
+        }
+        if (hostTabsOn() && hostTabs.closed.length) {
+          v['closed-tabs'] = String(hostTabs.closed.length); // #256
         }
         if (moreFacts.sessions !== null) v.sessions = String(moreFacts.sessions);
         if (moreFacts.bridges !== null) {
@@ -9136,7 +9234,8 @@
             el = hostActNodes(a.name);
             hostActs.els.set(a.name, el);
             hostActsSheet.append(el.sheet);
-            hostGroup.append(el.more);
+            // #256: before the Closed tabs row, which stays last in the group.
+            hostGroup.insertBefore(el.more, $('more-closed-tabs'));
           }
           const busy = hostActs.busy.has(a.name);
           const state = a.running
@@ -9182,6 +9281,7 @@
       // owner event stream carries a tab's start or end.
       const hostTabs = {
         bySession: new Map(), // sessionId -> the crashed or lost record shown
+        closed: [], // #256: each conversation's newest closed or quit record, newest first
         launcher: null, // { state, seenMsAgo } from the last read
         autoReopen: false,
         seq: 0, // a read that a later one overtook is dropped
@@ -9216,6 +9316,8 @@
             hostTabs.bySession = new Map();
             renderHostTabs();
           }
+          if (hostTabs.closed.length) hostTabs.closed = [];
+          renderClosedTabs();
           return;
         }
         const seq = ++hostTabs.seq;
@@ -9230,7 +9332,9 @@
         if (seq !== hostTabs.seq) return;
         if (res.status === 404 || res.status === 403 || res.status === 401) {
           hostTabs.bySession = new Map();
+          hostTabs.closed = [];
           renderHostTabs();
+          renderClosedTabs();
           return;
         }
         if (!res.ok) return;
@@ -9241,7 +9345,8 @@
         for (const t of body.tabs) {
           if (!t || typeof t.tabId !== 'string') continue;
           if (typeof t.sessionId !== 'string') continue;
-          // Live, quit, closed and replaced are shown nowhere; a dismissed
+          // Live, quit, closed and replaced draw no badge on the list (closed
+          // and quit ones are listed by closedTabsOf below); a dismissed
           // record keeps its place on the host and loses its badge here.
           if (t.state !== 'crashed' && t.state !== 'ghost') continue;
           if (t.dismissed === true) continue;
@@ -9251,12 +9356,14 @@
           }
         }
         hostTabs.bySession = by;
+        hostTabs.closed = closedTabsOf(body.tabs, body.now);
         hostTabs.launcher =
           body.launcher && typeof body.launcher.state === 'string'
             ? body.launcher
             : null;
         hostTabs.autoReopen = body.autoReopen === true;
         renderHostTabs();
+        renderClosedTabs();
       }
       function startHostTabsPoll() {
         if (!hostTabsOn()) return;
@@ -9375,6 +9482,32 @@
           btn(id).disabled = !!busy;
         }
       }
+      // What a reopen answered, in words, on the status line: the sheet's
+      // Reopen and the Closed tabs panel's both say it this way. True when
+      // the gateway queued the tab (202).
+      function reportHostTabReopen(res, body, did) {
+        if (res.status === 202) {
+          const live = body && body.launcherState === 'live';
+          setStatus(
+            live
+              ? 'tab reopening on the host…'
+              : 'tab queued on the host; ' +
+                  launcherWords(body && body.launcherState, body && body.launcherSeenMsAgo),
+          );
+          return true;
+        }
+        if (res.status === 200 && body && body.alreadyMirrored) {
+          setStatus('already open on the host');
+        } else if (body && body.code === 'launcher_unavailable') {
+          setStatus(
+            'no tab reopened: ' +
+              launcherWords(body.launcherState, body.launcherSeenMsAgo),
+          );
+        } else {
+          setStatus(did + ' failed: ' + failureDetailLine(res, body));
+        }
+        return false;
+      }
       async function hostTabVerb(verb) {
         const t = hostTabFor(watchedSessionId);
         if (!t || hostTabs.busy.has(t.tabId)) return;
@@ -9413,24 +9546,7 @@
           return;
         }
         if (verb === 'reopen') {
-          if (res.status === 202) {
-            const live = body && body.launcherState === 'live';
-            setStatus(
-              live
-                ? 'tab reopening on the host…'
-                : 'tab queued on the host; ' +
-                    launcherWords(body && body.launcherState, body && body.launcherSeenMsAgo),
-            );
-          } else if (res.status === 200 && body && body.alreadyMirrored) {
-            setStatus('already open on the host');
-          } else if (body && body.code === 'launcher_unavailable') {
-            setStatus(
-              'no tab reopened: ' +
-                launcherWords(body.launcherState, body.launcherSeenMsAgo),
-            );
-          } else {
-            setStatus(did + ' failed: ' + failureDetailLine(res, body));
-          }
+          reportHostTabReopen(res, body, did);
         } else if (res.ok) {
           // Gone from here at once; the next read agrees.
           hostTabs.bySession.delete(t.sessionId);
@@ -9446,6 +9562,149 @@
         if (b.id === 'host-tab-reopen') void hostTabVerb('reopen');
         else if (b.id === 'host-tab-dismiss') void hostTabVerb('dismiss');
         else if (b.id === 'host-tab-remove') void hostTabVerb('remove');
+      });
+
+      // #256. Closed tabs: the host tabs the owner closed (the window went) or
+      // ended with /quit, in the last 7 days (the gateway keeps no older),
+      // listed in More > Host with a Reopen each. One entry per conversation:
+      // its newest record, and only when that one is closed or quit, so a
+      // conversation that has a newer tab, crashed or live, is not listed.
+      // A record a reopen was asked for in the last 10 minutes that no new tab
+      // has answered yet is held back, so an entry does not come back while its
+      // tab is opening. The mechanism is the record's own reopenedAt (newer
+      // than its end) and the newest-record rule above: a tab that attaches
+      // starts a newer record, which then is the one listed or not. The
+      // minutes are counted on the gateway's clock (`now` in the list answer),
+      // the one that wrote reopenedAt; an older gateway sends none and the
+      // phone's clock stands in.
+      const CLOSED_TAB_PENDING_MS = 10 * 60 * 1000;
+      function closedTabsOf(tabs, gatewayNow) {
+        const newest = new Map();
+        for (const t of tabs) {
+          if (!t || typeof t.tabId !== 'string') continue;
+          if (typeof t.sessionId !== 'string') continue;
+          const prev = newest.get(t.sessionId);
+          if (!prev || (t.startedAt || 0) >= (prev.startedAt || 0)) {
+            newest.set(t.sessionId, t);
+          }
+        }
+        const now = Number.isFinite(gatewayNow) ? gatewayNow : Date.now();
+        return [...newest.values()]
+          .filter((t) => {
+            if (t.state !== 'closed' && t.state !== 'quit') return false;
+            if (t.dismissed === true) return false;
+            return !(
+              Number.isFinite(t.reopenedAt) &&
+              t.reopenedAt >= (t.endedAt || 0) &&
+              now - t.reopenedAt < CLOSED_TAB_PENDING_MS
+            );
+          })
+          .sort(
+            (a, b) =>
+              (b.endedAt || b.startedAt || 0) - (a.endedAt || a.startedAt || 0),
+          );
+      }
+      let closedTabsSig = '';
+      function renderClosedTabs() {
+        const list = hostTabsOn() ? hostTabs.closed : [];
+        const row = $('more-closed-tabs');
+        row.hidden = list.length === 0;
+        const val = row.querySelector('.val');
+        const count = list.length ? String(list.length) : '';
+        if (val.textContent !== count) val.textContent = count;
+        const box = $('closed-tabs-list');
+        const note = $('closed-tabs-note');
+        const l = hostTabs.launcher;
+        const noteText =
+          l && l.state !== 'live'
+            ? launcherWords(l.state, l.seenMsAgo) + ', so Reopen cannot open a tab now'
+            : '';
+        h1Text(note, noteText);
+        note.hidden = noteText === '';
+        $('closed-tabs-empty').hidden = list.length > 0;
+        const rows = list.map((t) => {
+          const known = pastConvos.find((c) => c && c.sessionId === t.sessionId);
+          const when = hostTabWhen(t.endedAt);
+          return {
+            tabId: t.tabId,
+            sessionId: t.sessionId,
+            title: known ? convoTitle(known) : String(t.sessionId).slice(0, 8),
+            folder: isolatedFolder(t.cwd || ''),
+            how:
+              (t.state === 'quit' ? 'quit with /quit' : 'window closed') +
+              (when ? ', ' + when : ''),
+            busy: hostTabs.busy.get(t.tabId) === 'reopen',
+          };
+        });
+        const sig = JSON.stringify(rows);
+        if (sig === closedTabsSig) return;
+        closedTabsSig = sig;
+        box.textContent = '';
+        for (const r of rows) {
+          const el = document.createElement('div');
+          el.className = 'ct-entry';
+          el.dataset.tab = r.tabId;
+          el.dataset.session = r.sessionId;
+          const text = document.createElement('div');
+          text.className = 'ct-text';
+          for (const [cls, v] of [
+            ['ct-title', r.title],
+            ['ct-folder', r.folder],
+            ['ct-how', r.how],
+          ]) {
+            const d = document.createElement('span');
+            d.className = cls;
+            d.textContent = v;
+            text.append(d);
+          }
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.textContent = r.busy ? 'reopening…' : 'Reopen';
+          b.disabled = r.busy;
+          b.setAttribute(
+            'aria-label',
+            (r.busy ? 'Reopening ' : 'Reopen ') + r.title,
+          );
+          el.append(text, b);
+          box.append(el);
+        }
+      }
+      async function reopenClosedTab(tabId) {
+        const t = hostTabs.closed.find((x) => x.tabId === tabId);
+        if (!t || hostTabs.busy.has(tabId)) return;
+        hostTabs.busy.set(tabId, 'reopen');
+        renderClosedTabs();
+        let res = null;
+        let body = null;
+        let threw = null;
+        try {
+          res = await fetch(
+            '/rc/host/tabs/' + encodeURIComponent(tabId) + '/reopen',
+            { method: 'POST', headers: { Authorization: 'Bearer ' + token() } },
+          );
+          body = await res.json().catch(() => null);
+        } catch (e) {
+          threw = e;
+        }
+        hostTabs.busy.delete(tabId);
+        const did = 'reopen of the host tab';
+        if (threw) {
+          renderClosedTabs();
+          setStatus(failureOf(threw, did));
+          return;
+        }
+        // Queued: gone from here at once; the next read agrees.
+        if (reportHostTabReopen(res, body, did)) {
+          hostTabs.closed = hostTabs.closed.filter((x) => x.tabId !== tabId);
+        }
+        renderClosedTabs();
+        await readHostTabs();
+      }
+      $('closed-tabs-list').addEventListener('click', (e) => {
+        const b = e.target.closest('button');
+        const entry = b && b.closest('.ct-entry');
+        if (!entry || b.disabled) return;
+        void reopenClosedTab(entry.dataset.tab);
       });
 
       // #184. The inspector sheet's rows, in #session-footer, the drawer

@@ -14,7 +14,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { readdirSync, readFileSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DaemonClient } from '@qwen-code/sdk';
@@ -28,6 +28,7 @@ import { SESSION_READ, SHARE, WRITE } from '../scopes.js';
 import {
   AUTO_REOPEN_WINDOW_MS,
   autoReopenEligible,
+  isReopenable,
   sessionEndpointResolver,
   type TabEndpointAnswer,
 } from './hostTabs.js';
@@ -75,6 +76,10 @@ interface BootOpts {
   tabs?: boolean;
   endpointFor?: (sessionId: string, cwd: string) => Promise<TabEndpointAnswer>;
   isMirrored?: (sessionId: string) => Promise<boolean>;
+  /** Whether a tab's folder exists; every folder does unless a test says not. */
+  folderExists?: (cwd: string) => Promise<boolean>;
+  /** Use the gateway's own check (a stat) instead. */
+  realFolders?: boolean;
   /** Wire no request log, as a gateway without host terminals. */
   noRequests?: boolean;
   /** `--reopen-crashed-tabs`. */
@@ -141,6 +146,9 @@ async function boot(opts: BootOpts = {}) {
             registry,
             endpointFor: opts.endpointFor ?? (async (_s, cwd) => ENDPOINT(cwd)),
             isMirrored: opts.isMirrored ?? (async () => false),
+            ...(opts.realFolders
+              ? {}
+              : { folderExists: opts.folderExists ?? (async () => true) }),
             autoReopen: opts.autoReopen === true,
           },
         }),
@@ -358,6 +366,9 @@ describe('GET /rc/host/tabs', () => {
       });
       expect(tabs[1]).not.toHaveProperty('pidStart');
       expect(res.body.launcher).toEqual({ state: 'live', seenMsAgo: 0 });
+      // The gateway's clock (the test's registry clock), for the phone to
+      // count a reopen's age on instead of its own.
+      expect(res.body.now).toBe(g.registry.now());
     }
   });
 
@@ -499,20 +510,17 @@ describe('POST /rc/host/tabs/:tabId/reopen', () => {
     ]);
   });
 
-  it('refuses a live tab, a quit one, an unknown one, and a gateway with no request log', async () => {
+  it('refuses a live tab, a replaced one, an unknown one, and queues nothing', async () => {
     const g = await boot();
-    const { live } = await seed(g);
+    const { crashed, live } = await seed(g);
     await g.poll();
-    const quit = await g.registry.start({
-      sessionId: 'c0000000-0000-4000-8000-000000000001',
-      cwd: '/srv/w',
-      pid: 31,
-    });
-    await g.registry.end(quit.tabId, 0);
+    // A newer live record of the same conversation replaces the crashed one.
+    g.probe.fd0.set(31, '/dev/pts/3');
+    await g.registry.start({ sessionId: S1, cwd: '/srv/w', pid: 31 });
     const a = await send(g.url, `/rc/host/tabs/${live.tabId}/reopen`, {
       token: g.owner,
     });
-    const b = await send(g.url, `/rc/host/tabs/${quit.tabId}/reopen`, {
+    const b = await send(g.url, `/rc/host/tabs/${crashed.tabId}/reopen`, {
       token: g.owner,
     });
     const c = await send(
@@ -529,11 +537,163 @@ describe('POST /rc/host/tabs/:tabId/reopen', () => {
     expect([b.status, b.body.code, b.body.state]).toEqual([
       409,
       'tab_not_reopenable',
-      'quit',
+      'replaced',
     ]);
+    expect(b.body.error).toBe(
+      'Only a crashed, lost, closed or quit tab is reopened',
+    );
     expect([c.status, c.body.code]).toEqual([404, 'tab_not_found']);
     expect([d.status, d.body.code]).toEqual([404, 'tab_not_found']);
     expect(await g.requests.readAll()).toEqual([]);
+  });
+
+  it('a replaced tab is still refused', async () => {
+    const g = await boot();
+    const { crashed } = await seed(g);
+    await g.poll();
+    g.probe.fd0.set(32, '/dev/pts/4');
+    await g.registry.start({ sessionId: S1, cwd: '/srv/w', pid: 32 });
+    const res = await send(g.url, `/rc/host/tabs/${crashed.tabId}/reopen`, {
+      token: g.owner,
+    });
+    expect([res.status, res.body.code, res.body.state]).toEqual([
+      409,
+      'tab_not_reopenable',
+      'replaced',
+    ]);
+    expect(await g.requests.readAll()).toEqual([]);
+  });
+
+  it.each([
+    ['closed', 129],
+    ['quit', 0],
+  ])(
+    'a manual reopen of a %s tab queues a terminal request',
+    async (_state, exitCode) => {
+      const g = await boot();
+      await g.poll();
+      g.probe.fd0.set(33, '/dev/pts/5');
+      const t = await g.registry.start({
+        sessionId: S1,
+        cwd: '/srv/w',
+        pid: 33,
+      });
+      await g.registry.end(t.tabId, exitCode);
+      expect(g.registry.get(t.tabId)?.exitCode).toBe(exitCode);
+      const res = await send(g.url, `/rc/host/tabs/${t.tabId}/reopen`, {
+        token: g.owner,
+      });
+      expect(res.status).toBe(202);
+      const queued = await g.requests.readAll();
+      expect(queued).toHaveLength(1);
+      expect(queued[0]).toMatchObject({
+        id: res.body.requestId,
+        sessionId: S1,
+        workspaceCwd: '/srv/w',
+      });
+      expect(g.registry.get(t.tabId)?.reopenedAt).toBeDefined();
+      expect((await g.registry.view(t.tabId))?.state).toBe(_state);
+    },
+  );
+
+  it('a manual reopen of a closed tab with no daemon restores it in its folder', async () => {
+    const asked: Array<[string, string]> = [];
+    const g = await boot({
+      endpointFor: async (sid, cwd) => {
+        asked.push([sid, cwd]);
+        return ENDPOINT(cwd);
+      },
+    });
+    await g.poll();
+    g.probe.fd0.set(34, '/dev/pts/6');
+    const t = await g.registry.start({
+      sessionId: S1,
+      cwd: '/srv/w',
+      pid: 34,
+    });
+    await g.registry.end(t.tabId, 129);
+    const res = await send(g.url, `/rc/host/tabs/${t.tabId}/reopen`, {
+      token: g.owner,
+    });
+    expect(res.status).toBe(202);
+    expect(asked).toEqual([[S1, '/srv/w']]);
+  });
+
+  it.each([
+    ['closed', 129],
+    ['quit', 0],
+    ['crashed', 137],
+  ])(
+    'a manual reopen of a %s tab whose folder is gone answers 409 folder_gone and queues nothing',
+    async (_state, exitCode) => {
+      const g = await boot({ folderExists: async (cwd) => cwd !== '/srv/w' });
+      await g.poll();
+      g.probe.fd0.set(35, '/dev/pts/7');
+      const t = await g.registry.start({
+        sessionId: S1,
+        cwd: '/srv/w',
+        pid: 35,
+      });
+      await g.registry.end(t.tabId, exitCode);
+      const res = await send(g.url, `/rc/host/tabs/${t.tabId}/reopen`, {
+        token: g.owner,
+      });
+      expect([res.status, res.body.code]).toEqual([409, 'folder_gone']);
+      expect(res.body.error).toBe(
+        'The folder this tab ran in is gone: /srv/w',
+      );
+      expect(await g.requests.readAll()).toEqual([]);
+      expect(g.registry.get(t.tabId)?.reopenedAt).toBeUndefined();
+      const rows = await auditRows(g.auditPath, 'host_tab_reopened', 1);
+      expect(rows[0]).toMatchObject({
+        outcome: 'failed',
+        target: S1,
+        detail: { tabId: t.tabId, code: 'folder_gone', auto: false },
+      });
+    },
+  );
+
+  it('the automatic reopen of a crashed tab in a gone folder refuses and queues nothing', async () => {
+    const g = await boot({
+      autoReopen: true,
+      folderExists: async () => false,
+    });
+    g.probe.fd0.set(36, '/dev/pts/8');
+    const t = await g.registry.start({ sessionId: S1, cwd: '/srv/w', pid: 36 });
+    await send(g.url, `/rc/host/tabs/${t.tabId}/end`, {
+      body: { exitCode: 137 },
+    });
+    await g.poll();
+    await g.sweep!();
+    expect(await g.requests.readAll()).toEqual([]);
+    expect(g.registry.get(t.tabId)?.autoReopenedAt).toBeUndefined();
+    const rows = await auditRows(g.auditPath, 'host_tab_reopened', 1);
+    expect(rows[0]).toMatchObject({
+      outcome: 'failed',
+      detail: { code: 'folder_gone', auto: true },
+    });
+  });
+
+  it('without an injected check, a folder that does not exist on disk is gone', async () => {
+    const g = await boot({ realFolders: true });
+    await g.poll();
+    const real = join(base!, 'real-folder');
+    await mkdir(real);
+    g.probe.fd0.set(37, '/dev/pts/9');
+    const a = await g.registry.start({ sessionId: S1, cwd: real, pid: 37 });
+    await g.registry.end(a.tabId, 129);
+    const ok = await send(g.url, `/rc/host/tabs/${a.tabId}/reopen`, {
+      token: g.owner,
+    });
+    expect(ok.status).toBe(202);
+    g.probe.fd0.set(38, '/dev/pts/10');
+    const gone = join(base!, 'no-such-folder');
+    const b = await g.registry.start({ sessionId: S2, cwd: gone, pid: 38 });
+    await g.registry.end(b.tabId, 129);
+    const res = await send(g.url, `/rc/host/tabs/${b.tabId}/reopen`, {
+      token: g.owner,
+    });
+    expect([res.status, res.body.code]).toEqual([409, 'folder_gone']);
   });
 
   it('answers alreadyMirrored and queues nothing when a terminal already shows the conversation', async () => {
@@ -807,6 +967,17 @@ describe('the automatic reopen (--reopen-crashed-tabs)', () => {
     expect(await queued(g, 1)).toEqual([]);
   });
 
+  it('the automatic reopen still leaves a closed tab alone', async () => {
+    const g = await boot({ autoReopen: true });
+    await g.poll();
+    g.probe.fd0.set(45, '/dev/pts/1');
+    const t = await g.registry.start({ sessionId: S1, cwd: '/srv/w', pid: 45 });
+    await end(g, t.tabId, 129);
+    await g.sweep!();
+    expect(await queued(g, 1)).toEqual([]);
+    expect(g.registry.get(t.tabId)?.autoReopenedAt).toBeUndefined();
+  });
+
   it('waits for a live launcher, with no audit row while it waits, then reopens', async () => {
     const g = await boot({ autoReopen: true });
     g.probe.fd0.set(61, '/dev/pts/1');
@@ -1058,5 +1229,33 @@ describe('autoReopenEligible', () => {
       status: 503,
       code: 'workspace_pool_full',
     });
+  });
+});
+
+describe('isReopenable', () => {
+  it('lets a manual reopen take crashed, lost, closed and quit tabs', () => {
+    for (const state of ['crashed', 'ghost', 'closed', 'quit'] as const) {
+      expect(isReopenable({ state }, false)).toBe(true);
+    }
+    for (const state of ['live', 'replaced'] as const) {
+      expect(isReopenable({ state }, false)).toBe(false);
+    }
+  });
+
+  it('keeps manual reopen allowed after an earlier reopen', () => {
+    expect(isReopenable({ state: 'crashed', reopenedAt: 5 }, false)).toBe(true);
+  });
+
+  it('lets the automatic reopen take only a crashed or lost tab not reopened before', () => {
+    expect(isReopenable({ state: 'crashed' }, true)).toBe(true);
+    expect(isReopenable({ state: 'ghost' }, true)).toBe(true);
+    expect(isReopenable({ state: 'closed' }, true)).toBe(false);
+    expect(isReopenable({ state: 'quit' }, true)).toBe(false);
+    expect(isReopenable({ state: 'live' }, true)).toBe(false);
+    expect(isReopenable({ state: 'replaced' }, true)).toBe(false);
+    expect(isReopenable({ state: 'crashed', reopenedAt: 5 }, true)).toBe(false);
+    expect(isReopenable({ state: 'crashed', autoReopenedAt: 5 }, true)).toBe(
+      false,
+    );
   });
 });
