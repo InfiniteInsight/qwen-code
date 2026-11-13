@@ -722,6 +722,21 @@ describe('BackgroundTaskRegistry', () => {
     expect(registry.get('running-1')?.status).toBe('cancelled');
   });
 
+  // #259 review: the attached TUI drops mirrors with removeEntry; a drain
+  // loop parked on one must not hang forever.
+  it('wakes a message waiter parked on a removed entry', async () => {
+    add('removed-wait', 'mirrored agent');
+    const waiting = registry.waitForMessages(
+      'removed-wait',
+      new AbortController().signal,
+    );
+
+    registry.removeEntry('removed-wait');
+
+    await expect(waiting).resolves.toEqual([]);
+    expect(registry.get('removed-wait')).toBeUndefined();
+  });
+
   it('wakes a message waiter parked on an abandoned agent', async () => {
     add('paused-wait', 'paused agent');
     const waiting = registry.waitForMessages(

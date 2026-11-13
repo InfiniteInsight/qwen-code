@@ -1170,6 +1170,8 @@ export class BackgroundTaskRegistry {
     const entry = this.agents.get(agentId);
     if (!entry) return;
     this.deleteAgent(agentId);
+    // A drain loop parked on this id sees it gone and exits, as on abandon.
+    this.wakeMessageWaiters(agentId);
     this.emitStatusChange(entry);
     this.drainQueues();
   }
