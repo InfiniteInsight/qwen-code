@@ -164,6 +164,7 @@ function setup(
   const config = {
     getBackgroundTaskRegistry: () => ({
       cancel,
+      abandon: vi.fn(),
       isFinishing,
       waitForFinishing,
       continueResidentAgent,
@@ -203,6 +204,19 @@ function setup(
     getIdeMode: () => false,
     isTrustedFolder: () => true,
     resumeBackgroundAgent: resume,
+    // The dialog resumes through the outcome API (#259); tests keep stubbing
+    // `resume` with the entry or undefined, and the adapter maps that.
+    resumeBackgroundAgentWithOutcome: async (
+      agentId: string,
+      input?: string,
+    ) => {
+      const task = await (input === undefined
+        ? resume(agentId)
+        : resume(agentId, input));
+      return task
+        ? { resumed: true, task }
+        : { resumed: false, code: 'resume_failed', reason: 'resume failed' };
+    },
     reviveCompletedBackgroundAgent: revive,
     abandonBackgroundAgent: abandon,
   } as unknown as Config;
@@ -2208,34 +2222,34 @@ describe('BackgroundTasksDialog', () => {
         },
       );
 
-      // 1. Revive returns undefined -> sendMessageToSelected resolves to false without throwing.
+      // 1. Revive returns undefined -> sendMessageToSelected reports a failure without throwing.
       h.revive.mockResolvedValueOnce(undefined);
       await expect(
         h.probe.current!.actions.sendMessageToSelected('follow up 1'),
-      ).resolves.toBe(false);
+      ).resolves.toMatchObject({ ok: false });
       expect(h.waitForFinishing).toHaveBeenCalledWith(
         'a-finish',
         expect.any(AbortSignal),
       );
       expect(h.revive).toHaveBeenCalledWith('a-finish', 'follow up 1');
 
-      // 2. Revive returns a revived AgentTask -> sendMessageToSelected resolves to true.
+      // 2. Revive returns a revived AgentTask -> sendMessageToSelected reports success.
       h.revive.mockResolvedValueOnce(running);
       await expect(
         h.probe.current!.actions.sendMessageToSelected('follow up 2'),
-      ).resolves.toBe(true);
+      ).resolves.toEqual({ ok: true });
       expect(h.revive).toHaveBeenCalledWith('a-finish', 'follow up 2');
 
-      // 3. Paused resume returns undefined vs defined task -> resolves to false vs true.
+      // 3. Paused resume returns undefined vs defined task -> failure (with the reason) vs success.
       h.setEntries([entry({ agentId: 'a-finish', status: 'paused' })]);
       h.resume.mockResolvedValueOnce(undefined);
       await expect(
         h.probe.current!.actions.sendMessageToSelected('resume 1'),
-      ).resolves.toBe(false);
+      ).resolves.toEqual({ ok: false, reason: 'resume failed' });
       h.resume.mockResolvedValueOnce(running);
       await expect(
         h.probe.current!.actions.sendMessageToSelected('resume 2'),
-      ).resolves.toBe(true);
+      ).resolves.toEqual({ ok: true });
     });
   });
 });
