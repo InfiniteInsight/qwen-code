@@ -511,7 +511,9 @@ async function readEntry(
   try {
     const head = await readHeadRecords(chatsDir, id);
     parent = parentOf(head);
-    spawnedBy = spawnedByOf(head);
+    // #255: a fork is never a thread. A fork made before the fork route
+    // dropped `parent_session` carries the sub-session's own marker, copied.
+    spawnedBy = parent ? null : spawnedByOf(head);
   } catch {
     // Unreadable head (e.g. EACCES) -> list it as a root, don't drop.
     parent = null;

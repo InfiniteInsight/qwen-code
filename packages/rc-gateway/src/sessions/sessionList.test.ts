@@ -803,4 +803,23 @@ describe('listSessions spawnedBy (#255)', () => {
       read.mockRestore();
     }
   });
+
+  it('lists a fork of a sub-session with parentSessionId and no spawnedBy, though it copied parent_session', async () => {
+    // A fork made before the fork route dropped the record: the fork header,
+    // then the sub-session's own parent_session marker, copied.
+    const lines = [
+      JSON.stringify({ type: 'fork', forkedFrom: { sessionId: 'T' } }),
+      JSON.stringify({
+        type: 'system',
+        subtype: 'parent_session',
+        forkedFrom: { sessionId: 'T' },
+        systemPayload: { parentSessionId: 'P' },
+      }),
+      filler(1),
+    ];
+    await writeFile(join(dir, `${ID(1)}.jsonl`), lines.join('\n') + '\n');
+    const { sessions } = await listSessions(dir);
+    expect(sessions[0].parentSessionId).toBe('T');
+    expect('spawnedBy' in sessions[0]).toBe(false);
+  });
 });
