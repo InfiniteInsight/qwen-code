@@ -57,32 +57,43 @@ const TOKEN_HELPER =
   '!f() { echo username=x-access-token; echo "password=$QWEN_RC_GIT_TOKEN"; }; f';
 
 /**
- * The `-c` options before `clone`. `credential.helper=` empties the helper
- * list built from the owner's config files (scoped and unscoped alike); the
- * token helper then answers `https://github.com` only, so a redirect or an
- * `insteadOf` rewrite to another host gets no token; redirects are refused
- * outright as well. An empty `core.askPass` stops git from running the
- * owner's askpass (or `SSH_ASKPASS`) when no helper answers, which could
- * otherwise hold the clone on a prompt nobody sees. `http.sslVerify=true`
- * overrides an owner's config that turns certificate checks off, since the
- * token is sent over that connection.
+ * The `-c` options before `clone`, for the URL being cloned.
+ *
+ * - `credential.helper=` empties the helper list built from the owner's
+ *   config files. Helpers are a list applied in config order, scoped and
+ *   unscoped alike, so the reset clears both. The token helper then answers
+ *   `https://github.com` only, so an `insteadOf` rewrite to another host
+ *   gets no token.
+ * - `http.<url>.followRedirects=false` and `http.<url>.sslVerify=true` are
+ *   scoped to the exact clone URL. For `http.*` settings git takes the most
+ *   specific URL match whatever the order, so a generic `-c http.sslVerify`
+ *   would lose to an owner's `[http "https://github.com"]` block. Nothing in
+ *   the owner's config is more specific than the full URL, and at equal
+ *   specificity the command line comes last and wins. So redirects stay
+ *   refused and certificates stay checked for the connection the token is
+ *   sent over.
+ * - An empty `core.askPass` stops git from running the owner's askpass (or
+ *   `SSH_ASKPASS`) when no helper answers, which could otherwise hold the
+ *   clone on a prompt nobody sees.
  */
-export const CLONE_GIT_CONFIG_ARGS: readonly string[] = [
-  '-c',
-  'credential.helper=',
-  '-c',
-  `credential.https://github.com.helper=${TOKEN_HELPER}`,
-  '-c',
-  'http.followRedirects=false',
-  '-c',
-  'core.askPass=',
-  '-c',
-  'http.sslVerify=true',
-];
+export function cloneGitConfigArgs(url: string): string[] {
+  return [
+    '-c',
+    'credential.helper=',
+    '-c',
+    `credential.https://github.com.helper=${TOKEN_HELPER}`,
+    '-c',
+    `http.${url}.followRedirects=false`,
+    '-c',
+    'core.askPass=',
+    '-c',
+    `http.${url}.sslVerify=true`,
+  ];
+}
 
 /** The full git argv after the program name. */
 export function cloneArgs(url: string, dest: string): string[] {
-  return [...CLONE_GIT_CONFIG_ARGS, 'clone', '--progress', '--', url, dest];
+  return [...cloneGitConfigArgs(url), 'clone', '--progress', '--', url, dest];
 }
 
 /**

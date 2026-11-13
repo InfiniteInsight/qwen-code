@@ -21,10 +21,11 @@ import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  CLONE_GIT_CONFIG_ARGS,
   CLONE_LINE_MAX,
   CLONE_MAX_FINISHED,
   CloneJobs,
+  cloneArgs,
+  cloneGitConfigArgs,
   cloneEnv,
   describeTimeout,
 } from './clone.js';
@@ -282,11 +283,11 @@ describe('CloneJobs with real git', () => {
       '-c',
       'credential.https://github.com.helper=!f() { echo username=x-access-token; echo "password=$QWEN_RC_GIT_TOKEN"; }; f',
       '-c',
-      'http.followRedirects=false',
+      'http.https://github.com/acme/widget.git.followRedirects=false',
       '-c',
       'core.askPass=',
       '-c',
-      'http.sslVerify=true',
+      'http.https://github.com/acme/widget.git.sslVerify=true',
       'clone',
       '--progress',
       '--',
@@ -482,14 +483,62 @@ describe('CloneJobs with real git', () => {
   it('the token helper answers github.com and nothing else', () => {
     const env = cloneEnv(gitEnv(), TOKEN);
     const fill = (host: string) =>
-      execFileSync('git', [...CLONE_GIT_CONFIG_ARGS, 'credential', 'fill'], {
-        env,
-        input: `protocol=https\nhost=${host}\n\n`,
-        encoding: 'utf8',
-        stdio: ['pipe', 'pipe', 'ignore'],
-      });
+      execFileSync(
+        'git',
+        [
+          ...cloneGitConfigArgs('https://github.com/acme/widget.git'),
+          'credential',
+          'fill',
+        ],
+        {
+          env,
+          input: `protocol=https\nhost=${host}\n\n`,
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'ignore'],
+        },
+      );
     expect(fill('github.com')).toContain(`password=${TOKEN}`);
     expect(() => fill('example.com')).toThrow();
+  });
+
+  it("the clone's sslVerify and followRedirects beat the owner's URL-scoped blocks", () => {
+    const env = gitEnv();
+    writeFileSync(
+      env['GIT_CONFIG_GLOBAL']!,
+      [
+        '[http "https://github.com"]',
+        '\tsslVerify = false',
+        '\tfollowRedirects = true',
+        '[http "https://github.com/acme"]',
+        '\tsslVerify = false',
+        '\tfollowRedirects = true',
+        '[http "https://github.com/acme/widget.git"]',
+        '\tsslVerify = false',
+        '\tfollowRedirects = true',
+        '',
+      ].join('\n'),
+    );
+    const url = 'https://github.com/acme/widget.git';
+    // The -c args exactly as CloneJobs passes them, up to `clone`.
+    const full = cloneArgs(url, '/nowhere/widget');
+    const ours = full.slice(0, full.indexOf('clone'));
+    const get = (pre: string[], key: string) =>
+      execFileSync('git', [...pre, 'config', '--get-urlmatch', key, url], {
+        env,
+        encoding: 'utf8',
+      }).trim();
+
+    // Controls: the owner's blocks win without our args, and a generic -c
+    // loses to them.
+    expect(get([], 'http.sslVerify')).toBe('false');
+    expect(get([], 'http.followRedirects')).toBe('true');
+    expect(get(['-c', 'http.sslVerify=true'], 'http.sslVerify')).toBe('false');
+    expect(
+      get(['-c', 'http.followRedirects=false'], 'http.followRedirects'),
+    ).toBe('true');
+
+    expect(get(ours, 'http.sslVerify')).toBe('true');
+    expect(get(ours, 'http.followRedirects')).toBe('false');
   });
 });
 
