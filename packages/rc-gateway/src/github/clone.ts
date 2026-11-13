@@ -40,9 +40,10 @@ export const CLONE_MAX_FINISHED = 20;
 export const CLONE_LINE_MAX = 8 * 1024;
 /**
  * How long after git exits its output pipes may stay open (a helper it
- * started still holding them) before the job is finished anyway.
+ * started still holding them) before the job's process group is killed and
+ * the job finished anyway.
  */
-const CLOSE_GRACE_MS = 2_000;
+export const CLONE_CLOSE_GRACE_MS = 2_000;
 /** Shortest token prefix masked at the end of a cut line. */
 const MIN_FRAGMENT = 4;
 
@@ -124,6 +125,8 @@ export function describeTimeout(ms: number): string {
 
 /** The parts of a child process a clone job uses. */
 export interface CloneChild {
+  /** Also the process group id, since the child is spawned detached. */
+  readonly pid?: number | undefined;
   readonly stdout: Readable | null;
   readonly stderr: Readable | null;
   kill(signal?: NodeJS.Signals): boolean;
@@ -136,6 +139,12 @@ export interface CloneChild {
 
 export interface CloneSpawnOptions {
   env: NodeJS.ProcessEnv;
+  /**
+   * True on POSIX: git leads a process group of its own, so its helpers
+   * (`git remote-https`, which holds the token in its env) are signalled
+   * with it.
+   */
+  detached: boolean;
   windowsHide: true;
   stdio: ['ignore', 'pipe', 'pipe'];
 }
@@ -149,6 +158,36 @@ export type CloneSpawner = (
 
 const defaultSpawner: CloneSpawner = (program, args, options) =>
   spawn(program, [...args], options);
+
+/** Signals every process in group `pid`. */
+export type CloneGroupKiller = (pid: number, signal: NodeJS.Signals) => void;
+
+const defaultGroupKiller: CloneGroupKiller = (pid, signal) => {
+  process.kill(-pid, signal);
+};
+
+/**
+ * Process groups of clones still running, killed if the gateway exits
+ * first: a detached group would otherwise outlive it.
+ */
+const liveGroups = new Map<number, CloneGroupKiller>();
+let exitHookInstalled = false;
+
+function trackGroup(pid: number, kill: CloneGroupKiller): void {
+  if (!exitHookInstalled) {
+    exitHookInstalled = true;
+    process.on('exit', () => {
+      for (const [p, k] of liveGroups) {
+        try {
+          k(p, 'SIGKILL');
+        } catch {
+          // already gone
+        }
+      }
+    });
+  }
+  liveGroups.set(pid, kill);
+}
 
 export interface CloneJobStatus {
   state: 'running' | 'done' | 'failed';
@@ -178,6 +217,15 @@ export interface CloneJobsDeps {
   timeoutMs?: number;
   /** Between SIGTERM and SIGKILL on the timeout. */
   killGraceMs?: number;
+  /** After git exits, how long its pipes may stay open. */
+  closeGraceMs?: number;
+  /**
+   * Test only: signals a process group. A fake child with a `pid` must come
+   * with this, or the real `process.kill(-pid)` would run.
+   */
+  killGroup?: CloneGroupKiller;
+  /** Test only: whether to spawn detached and signal the group. */
+  processGroups?: boolean;
   maxConcurrent?: number;
   /** Base environment for git; `process.env` by default. */
   env?: NodeJS.ProcessEnv;
@@ -277,6 +325,9 @@ export class CloneJobs {
   private readonly now: () => number;
   private readonly timeoutMs: number;
   private readonly killGraceMs: number;
+  private readonly closeGraceMs: number;
+  private readonly killGroup: CloneGroupKiller;
+  private readonly processGroups: boolean;
   private readonly maxConcurrent: number;
   private readonly env: NodeJS.ProcessEnv | undefined;
   private readonly urlFor: (ref: RepoRef) => string;
@@ -293,6 +344,9 @@ export class CloneJobs {
     this.now = deps.now ?? Date.now;
     this.timeoutMs = deps.timeoutMs ?? CLONE_TIMEOUT_MS;
     this.killGraceMs = deps.killGraceMs ?? CLONE_KILL_GRACE_MS;
+    this.closeGraceMs = deps.closeGraceMs ?? CLONE_CLOSE_GRACE_MS;
+    this.killGroup = deps.killGroup ?? defaultGroupKiller;
+    this.processGroups = deps.processGroups ?? process.platform !== 'win32';
     this.maxConcurrent = deps.maxConcurrent ?? CLONE_MAX_CONCURRENT;
     this.env = deps.env;
     this.urlFor = deps.urlFor ?? repoUrl;
@@ -434,13 +488,37 @@ export class CloneJobs {
       let exitCode: number | null = null;
       let killTimer: NodeJS.Timeout | undefined;
       let closeTimer: NodeJS.Timeout | undefined;
-      let child: CloneChild;
-      const finish = (spawnError?: string) => {
+      let child: CloneChild | undefined;
+      let group: number | undefined;
+      /** The whole group when there is one, else the child alone. */
+      const signal = (sig: NodeJS.Signals) => {
+        if (group !== undefined) {
+          try {
+            this.killGroup(group, sig);
+            return;
+          } catch {
+            // the group is gone; the child alone below
+          }
+        }
+        try {
+          child?.kill(sig);
+        } catch {
+          // already gone
+        }
+      };
+      /**
+       * `killRest`: git has exited but something of its group may be left
+       * (pipes still open, or the timeout fired), so the group is killed
+       * before the job lets go of its slot and folder.
+       */
+      const finish = (spawnError?: string, killRest = false) => {
         if (done) return;
         done = true;
         clearTimeout(timer);
         clearTimeout(killTimer);
         clearTimeout(closeTimer);
+        if (killRest || timedOut) signal('SIGKILL');
+        if (group !== undefined) liveGroups.delete(group);
         outBuf.end();
         errBuf.end();
         settle({
@@ -451,25 +529,25 @@ export class CloneJobs {
       };
       const timer = setTimeout(() => {
         timedOut = true;
-        try {
-          child.kill('SIGTERM');
-        } catch {
-          // already gone
-        }
-        killTimer = setTimeout(() => {
-          try {
-            child.kill('SIGKILL');
-          } catch {
-            // already gone
-          }
-        }, this.killGraceMs);
+        signal('SIGTERM');
+        killTimer = setTimeout(() => signal('SIGKILL'), this.killGraceMs);
       }, this.timeoutMs);
       try {
         child = this.spawner(program, cloneArgs(url, dest), {
           env: cloneEnv(base, token),
+          detached: this.processGroups,
           windowsHide: true,
           stdio: ['ignore', 'pipe', 'pipe'],
         });
+        // Never unref: the gateway keeps its clones as its own children.
+        if (
+          this.processGroups &&
+          typeof child.pid === 'number' &&
+          child.pid > 0
+        ) {
+          group = child.pid;
+          trackGroup(group, this.killGroup);
+        }
       } catch (e) {
         const code = (e as NodeJS.ErrnoException | undefined)?.code;
         finish(typeof code === 'string' ? code : 'ERR_SPAWN');
@@ -493,7 +571,10 @@ export class CloneJobs {
       });
       child.on('exit', (code) => {
         exitCode = code;
-        closeTimer = setTimeout(() => finish(), CLOSE_GRACE_MS);
+        closeTimer = setTimeout(
+          () => finish(undefined, true),
+          this.closeGraceMs,
+        );
       });
       child.on('close', (code) => {
         if (exitCode === null) exitCode = code;

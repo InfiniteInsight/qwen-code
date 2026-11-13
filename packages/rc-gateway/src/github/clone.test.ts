@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
 import {
   existsSync,
@@ -79,6 +79,39 @@ function bareRepo(env: NodeJS.ProcessEnv): string {
   return bare;
 }
 
+/** Live (not zombie) processes in group `pgid`, from /proc. */
+function groupMembers(pgid: number): number[] {
+  const out: number[] = [];
+  for (const name of readdirSync('/proc')) {
+    if (!/^\d+$/.test(name)) continue;
+    let stat: string;
+    try {
+      stat = readFileSync(`/proc/${name}/stat`, 'utf8');
+    } catch {
+      continue;
+    }
+    // Fields after the parenthesised command: state, ppid, pgrp, ...
+    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    if (Number(rest[2]) === pgid && rest[0] !== 'Z') out.push(Number(name));
+  }
+  return out;
+}
+
+/** Processes of this user whose environment holds the test token. */
+function processesHoldingToken(): number[] {
+  const out: number[] = [];
+  for (const name of readdirSync('/proc')) {
+    if (!/^\d+$/.test(name) || Number(name) === process.pid) continue;
+    try {
+      const env = readFileSync(`/proc/${name}/environ`);
+      if (env.includes(`QWEN_RC_GIT_TOKEN=${TOKEN}`)) out.push(Number(name));
+    } catch {
+      // not ours or gone
+    }
+  }
+  return out;
+}
+
 async function waitDone(
   jobs: CloneJobs,
   jobId: string,
@@ -103,8 +136,17 @@ class FakeChild extends EventEmitter implements CloneChild {
   readonly stdout = new PassThrough();
   readonly stderr = new PassThrough();
   readonly signals: string[] = [];
+  /** Signals sent to the child's whole process group. */
+  readonly groupSignals: string[] = [];
   /** Called on each kill; exit from here to obey the signal. */
   onKill?: (signal: string) => void;
+  /** Called on each group signal. */
+  onGroupKill?: (signal: string) => void;
+
+  /** Set only by a group spawner, whose `killGroup` must go to CloneJobs. */
+  constructor(readonly pid?: number) {
+    super();
+  }
 
   kill(signal: NodeJS.Signals = 'SIGTERM'): boolean {
     this.signals.push(signal);
@@ -120,6 +162,11 @@ class FakeChild extends EventEmitter implements CloneChild {
     this.emit('exit', code, signal);
     this.emit('close', code, signal);
   }
+
+  /** git exits but a helper still holds its pipes: `close` never fires. */
+  exitLeavingPipes(code: number | null, signal: NodeJS.Signals | null = null) {
+    this.emit('exit', code, signal);
+  }
 }
 
 interface SpawnCall {
@@ -128,18 +175,35 @@ interface SpawnCall {
   env: NodeJS.ProcessEnv;
 }
 
-function fakeSpawner(script: (child: FakeChild, call: SpawnCall) => void) {
+/**
+ * With `groups`, each child gets a fake pid and `killGroup` routes group
+ * signals to it; pass both `spawn: f.fn` and `killGroup: f.killGroup`.
+ */
+function fakeSpawner(
+  script: (child: FakeChild, call: SpawnCall) => void,
+  groups = false,
+) {
   const calls: SpawnCall[] = [];
   const children: FakeChild[] = [];
+  const detached: boolean[] = [];
+  const killGroup = (pid: number, sig: NodeJS.Signals) => {
+    const child = children.find((c) => c.pid === pid);
+    if (!child) throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+    child.groupSignals.push(sig);
+    child.onGroupKill?.(sig);
+  };
   const fn: CloneSpawner = (program, args, options) => {
-    const child = new FakeChild();
+    const child = new FakeChild(
+      groups ? 4_000_000 + children.length : undefined,
+    );
+    detached.push(options.detached);
     const call = { program, args, env: options.env };
     calls.push(call);
     children.push(child);
     setImmediate(() => script(child, call));
     return child;
   };
-  return { fn, calls, children };
+  return { fn, calls, children, detached, killGroup };
 }
 
 function freshDest(): string {
@@ -287,6 +351,57 @@ describe('CloneJobs with real git', () => {
       server.close();
     }
   });
+
+  it.skipIf(process.platform !== 'linux')(
+    'a stalled clone that times out leaves no process of its group behind',
+    async () => {
+      // Accepts and never answers, so git remote-http waits on the socket.
+      const server = createServer(() => {});
+      server.listen(0, '127.0.0.1');
+      await once(server, 'listening');
+      try {
+        const port = (server.address() as AddressInfo).port;
+        const pids: number[] = [];
+        const spawnReal: CloneSpawner = (program, args, options) => {
+          const c = spawn(program, [...args], options);
+          if (c.pid) pids.push(c.pid);
+          return c;
+        };
+        const jobs = new CloneJobs({
+          spawn: spawnReal,
+          env: gitEnv(),
+          urlFor: () => `http://127.0.0.1:${port}/acme/widget.git`,
+          timeoutMs: 1500,
+          killGraceMs: 300,
+        });
+        const id = jobIdOf(
+          await jobs.start({
+            ref: REF,
+            dest: freshDest(),
+            token: TOKEN,
+            account: ACCOUNT,
+          }),
+        );
+        await vi.waitFor(() => expect(pids).toHaveLength(1), { timeout: 3000 });
+        const pgid = pids[0]!;
+        // The helpers exist in the group while the clone stalls.
+        await vi.waitFor(
+          () => expect(groupMembers(pgid).length).toBeGreaterThan(1),
+          { timeout: 3000 },
+        );
+        const s = await waitDone(jobs, id);
+        expect(s.state).toBe('failed');
+        expect(s.error).toBe('timed out after 1500 ms');
+        await vi.waitFor(() => expect(groupMembers(pgid)).toEqual([]), {
+          timeout: 3000,
+        });
+        expect(processesHoldingToken()).toEqual([]);
+      } finally {
+        server.closeAllConnections();
+        server.close();
+      }
+    },
+  );
 
   it('the token helper answers github.com and nothing else', () => {
     const env = cloneEnv(gitEnv(), TOKEN);
@@ -451,7 +566,8 @@ describe('CloneJobs output and failures', () => {
       await vi.advanceTimersByTimeAsync(1_000);
       expect(f.children[0]!.signals).toEqual(['SIGTERM']);
       await vi.advanceTimersByTimeAsync(30);
-      expect(f.children[0]!.signals).toEqual(['SIGTERM', 'SIGKILL']);
+      // The second SIGKILL is the sweep when the timed-out job finishes.
+      expect(f.children[0]!.signals).toEqual(['SIGTERM', 'SIGKILL', 'SIGKILL']);
       vi.useRealTimers();
       const s = await waitDone(jobs, id);
       expect(s.state).toBe('failed');
@@ -460,6 +576,112 @@ describe('CloneJobs output and failures', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('the timeout signals the whole process group, SIGTERM then SIGKILL', async () => {
+    const f = fakeSpawner((c) => {
+      c.stderr.write("Cloning into 'widget'...\n");
+      c.onGroupKill = (sig) => {
+        if (sig === 'SIGKILL') void c.exit(null, 'SIGKILL');
+      };
+    }, true);
+    const jobs = new CloneJobs({
+      spawn: f.fn,
+      killGroup: f.killGroup,
+      processGroups: true,
+      env: gitEnv(),
+      timeoutMs: 60_000,
+      killGraceMs: 30,
+    });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const id = jobIdOf(
+        await jobs.start({
+          ref: REF,
+          dest: freshDest(),
+          token: TOKEN,
+          account: ACCOUNT,
+        }),
+      );
+      while (f.children.length < 1) {
+        await new Promise((r) => setImmediate(r));
+      }
+      expect(f.detached).toEqual([true]);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(f.children[0]!.groupSignals).toEqual(['SIGTERM']);
+      await vi.advanceTimersByTimeAsync(30);
+      // The second SIGKILL is the sweep when the timed-out job finishes.
+      expect(f.children[0]!.groupSignals).toEqual([
+        'SIGTERM',
+        'SIGKILL',
+        'SIGKILL',
+      ]);
+      expect(f.children[0]!.signals).toEqual([]);
+      vi.useRealTimers();
+      const s = await waitDone(jobs, id);
+      expect(s.state).toBe('failed');
+      expect(s.error).toBe('timed out after 1 minute');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a git that exits while a helper holds its pipes has its group killed before the slot frees', async () => {
+    const f = fakeSpawner((c) => {
+      c.stderr.write('fatal: early EOF\n');
+      c.exitLeavingPipes(128);
+    }, true);
+    const jobs = new CloneJobs({
+      spawn: f.fn,
+      killGroup: f.killGroup,
+      processGroups: true,
+      env: gitEnv(),
+      closeGraceMs: 50,
+      maxConcurrent: 1,
+    });
+    const dest = freshDest();
+    const id = jobIdOf(
+      await jobs.start({ ref: REF, dest, token: TOKEN, account: ACCOUNT }),
+    );
+    while (f.children.length < 1) {
+      await new Promise((r) => setImmediate(r));
+    }
+    await new Promise((r) => setTimeout(r, 10));
+    expect(jobs.status(id)!.state).toBe('running');
+    expect(
+      await jobs.start({
+        ref: REF,
+        dest: freshDest(),
+        token: TOKEN,
+        account: ACCOUNT,
+      }),
+    ).toMatchObject({ code: 'too_many_clones' });
+    const s = await waitDone(jobs, id);
+    expect(f.children[0]!.groupSignals).toEqual(['SIGKILL']);
+    expect(s.state).toBe('failed');
+    expect(s.exitCode).toBe(128);
+    expect(s.error).toBe('fatal: early EOF');
+  });
+
+  it('without process groups the child alone is signalled and not detached', async () => {
+    const f = fakeSpawner((c) => void c.exit(1));
+    const jobs = new CloneJobs({
+      spawn: f.fn,
+      env: gitEnv(),
+      processGroups: false,
+    });
+    await waitDone(
+      jobs,
+      jobIdOf(
+        await jobs.start({
+          ref: REF,
+          dest: freshDest(),
+          token: TOKEN,
+          account: ACCOUNT,
+        }),
+      ),
+    );
+    expect(f.detached).toEqual([false]);
   });
 
   it('the default timeout says 10 minutes', () => {
