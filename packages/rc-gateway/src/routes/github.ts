@@ -14,6 +14,7 @@ import {
   GitHubCredentialError,
   GitHubCredentials,
   OAuthTokenStore,
+  OAuthTokenStoreError,
   createGhRunner,
 } from '../github/credentials.js';
 import type { GhRunner, GitHubAccount } from '../github/credentials.js';
@@ -41,6 +42,10 @@ import { scrubSecrets } from '../github/scrub.js';
  * - `GET /rc/github/accounts` -> `{ accounts, oauthConfigured,
  *   oauthConfigPath }`, plus `ghError` when gh could not list its logins. A gh
  *   login gh reports as failing or timed out carries its `error`.
+ *   `oauthConfigError` says why the client id at boot was not usable, and
+ *   `oauthStoreError` why the OAuth token store was refused; with the latter
+ *   `oauthConfigured` is false, Connect and Forget answer
+ *   `409 oauth_store_refused`, and gh logins work as before.
  * - `GET /rc/github/repos?account=<id>&q=<text>` -> `{ repos, truncated }`.
  * - `POST /rc/github/oauth/start` -> `{ flowId, userCode, verificationUri,
  *   expiresIn }`.
@@ -99,6 +104,16 @@ export interface GitHubRouteDeps {
   fetch: typeof globalThis.fetch;
   /** Where the owner puts `{ "clientId": "..." }`. */
   oauthConfigPath: string;
+  /**
+   * Why the client id read at boot was not used: the path and the cause,
+   * never the file's contents or the id.
+   */
+  oauthConfigError?: string;
+  /**
+   * Why the OAuth token store refused its file, scrubbed. While set, nothing
+   * is stored or forgotten and no device flow starts.
+   */
+  oauthStoreError?: string;
   /** Test only: the clock of the start window and the account cache. */
   now?: () => number;
 }
@@ -210,9 +225,16 @@ export function createGitHubRoutes(
       const status = await freshAccounts();
       res.json({
         accounts: status.accounts,
-        oauthConfigured: deps.flows.configured(),
+        oauthConfigured:
+          deps.flows.configured() && deps.oauthStoreError === undefined,
         oauthConfigPath: deps.oauthConfigPath,
         ...(status.ghError !== undefined ? { ghError: status.ghError } : {}),
+        ...(deps.oauthConfigError !== undefined
+          ? { oauthConfigError: deps.oauthConfigError }
+          : {}),
+        ...(deps.oauthStoreError !== undefined
+          ? { oauthStoreError: deps.oauthStoreError }
+          : {}),
       });
     } catch {
       fail(res, 500, 'github_failed', 'The GitHub accounts could not be read');
@@ -250,8 +272,21 @@ export function createGitHubRoutes(
     }
   };
 
+  /** 409 oauth_store_refused, when the token store was refused at boot. */
+  const storeRefused = (res: Response): boolean => {
+    if (deps.oauthStoreError === undefined) return false;
+    fail(
+      res,
+      409,
+      'oauth_store_refused',
+      `GitHub connect is off because the token store was refused: ${deps.oauthStoreError}`,
+    );
+    return true;
+  };
+
   const oauthStart: RequestHandler = async (req, res) => {
     try {
+      if (storeRefused(res)) return;
       if (!deps.flows.configured()) {
         fail(
           res,
@@ -343,6 +378,7 @@ export function createGitHubRoutes(
         );
         return;
       }
+      if (source === 'oauth' && storeRefused(res)) return;
       const stored =
         source === 'oauth' && typeof login === 'string'
           ? deps.store.list().find((a) => a.login === login)
@@ -491,22 +527,26 @@ export function createGitHubRoutes(
  * The OAuth client id: `QWEN_RC_GITHUB_CLIENT_ID` when set, else the
  * `clientId` of the file at `path`. A missing file is no client id, said
  * nowhere. A file that cannot be read or is malformed is no client id too,
- * with one log line naming the path and the cause, never the contents.
+ * with one log line naming the path and the cause, never the contents; the
+ * same reason comes back as `error` for the accounts answer.
  */
 export async function readGitHubClientId(
   path: string,
   env: NodeJS.ProcessEnv,
   log: (line: string) => void,
-): Promise<{ clientId?: string; source?: 'env' | 'file' }> {
+): Promise<{ clientId?: string; source?: 'env' | 'file'; error?: string }> {
+  const refused = (error: string) => {
+    log(`github clone: ${error}`);
+    return { error };
+  };
   const fromEnv = env[GITHUB_CLIENT_ID_ENV];
   if (typeof fromEnv === 'string' && fromEnv.trim() !== '') {
     if (CLIENT_ID_SHAPE.test(fromEnv.trim())) {
       return { clientId: fromEnv.trim(), source: 'env' };
     }
-    log(
-      `github clone: ${GITHUB_CLIENT_ID_ENV} is not a valid client id (letters, digits, . _ - up to 64); OAuth connect is off`,
+    return refused(
+      `${GITHUB_CLIENT_ID_ENV} is not a valid client id (letters, digits, . _ - up to 64); OAuth connect is off`,
     );
-    return {};
   }
   let text: string;
   try {
@@ -514,8 +554,8 @@ export async function readGitHubClientId(
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
     if (code !== 'ENOENT') {
-      log(
-        `github clone: cannot read ${path} (${code ?? 'error'}); OAuth connect is off`,
+      return refused(
+        `cannot read ${path} (${code ?? 'error'}); OAuth connect is off`,
       );
     }
     return {};
@@ -524,31 +564,49 @@ export async function readGitHubClientId(
   try {
     raw = JSON.parse(text) as unknown;
   } catch {
-    log(`github clone: ${path} is not valid JSON; OAuth connect is off`);
-    return {};
+    return refused(`${path} is not valid JSON; OAuth connect is off`);
   }
   const id =
     raw && typeof raw === 'object' && !Array.isArray(raw)
       ? (raw as Record<string, unknown>)['clientId']
       : undefined;
   if (typeof id !== 'string') {
-    log(`github clone: ${path} has no "clientId" string; OAuth connect is off`);
-    return {};
+    return refused(`${path} has no "clientId" string; OAuth connect is off`);
   }
   if (!CLIENT_ID_SHAPE.test(id)) {
-    log(
-      `github clone: the "clientId" in ${path} is not a valid client id (letters, digits, . _ - up to 64); OAuth connect is off`,
+    return refused(
+      `the "clientId" in ${path} is not a valid client id (letters, digits, . _ - up to 64); OAuth connect is off`,
     );
-    return {};
   }
   return { clientId: id, source: 'file' };
 }
 
 /**
+ * Stands in for a token store that refused its file: it holds no logins,
+ * and a write or a forget throws the refusal. The routes answer
+ * `oauth_store_refused` before reaching it; this only keeps a stray call
+ * from touching the refused file.
+ */
+function refusedTokenStore(
+  reason: string,
+): Pick<OAuthTokenStore, 'list' | 'token' | 'put' | 'forget'> {
+  const refuse = async (): Promise<never> => {
+    throw new OAuthTokenStoreError(reason);
+  };
+  return {
+    list: () => [],
+    token: () => undefined,
+    put: refuse,
+    forget: refuse,
+  };
+}
+
+/**
  * Builds the one set of GitHub clone pieces a gateway uses: the token store
  * at `<rcDir>/github-oauth-tokens.json`, the gh runner, the device flows and
- * the clone jobs. Undefined (the routes stay unmounted) only when the token
- * store refuses its file, which is logged in one line. Nothing here runs gh
+ * the clone jobs. When the token store refuses its file the routes still
+ * mount with `oauthStoreError` set: gh logins list and clone, and OAuth
+ * connect is off with that reason, logged in one line. Nothing here runs gh
  * or asks GitHub.
  */
 export async function openGitHubDeps(opts: {
@@ -564,25 +622,26 @@ export async function openGitHubDeps(opts: {
     clearTimeout?: TimerClear;
     now?: () => number;
   };
-}): Promise<GitHubRouteDeps | undefined> {
+}): Promise<GitHubRouteDeps> {
   const oauthConfigPath = join(opts.rcDir, GITHUB_OAUTH_CONFIG_FILE);
   const tokensPath = join(opts.rcDir, GITHUB_OAUTH_TOKENS_FILE);
-  let store: OAuthTokenStore;
+  let store: Pick<OAuthTokenStore, 'list' | 'token' | 'put' | 'forget'>;
+  let oauthStoreError: string | undefined;
   try {
     store = await OAuthTokenStore.open(tokensPath, { log: opts.log });
   } catch (e) {
-    opts.log(`github clone: off: ${scrubSecrets(errText(e), [])}`);
-    return undefined;
+    oauthStoreError = scrubSecrets(errText(e), []);
+    store = refusedTokenStore(oauthStoreError);
   }
-  const { clientId, source } = await readGitHubClientId(
-    oauthConfigPath,
-    opts.env,
-    opts.log,
-  );
+  const {
+    clientId,
+    source,
+    error: oauthConfigError,
+  } = await readGitHubClientId(oauthConfigPath, opts.env, opts.log);
   const fetchFn = opts.fetch ?? globalThis.fetch;
   const flowEnds = new DeviceFlowEndRelay();
   const flows = new DeviceFlows({
-    clientId,
+    clientId: oauthStoreError === undefined ? clientId : undefined,
     fetch: fetchFn,
     store,
     onEnd: flowEnds.emit,
@@ -594,9 +653,11 @@ export async function openGitHubDeps(opts: {
   });
   const clones = new CloneJobs({ env: opts.env, ...opts.clones });
   opts.log(
-    clientId !== undefined
-      ? `github clone: on; OAuth connect on (client id from ${source === 'env' ? GITHUB_CLIENT_ID_ENV : oauthConfigPath})`
-      : `github clone: on; OAuth connect off (no client id in ${oauthConfigPath})`,
+    oauthStoreError !== undefined
+      ? `github clone: on; OAuth connect off: ${oauthStoreError}`
+      : clientId !== undefined
+        ? `github clone: on; OAuth connect on (client id from ${source === 'env' ? GITHUB_CLIENT_ID_ENV : oauthConfigPath})`
+        : `github clone: on; OAuth connect off (no client id in ${oauthConfigPath})`,
   );
   return {
     credentials,
@@ -606,5 +667,7 @@ export async function openGitHubDeps(opts: {
     clones,
     fetch: fetchFn,
     oauthConfigPath,
+    ...(oauthConfigError !== undefined ? { oauthConfigError } : {}),
+    ...(oauthStoreError !== undefined ? { oauthStoreError } : {}),
   };
 }

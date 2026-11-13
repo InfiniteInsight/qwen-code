@@ -15,7 +15,13 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { EventEmitter, once } from 'node:events';
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -204,6 +210,10 @@ interface BootOpts {
   spawner?: ReturnType<typeof fakeSpawner>;
   now?: () => number;
   mount?: boolean;
+  /** Raw text for github-oauth.json, in place of `clientId`. */
+  oauthFile?: string;
+  /** A group/world-writable token file, so the store refuses it. */
+  refuseStore?: boolean;
 }
 
 async function boot(o: BootOpts = {}) {
@@ -215,6 +225,14 @@ async function boot(o: BootOpts = {}) {
       join(rcDir, 'github-oauth.json'),
       JSON.stringify({ clientId: o.clientId }),
     );
+  }
+  if (o.oauthFile !== undefined) {
+    writeFileSync(join(rcDir, 'github-oauth.json'), o.oauthFile);
+  }
+  if (o.refuseStore) {
+    const tokens = join(rcDir, 'github-oauth-tokens.json');
+    writeFileSync(tokens, '{}');
+    chmodSync(tokens, 0o666);
   }
   const fetchFake = o.fetch ?? fakeFetch();
   const runner = o.runner ?? fakeRunner();
@@ -239,11 +257,13 @@ async function boot(o: BootOpts = {}) {
   if (!deps) throw new Error('github deps did not open');
   if (o.now) deps.now = o.now;
   github = deps;
-  await (
-    deps.store as unknown as {
-      put(l: string, t: string, s: string[]): Promise<void>;
-    }
-  ).put('octo-oauth', OAUTH_TOKEN, ['repo']);
+  if (!o.refuseStore) {
+    await (
+      deps.store as unknown as {
+        put(l: string, t: string, s: string[]): Promise<void>;
+      }
+    ).put('octo-oauth', OAUTH_TOKEN, ['repo']);
+  }
   stub = await startStubDaemon();
   const store = await TokenStore.open(join(runtimeBase, 'tokens.json'));
   const { token: owner } = await store.issue(['owner'], 'o');
@@ -902,12 +922,12 @@ describe('boot config', () => {
     ]) {
       writeFileSync(path, text);
       const logs: string[] = [];
-      expect(await readGitHubClientId(path, {}, (l) => logs.push(l))).toEqual(
-        {},
-      );
+      const r = await readGitHubClientId(path, {}, (l) => logs.push(l));
       expect(logs).toHaveLength(1);
       expect(logs[0]).toContain(path);
       expect(logs[0]).not.toContain('secretish');
+      // The same reason, for the accounts answer, and no client id.
+      expect(r).toEqual({ error: logs[0]!.replace(/^github clone: /, '') });
     }
   });
 
@@ -932,15 +952,18 @@ describe('boot config', () => {
     expect(logs[0]).toContain('OAuth connect off');
   });
 
-  it('stays unmounted when the token store refuses its file', async () => {
+  it('opens with the store marked refused when the token store refuses its file', async () => {
     const d = await dir();
     const rcDir = join(d, 'rc');
     mkdirSync(rcDir, { mode: 0o700 });
     writeFileSync(join(rcDir, 'github-oauth-tokens.json'), '{}', {
       mode: 0o666,
     });
-    const { chmodSync } = await import('node:fs');
     chmodSync(join(rcDir, 'github-oauth-tokens.json'), 0o666);
+    writeFileSync(
+      join(rcDir, 'github-oauth.json'),
+      JSON.stringify({ clientId: CLIENT_ID }),
+    );
     const logs: string[] = [];
     const deps = await openGitHubDeps({
       rcDir,
@@ -949,9 +972,92 @@ describe('boot config', () => {
       fetch: fakeFetch().fn,
       run: fakeRunner().run,
     });
-    expect(deps).toBeUndefined();
+    expect(deps.oauthStoreError).toContain('writable');
+    // A client id alone does not turn connect on over a refused store.
+    expect(deps.flows.configured()).toBe(false);
     expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain('OAuth connect off');
     expect(logs[0]).toContain('writable');
+  });
+});
+
+describe('OAuth setup reasons in the accounts answer', () => {
+  it('a malformed github-oauth.json is said in oauthConfigError, path and cause, never the contents', async () => {
+    const g = await boot({ oauthFile: '{"clientId": "Iv1.secretish' });
+    const a = await call(`${g.url}/rc/github/accounts`, g.owner);
+    expect(a.status).toBe(200);
+    expect(a.body!['oauthConfigured']).toBe(false);
+    expect(a.body!['oauthConfigError']).toBe(
+      `${join(g.rcDir, 'github-oauth.json')} is not valid JSON; OAuth connect is off`,
+    );
+    expect(a.text).not.toContain('secretish');
+  });
+
+  it('a client id of the wrong shape is said in oauthConfigError without the id', async () => {
+    const bad = await boot({
+      oauthFile: JSON.stringify({ clientId: 'bad id secretish' }),
+    });
+    const b = await call(`${bad.url}/rc/github/accounts`, bad.owner);
+    expect(String(b.body!['oauthConfigError'])).toMatch(
+      /"clientId" in .* is not a valid client id/,
+    );
+    expect(b.text).not.toContain('secretish');
+  });
+
+  it('a configured gateway has neither reason', async () => {
+    const g = await boot({ clientId: CLIENT_ID });
+    const a = await call(`${g.url}/rc/github/accounts`, g.owner);
+    expect(a.body!['oauthConfigured']).toBe(true);
+    expect(a.body).not.toHaveProperty('oauthConfigError');
+    expect(a.body).not.toHaveProperty('oauthStoreError');
+  });
+
+  it('a refused token store mounts the routes: gh logins list and clone, connect and forget are 409 oauth_store_refused', async () => {
+    const spawner = fakeSpawner((c) => void c.exit(0));
+    const g = await boot({ clientId: CLIENT_ID, refuseStore: true, spawner });
+    const caps = await call(`${g.url}/rc/capabilities`, g.owner);
+    expect(
+      (caps.body!['remoteControl'] as Record<string, unknown>)['githubClone'],
+    ).toBe(true);
+    const a = await call(`${g.url}/rc/github/accounts`, g.owner);
+    expect(a.status).toBe(200);
+    expect(
+      (a.body!['accounts'] as Array<{ id: string }>).map((x) => x.id),
+    ).toEqual(['gh:octocat', 'gh:stale-user']);
+    expect(a.body!['oauthConfigured']).toBe(false);
+    expect(String(a.body!['oauthStoreError'])).toContain('writable');
+    const start = await call(
+      `${g.url}/rc/github/oauth/start`,
+      g.owner,
+      'POST',
+      {},
+    );
+    expect(start.status).toBe(409);
+    expect(start.body!['code']).toBe('oauth_store_refused');
+    expect(String(start.body!['error'])).toContain('writable');
+    expect(g.fetch.calls).toEqual([]);
+    const forget = await call(
+      `${g.url}/rc/github/accounts/oauth/octo-oauth`,
+      g.owner,
+      'DELETE',
+    );
+    expect(forget.status).toBe(409);
+    expect(forget.body!['code']).toBe('oauth_store_refused');
+    const gh = await call(
+      `${g.url}/rc/github/accounts/gh/octocat`,
+      g.owner,
+      'DELETE',
+    );
+    expect(gh.status).toBe(400);
+    const c = await call(`${g.url}/rc/github/clone`, g.owner, 'POST', {
+      account: 'gh:octocat',
+      repo: 'octocat/hello',
+      dest: await freshDest(),
+    });
+    expect(c.status).toBe(202);
+    for (const secret of SECRETS) {
+      expect(a.text + start.text + forget.text + c.text).not.toContain(secret);
+    }
   });
 });
 

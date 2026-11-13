@@ -699,9 +699,12 @@ function parseStored(value: unknown): StoredAccount | undefined {
  */
 export class GitHubCredentials {
   private readonly run: GhRunner;
-  private readonly store: OAuthTokenStore;
+  private readonly store: Pick<OAuthTokenStore, 'list' | 'token'>;
 
-  constructor(deps: { run: GhRunner; store: OAuthTokenStore }) {
+  constructor(deps: {
+    run: GhRunner;
+    store: Pick<OAuthTokenStore, 'list' | 'token'>;
+  }) {
     this.run = deps.run;
     this.store = deps.store;
   }
