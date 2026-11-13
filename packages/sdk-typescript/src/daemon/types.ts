@@ -1830,6 +1830,58 @@ export interface DaemonSubagentSessionResolution {
   cachedTokens?: number;
 }
 
+/**
+ * Why the daemon refused to resume or abandon a subagent. Mirrors
+ * `ServeSubagentControlRefusalCode` in `packages/acp-bridge/src/status.ts`
+ * (kept in sync by `types-sync.ts`).
+ */
+export type DaemonSubagentControlRefusalCode =
+  | 'agent_not_found'
+  | 'not_paused'
+  | 'resume_blocked'
+  | 'metadata_missing'
+  | 'metadata_unreadable'
+  | 'transcript_missing'
+  | 'capacity_full'
+  | 'resume_failed'
+  | 'unsupported';
+
+/** The child's answer to a resume, as `ServeSubagentResumeResult`. */
+export type DaemonSubagentResumeOutcome =
+  | { outcome: 'resumed'; status: 'running' }
+  | {
+      outcome: 'refused';
+      code: DaemonSubagentControlRefusalCode;
+      /** A sentence naming the cause, fit to show the user. */
+      reason: string;
+      status?: string;
+    };
+
+/** The child's answer to an abandon, as `ServeSubagentAbandonResult`. */
+export type DaemonSubagentAbandonOutcome =
+  | { outcome: 'abandoned'; status: 'cancelled' }
+  | {
+      outcome: 'refused';
+      code: DaemonSubagentControlRefusalCode;
+      reason: string;
+      status?: string;
+    };
+
+/** Which subagent a resume or abandon answer is about. */
+export interface DaemonSubagentControlTarget {
+  sessionId: string;
+  subagentRef: string;
+  taskId: string;
+}
+
+/** Response of `POST /session/:id/subagents/:subagentRef/resume`. */
+export type DaemonSubagentResumeResult = DaemonSubagentControlTarget &
+  DaemonSubagentResumeOutcome;
+
+/** Response of `POST /session/:id/subagents/:subagentRef/abandon`. */
+export type DaemonSubagentAbandonResult = DaemonSubagentControlTarget &
+  DaemonSubagentAbandonOutcome;
+
 export type DaemonSessionArchiveState = 'active' | 'archived';
 
 export type DaemonSessionGroupPresetColor =

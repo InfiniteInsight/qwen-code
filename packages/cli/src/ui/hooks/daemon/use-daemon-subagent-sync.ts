@@ -9,12 +9,18 @@
  * `BackgroundTaskRegistry` so `--attach-daemon` tabs (e.g. `qwen-rc attach` WSL
  * tabs) populate `LiveAgentPanel`, `BackgroundTasksPill`, and
  * `BackgroundTasksDialog` with live subagent tool calls, speech (`Saying:`),
- * thoughts (`Thinking:`), and interactive controls (cancel + message).
+ * thoughts (`Thinking:`), and interactive controls (cancel, message, resume,
+ * abandon). Each mirrored entry carries a `remoteControl` so resume and
+ * abandon act on the daemon's agent, never on this process's resume service,
+ * which has no sidecar for a mirrored entry (#259).
  */
 
 import { useCallback, useEffect, useRef } from 'react';
+import { MAX_RETAINED_TERMINAL_AGENTS } from '@qwen-code/qwen-code-core/agents/background-tasks.js';
 import {
   type AgentTask,
+  type AgentTaskRemoteActionResult,
+  type AgentTaskRemoteControl,
   type BackgroundAgentMessage,
   type Config,
 } from '@qwen-code/qwen-code-core';
@@ -91,6 +97,13 @@ export type DaemonAnyTaskSnapshot =
   | DaemonShellTaskSnapshot
   | DaemonMonitorTaskSnapshot;
 
+/** The part of a daemon resume / abandon answer the mirror reads. */
+export interface DaemonSubagentControlAnswer {
+  outcome: string;
+  code?: string;
+  reason?: string;
+}
+
 export interface DaemonSubagentSyncDriver {
   readonly session?: { readonly sessionId?: string };
   readonly client?: {
@@ -103,6 +116,15 @@ export interface DaemonSubagentSyncDriver {
       agentId: string,
       message: string,
     ) => Promise<unknown>;
+    resumeSubagentSession?: (
+      parentSessionId: string,
+      agentId: string,
+      message?: string,
+    ) => Promise<DaemonSubagentControlAnswer>;
+    abandonSubagentSession?: (
+      parentSessionId: string,
+      agentId: string,
+    ) => Promise<DaemonSubagentControlAnswer>;
   };
   agents?: (
     signal?: AbortSignal,
@@ -192,6 +214,24 @@ function describeToolUpdate(update: RawSessionUpdate): {
   return { name, description: descCandidate };
 }
 
+function describeControlFailure(error: unknown): string {
+  return error instanceof Error && error.message
+    ? error.message
+    : String(error);
+}
+
+/** The daemon's refusal as the mirror reports it, naming its cause. */
+function refusalFrom(
+  answer: DaemonSubagentControlAnswer | undefined,
+  fallback: string,
+): AgentTaskRemoteActionResult {
+  return {
+    ok: false,
+    ...(answer?.code ? { code: answer.code } : {}),
+    reason: answer?.reason || fallback,
+  };
+}
+
 function flushStreamingBuffersToMessages(entry: AgentTask, now: number): void {
   const thought = entry.liveThought?.trim();
   if (thought) {
@@ -228,9 +268,73 @@ export function useDaemonSubagentSync(
 ): (frame: DaemonFrame) => void {
   const syncingAbortIdsRef = useRef(new Set<string>());
   const residentLoopsRef = useRef(new Set<string>());
+  // Abort controllers already forwarding cancel to the daemon: a resumed
+  // agent flips back to running on the same entry, and a second listener
+  // would cancel it twice.
+  const cancelWiredRef = useRef(new WeakSet<AbortController>());
+  // Agents abandoned from this tab. A roster fetched before the daemon
+  // applied the abandon must not bring one back.
+  const abandonedIdsRef = useRef(new Set<string>());
   const mountedRef = useRef(true);
   const refreshInFlightRef = useRef<Promise<void> | null>(null);
   const refreshQueuedRef = useRef(false);
+  // `refreshAgents` is declared below and depends on `reconcileTasks`, which
+  // builds the remote controls; the controls reach it through this ref.
+  const refreshAgentsRef = useRef<() => void>(() => {});
+
+  const remoteControlFor = useCallback(
+    (agentId: string): AgentTaskRemoteControl => ({
+      resume: async (message) => {
+        const sessionId = driver.session?.sessionId;
+        const client = driver.client;
+        if (!sessionId || !client?.resumeSubagentSession) {
+          return {
+            ok: false,
+            reason: 'This daemon connection cannot resume subagents.',
+          };
+        }
+        let answer: DaemonSubagentControlAnswer;
+        try {
+          answer = await client.resumeSubagentSession(
+            sessionId,
+            agentId,
+            message,
+          );
+        } catch (error) {
+          return { ok: false, reason: describeControlFailure(error) };
+        }
+        if (answer?.outcome !== 'resumed') {
+          return refusalFrom(answer, 'The daemon did not resume the agent.');
+        }
+        refreshAgentsRef.current();
+        return { ok: true };
+      },
+      abandon: async () => {
+        const sessionId = driver.session?.sessionId;
+        const client = driver.client;
+        if (!sessionId || !client?.abandonSubagentSession) {
+          return {
+            ok: false,
+            reason: 'This daemon connection cannot abandon subagents.',
+          };
+        }
+        let answer: DaemonSubagentControlAnswer;
+        try {
+          answer = await client.abandonSubagentSession(sessionId, agentId);
+        } catch (error) {
+          return { ok: false, reason: describeControlFailure(error) };
+        }
+        if (answer?.outcome !== 'abandoned') {
+          return refusalFrom(answer, 'The daemon did not abandon the agent.');
+        }
+        // The daemon's roster no longer lists it; drop the mirror now.
+        abandonedIdsRef.current.add(agentId);
+        config?.getBackgroundTaskRegistry?.().removeEntry(agentId);
+        return { ok: true };
+      },
+    }),
+    [config, driver],
+  );
 
   const wireCancelAndMessaging = useCallback(
     (
@@ -242,27 +346,32 @@ export function useDaemonSubagentSync(
       const registry = config?.getBackgroundTaskRegistry?.();
       if (!registry) return;
 
-      abortController.signal.addEventListener(
-        'abort',
-        () => {
-          if (syncingAbortIdsRef.current.has(agentId)) return;
-          const sessionId = driver.session?.sessionId;
-          if (driver.cancelTask) {
-            void driver.cancelTask(agentId, 'agent').catch(() => {
-              if (sessionId && driver.client?.cancelSubagentSession) {
-                void driver.client
-                  .cancelSubagentSession(sessionId, agentId)
-                  .catch(() => {});
-              }
-            });
-          } else if (sessionId && driver.client?.cancelSubagentSession) {
-            void driver.client
-              .cancelSubagentSession(sessionId, agentId)
-              .catch(() => {});
-          }
-        },
-        { once: true },
-      );
+      // A controller already forwarding cancel keeps its one listener; only
+      // the resident loop below may need a restart.
+      if (!cancelWiredRef.current.has(abortController)) {
+        cancelWiredRef.current.add(abortController);
+        abortController.signal.addEventListener(
+          'abort',
+          () => {
+            if (syncingAbortIdsRef.current.has(agentId)) return;
+            const sessionId = driver.session?.sessionId;
+            if (driver.cancelTask) {
+              void driver.cancelTask(agentId, 'agent').catch(() => {
+                if (sessionId && driver.client?.cancelSubagentSession) {
+                  void driver.client
+                    .cancelSubagentSession(sessionId, agentId)
+                    .catch(() => {});
+                }
+              });
+            } else if (sessionId && driver.client?.cancelSubagentSession) {
+              void driver.client
+                .cancelSubagentSession(sessionId, agentId)
+                .catch(() => {});
+            }
+          },
+          { once: true },
+        );
+      }
 
       if (!residentLoopsRef.current.has(agentId)) {
         residentLoopsRef.current.add(agentId);
@@ -327,12 +436,16 @@ export function useDaemonSubagentSync(
   );
 
   const reconcileTasks = useCallback(
-    (tasks: DaemonSubagentTaskSnapshot[]) => {
+    (
+      tasks: DaemonSubagentTaskSnapshot[],
+      options: { fullRoster?: boolean } = {},
+    ) => {
       const registry = config?.getBackgroundTaskRegistry?.();
       if (!registry) return;
 
       for (const task of tasks) {
         if (!task || typeof task.id !== 'string' || !task.id) continue;
+        if (abandonedIdsRef.current.has(task.id)) continue;
 
         // If a provisional foreground entry was created for this toolUseId before
         // `driver.agents()` resolved the daemon's real agent id, remove the
@@ -383,6 +496,9 @@ export function useDaemonSubagentSync(
           if (task.status === 'running') {
             wireCancelAndMessaging(task.id, abortController, false);
           }
+        }
+        if (!entry.remoteControl) {
+          entry.remoteControl = remoteControlFor(task.id);
         }
 
         entry.description = task.description || entry.description;
@@ -492,8 +608,29 @@ export function useDaemonSubagentSync(
           registry.notifyActivityChange(task.id);
         }
       }
+
+      // A paused agent the daemon's full roster no longer lists was abandoned
+      // there (from the phone, or by the model's task_stop): drop the mirror
+      // so it does not stay listed here. The roster keeps only the newest
+      // MAX_RETAINED_TERMINAL_AGENTS paused agents, so a full paused list
+      // proves nothing about one it left out; prune only below the cap.
+      const listedPaused = tasks.filter(
+        (task) => task?.status === 'paused',
+      ).length;
+      if (options.fullRoster && listedPaused < MAX_RETAINED_TERMINAL_AGENTS) {
+        const listed = new Set(tasks.map((task) => task?.id));
+        for (const entry of registry.getAll()) {
+          if (
+            entry.remoteControl &&
+            entry.status === 'paused' &&
+            !listed.has(entry.id)
+          ) {
+            registry.removeEntry(entry.id);
+          }
+        }
+      }
     },
-    [config, wireCancelAndMessaging],
+    [config, wireCancelAndMessaging, remoteControlFor],
   );
 
   const reconcileProcessTasks = useCallback(
@@ -655,7 +792,7 @@ export function useDaemonSubagentSync(
         ]);
         if (!mountedRef.current) return;
         if (agentsRes && Array.isArray(agentsRes.tasks)) {
-          reconcileTasks(agentsRes.tasks);
+          reconcileTasks(agentsRes.tasks, { fullRoster: true });
         }
         if (tasksRes && Array.isArray(tasksRes.tasks)) {
           reconcileProcessTasks(tasksRes.tasks);
@@ -684,6 +821,9 @@ export function useDaemonSubagentSync(
     };
     refreshInFlightRef.current = run();
   }, [config, driver, reconcileTasks, reconcileProcessTasks]);
+  useEffect(() => {
+    refreshAgentsRef.current = refreshAgents;
+  }, [refreshAgents]);
 
   useEffect(() => {
     mountedRef.current = true;

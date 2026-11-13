@@ -205,6 +205,63 @@ describe('buildSessionAgentsStatus', () => {
     }
   });
 
+  // #259: an abandoned agent leaves the roster, so the attached TUI and the
+  // phone's Agents sheet drop it too, while its sidecar stays on disk.
+  it('leaves an abandoned sidecar out, including after an in-place abandon', async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-status-'));
+    const sessionDir = path.join(projectDir, 'subagents', 'session-1');
+    const metaFor = (id: string) => ({
+      agentId: id,
+      agentType: 'general-purpose',
+      description: `stored ${id}`,
+      parentSessionId: 'session-1',
+      parentAgentId: null,
+      createdAt: '2026-08-26T00:00:00.000Z',
+      status: 'running' as const,
+      isBackgrounded: true,
+    });
+    const metaPath = (id: string) =>
+      path.join(sessionDir, `agent-${id}.meta.json`);
+    try {
+      fs.mkdirSync(sessionDir, { recursive: true });
+      fs.writeFileSync(
+        metaPath('abandoned'),
+        JSON.stringify({
+          ...metaFor('abandoned'),
+          status: 'cancelled',
+          abandonedAt: '2026-08-26T00:00:01.000Z',
+        }),
+      );
+      fs.writeFileSync(metaPath('paused'), JSON.stringify(metaFor('paused')));
+
+      const first = await buildSessionAgentsStatus(
+        'session-1',
+        configWith([], [], projectDir),
+      );
+      expect(first.tasks.map((task) => task.id)).toEqual(['paused']);
+
+      // Abandon the paused one in place; the cached roster must not keep it.
+      fs.writeFileSync(
+        metaPath('paused'),
+        JSON.stringify({
+          ...metaFor('paused'),
+          status: 'cancelled',
+          lastUpdatedAt: '2026-08-26T00:00:02.000Z',
+          abandonedAt: '2026-08-26T00:00:02.000Z',
+        }),
+      );
+      const second = await buildSessionAgentsStatus(
+        'session-1',
+        configWith([], [], projectDir),
+      );
+      expect(second.tasks).toEqual([]);
+      expect(fs.existsSync(metaPath('paused'))).toBe(true);
+      expect(fs.existsSync(metaPath('abandoned'))).toBe(true);
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
   it('does not cache a transient sidecar read failure', async () => {
     const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-status-'));
     const sessionDir = path.join(projectDir, 'subagents', 'session-1');

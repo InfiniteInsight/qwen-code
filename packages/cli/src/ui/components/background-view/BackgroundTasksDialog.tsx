@@ -22,6 +22,7 @@ import {
 import { Box, Text } from 'ink';
 import stringWidth from 'string-width';
 import {
+  type BackgroundTaskActionResult,
   useBackgroundTaskViewState,
   useBackgroundTaskViewActions,
 } from '../../contexts/BackgroundTaskViewContext.js';
@@ -199,6 +200,14 @@ function isStoppableEntry(entry: DialogEntry): boolean {
     entry.status === 'running' ||
     (entry.kind === 'workflow' && isActiveWorkflowStatus(entry.status))
   );
+}
+
+/** A thrown action is a failure too, and its message is the reason. */
+function actionFailureOf(error: unknown): BackgroundTaskActionResult {
+  return {
+    ok: false,
+    reason: error instanceof Error ? error.message : String(error),
+  };
 }
 
 function isMessageableAgent(
@@ -1714,6 +1723,38 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     }
   }, [dialogOpen]);
 
+  // A refused or failed resume / abandon flashes its reason in the footer,
+  // in the same slot as a message send's outcome, keyed to the entry that
+  // produced it (rule #211: no action fails silently).
+  const flashActionFailure = useCallback(
+    (
+      entryKey: string | null,
+      action: 'resume' | 'abandon' | 'stop',
+      result: BackgroundTaskActionResult | undefined,
+    ) => {
+      if (!entryKey || !result || result.ok) return;
+      const params = { reason: result.reason };
+      setMessageFlash({
+        entryKey,
+        text:
+          action === 'resume'
+            ? t('Could not resume agent: {{reason}}', params)
+            : action === 'abandon'
+              ? t('Could not abandon agent: {{reason}}', params)
+              : t('Could not stop task: {{reason}}', params),
+        ok: false,
+      });
+    },
+    [],
+  );
+  const resumeSelectedWithFeedback = useCallback(() => {
+    const target = entries[selectedIndex];
+    const entryKey = target ? entryId(target) : null;
+    void resumeSelected()
+      .catch(actionFailureOf)
+      .then((result) => flashActionFailure(entryKey, 'resume', result));
+  }, [entries, selectedIndex, resumeSelected, flashActionFailure]);
+
   const toggleWorkflowPauseWithFeedback = useCallback(() => {
     const target = entries[selectedIndex];
     const verdict = toggleSelectedWorkflowPause();
@@ -1992,7 +2033,15 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       return;
     }
     setPendingCancelEntryId(null);
-    cancelSelected();
+    void cancelSelected()
+      .catch(actionFailureOf)
+      .then((result) =>
+        flashActionFailure(
+          entryKey,
+          isAbandonable ? 'abandon' : 'stop',
+          result,
+        ),
+      );
   };
 
   useKeypress(
@@ -2039,16 +2088,20 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
           setComposingEntryKey(null);
           setMessageDraft('');
           if (text && activeEntryKey) {
-            void sendMessageToSelected(text).then((ok) => {
-              setMessageFlash({
-                entryKey: activeEntryKey,
-                text: ok
-                  ? t('Message sent to agent.')
-                  : t('Could not send message to agent.'),
-                ok,
+            void sendMessageToSelected(text)
+              .catch(actionFailureOf)
+              .then((result) => {
+                setMessageFlash({
+                  entryKey: activeEntryKey,
+                  text: result.ok
+                    ? t('Message sent to agent.')
+                    : t('Could not send message to agent: {{reason}}', {
+                        reason: result.reason,
+                      }),
+                  ok: result.ok,
+                });
+                setActivityTick((n) => n + 1);
               });
-              setActivityTick((n) => n + 1);
-            });
           }
           return;
         }
@@ -2109,7 +2162,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
           return;
         }
         if (key.sequence === 'r' && !key.ctrl && !key.meta) {
-          void resumeSelected();
+          resumeSelectedWithFeedback();
           return;
         }
         if (key.sequence === 'p' && !key.ctrl && !key.meta) {
@@ -2165,7 +2218,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         return;
       }
       if (key.sequence === 'r' && !key.ctrl && !key.meta) {
-        void resumeSelected();
+        resumeSelectedWithFeedback();
         return;
       }
       if (key.sequence === 'p' && !key.ctrl && !key.meta) {

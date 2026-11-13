@@ -40,12 +40,6 @@ export interface HarnessChannel {
    */
   transportFailureDetail?: string;
   /**
-   * Cached channel-close race for workspace-scoped status requests. Workspace
-   * status can be polled frequently by dashboards, so keep one promise per
-   * channel instead of attaching a new `.then()` to `channel.exited` per poll.
-   */
-  statusClosedReject?: Promise<never>;
-  /**
    * Latest self-reported ACP-child resource sample (rss/cpu), refreshed by the
    * daemon's metrics sampler via `refreshChildResource`. Kept on the channel so
    * it drops automatically on a channel swap — the sampler always reads the

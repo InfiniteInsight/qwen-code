@@ -693,9 +693,61 @@ describe('BackgroundTaskRegistry', () => {
 
     registry.abandon('paused-1');
 
-    expect(registry.get('paused-1')!.status).toBe('cancelled');
-    expect(registry.get('paused-1')!.notified).toBe(true);
     expect(callback).not.toHaveBeenCalled();
+  });
+
+  // #259: an abandoned agent must not stay listed anywhere the registry feeds.
+  it('drops an abandoned agent from the registry before emitting the change', () => {
+    add('paused-1', 'paused agent', { status: 'paused' });
+    const seenDuringEmit: string[][] = [];
+    const statusCallback = vi.fn((entry?: { status?: string }) => {
+      seenDuringEmit.push(registry.getAll().map((e) => e.agentId));
+      expect(entry?.status).toBe('cancelled');
+    });
+    registry.setStatusChangeCallback(statusCallback);
+
+    registry.abandon('paused-1');
+
+    expect(registry.get('paused-1')).toBeUndefined();
+    expect(registry.getAll()).toEqual([]);
+    expect(statusCallback).toHaveBeenCalledTimes(1);
+    expect(seenDuringEmit).toEqual([[]]);
+  });
+
+  it('keeps a cancelled running agent listed (only an abandon removes it)', () => {
+    add('running-1', 'running agent');
+
+    registry.cancel('running-1');
+
+    expect(registry.get('running-1')?.status).toBe('cancelled');
+  });
+
+  // #259 review: the attached TUI drops mirrors with removeEntry; a drain
+  // loop parked on one must not hang forever.
+  it('wakes a message waiter parked on a removed entry', async () => {
+    add('removed-wait', 'mirrored agent');
+    const waiting = registry.waitForMessages(
+      'removed-wait',
+      new AbortController().signal,
+    );
+
+    registry.removeEntry('removed-wait');
+
+    await expect(waiting).resolves.toEqual([]);
+    expect(registry.get('removed-wait')).toBeUndefined();
+  });
+
+  it('wakes a message waiter parked on an abandoned agent', async () => {
+    add('paused-wait', 'paused agent');
+    const waiting = registry.waitForMessages(
+      'paused-wait',
+      new AbortController().signal,
+    );
+    registry.get('paused-wait')!.status = 'paused';
+
+    registry.abandon('paused-wait');
+
+    await expect(waiting).resolves.toEqual([]);
   });
 
   it('abandons a paused agent and rejects parked approvals', () => {
@@ -1623,9 +1675,9 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.get('pending-cancel')?.notified).toBeFalsy();
     });
 
-    it('prunes an abandoned (paused → cancelled) entry the same as any other terminal', () => {
-      // abandon() is the only path setting notified=true on a paused entry;
-      // it must count toward the cap, or mass abandons bypass the bound.
+    it('does not retain an abandoned entry against the terminal cap', () => {
+      // abandon() removes the entry outright (#259), so mass abandons can
+      // neither bypass the bound nor push a completed entry out of it.
       reg('paused-overflow', {
         description: 'paused',
         status: 'paused',
@@ -1633,10 +1685,11 @@ describe('BackgroundTaskRegistry', () => {
       });
       registry.abandon('paused-overflow');
       fillDone(MAX_RETAINED_TERMINAL_AGENTS);
-      // 1 abandoned + 32 completed = 33 > cap; the abandoned entry
-      // (startTime=1, earliest endTime) is the one evicted.
       expect(registry.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_AGENTS);
       expect(registry.get('paused-overflow')).toBeUndefined();
+      expect(
+        registry.getAll().every((entry) => entry.status === 'completed'),
+      ).toBe(true);
     });
   });
 

@@ -73,6 +73,8 @@ import type {
   ServeWorkspaceToolsStatus,
   ServeSessionContextUsageStatus,
   ServeSessionStatsStatus,
+  ServeSubagentAbandonResult,
+  ServeSubagentResumeResult,
 } from './status.js';
 
 import type {
@@ -2624,7 +2626,34 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     action?: 'queued' | 'resumed' | 'continued' | 'revived';
     status?: string;
     reason?: string;
+    /** On `resume_failed`: the resume service's refusal code. */
+    code?: string;
+    /** On `resume_failed`: a sentence naming the cause. */
+    detail?: string;
   }>;
+
+  /**
+   * Resume a paused subagent task in a live session through the child's own
+   * resume service; `message` is the first continuation instruction. A
+   * refusal names its code and reason.
+   */
+  resumeSessionTask?(
+    sessionId: string,
+    taskId: string,
+    message?: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<ServeSubagentResumeResult>;
+
+  /**
+   * Abandon a paused subagent task in a live session: the child drops it from
+   * its registry and rosters and marks its sidecar. A refusal names its code
+   * and reason.
+   */
+  abandonSessionTask?(
+    sessionId: string,
+    taskId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<ServeSubagentAbandonResult>;
 
   /**
    * Control a run, delete history, or start a new one — from a saved

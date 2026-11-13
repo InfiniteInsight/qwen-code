@@ -78,7 +78,11 @@ import {
   parseSessionSource,
   summarizeReplay,
 } from '@qwen-code/acp-bridge';
-import { readServeWorkflowActionInput } from '@qwen-code/acp-bridge/status';
+import {
+  readServeWorkflowActionInput,
+  type ServeSubagentAbandonResult,
+  type ServeSubagentResumeResult,
+} from '@qwen-code/acp-bridge/status';
 import {
   isReservedLiveSessionSource,
   isReservedStandaloneSessionSource,
@@ -5674,6 +5678,195 @@ export function registerSessionRoutes(
             sessionId,
             subagentRef,
             taskId,
+            ...result,
+          });
+        });
+      } catch (err) {
+        sendBridgeError(res, err, { route, sessionId });
+      }
+    },
+  );
+
+  // Resume or abandon ONE paused subagent (#259). Shaped like the cancel
+  // route above: same ref validation, virtual-session resolution, runtime
+  // activity and error envelopes. The child answers with an outcome, or a
+  // refusal carrying a code and a reason; a refusal is a 200, as cancel's
+  // `cancelled: false` is, and only an unknown ref is a 404.
+  const subagentControlTarget = (
+    req: Request,
+    res: Response,
+    route: string,
+    // Body checks run after the ref check and before the runtime lookup, the
+    // order the message route uses; a check that fails has answered `res`.
+    checkBody?: (ids: { sessionId: string; subagentRef: string }) => boolean,
+  ):
+    | {
+        sessionId: string;
+        subagentRef: string;
+        rootSessionId: string;
+        runtime: WorkspaceRuntime;
+        subagents: NonNullable<typeof virtualSubagentSessions>;
+      }
+    | undefined => {
+    const sessionId = requireSessionId(req, res);
+    if (!sessionId) return undefined;
+    if (!virtualSubagentSessions) {
+      res.status(404).json({
+        error: `No session with id "${sessionId}"`,
+        code: 'session_not_found',
+        sessionId,
+      });
+      return undefined;
+    }
+    const subagentRef = req.params['subagentRef'];
+    if (
+      !subagentRef ||
+      subagentRef.length > MAX_VIRTUAL_SESSION_ID_PART_LENGTH
+    ) {
+      res.status(400).json({
+        error: '`subagentRef` must be a non-empty subagent reference',
+        code: 'invalid_subagent_ref',
+        sessionId,
+      });
+      return undefined;
+    }
+    if (checkBody && !checkBody({ sessionId, subagentRef })) return undefined;
+    const virtualParent = parseVirtualSubagentSessionId(sessionId);
+    const rootSessionId = virtualParent?.parentSessionId ?? sessionId;
+    const runtime = requireSessionRuntime({
+      sessionId: rootSessionId,
+      route,
+      res,
+      workspaceRegistry,
+      daemonLog,
+    });
+    if (!runtime) return undefined;
+    return {
+      sessionId,
+      subagentRef,
+      rootSessionId,
+      runtime,
+      subagents: virtualSubagentSessions,
+    };
+  };
+
+  app.post(
+    '/session/:id/subagents/:subagentRef/resume',
+    mutate(),
+    async (req, res) => {
+      const route = 'POST /session/:id/subagents/:subagentRef/resume';
+      // The optional `message` is the first continuation instruction.
+      const rawMessage = safeBody(req)['message'];
+      const target = subagentControlTarget(req, res, route, (ids) => {
+        if (rawMessage === undefined || typeof rawMessage === 'string') {
+          return true;
+        }
+        res.status(400).json({
+          error: '`message` must be a string when present',
+          code: 'invalid_message',
+          ...ids,
+        });
+        return false;
+      });
+      if (!target) return;
+      const message =
+        typeof rawMessage === 'string'
+          ? rawMessage.trim() || undefined
+          : undefined;
+      const { sessionId, subagentRef, rootSessionId, runtime, subagents } =
+        target;
+      try {
+        await runOwnerRuntimeActivity(runtime, async () => {
+          const resolved = await subagents.resolve(
+            runtime,
+            sessionId,
+            subagentRef,
+          );
+          if (!resolved) {
+            res.status(404).json({
+              error: 'Subagent session not found',
+              code: 'session_not_found',
+              sessionId,
+              subagentRef,
+            });
+            return;
+          }
+          const result: ServeSubagentResumeResult = runtime.bridge
+            .resumeSessionTask
+            ? await runtime.bridge.resumeSessionTask(
+                rootSessionId,
+                resolved.taskId,
+                message,
+              )
+            : {
+                outcome: 'refused',
+                code: 'unsupported',
+                reason: 'This daemon cannot resume subagents.',
+              };
+          if (result.outcome === 'resumed') {
+            // Same refresh as a delivered message: re-read the target's state.
+            await subagents.resolve(runtime, sessionId, subagentRef);
+          }
+          res.status(200).json({
+            sessionId,
+            subagentRef,
+            taskId: resolved.taskId,
+            ...result,
+          });
+        });
+      } catch (err) {
+        sendBridgeError(res, err, { route, sessionId });
+      }
+    },
+  );
+
+  app.post(
+    '/session/:id/subagents/:subagentRef/abandon',
+    mutate(),
+    async (req, res) => {
+      const route = 'POST /session/:id/subagents/:subagentRef/abandon';
+      const target = subagentControlTarget(req, res, route);
+      if (!target) return;
+      const { sessionId, subagentRef, rootSessionId, runtime, subagents } =
+        target;
+      try {
+        await runOwnerRuntimeActivity(runtime, async () => {
+          const resolved = await subagents.resolve(
+            runtime,
+            sessionId,
+            subagentRef,
+          );
+          if (!resolved) {
+            res.status(404).json({
+              error: 'Subagent session not found',
+              code: 'session_not_found',
+              sessionId,
+              subagentRef,
+            });
+            return;
+          }
+          const result: ServeSubagentAbandonResult = runtime.bridge
+            .abandonSessionTask
+            ? await runtime.bridge.abandonSessionTask(
+                rootSessionId,
+                resolved.taskId,
+              )
+            : {
+                outcome: 'refused',
+                code: 'unsupported',
+                reason: 'This daemon cannot abandon subagents.',
+              };
+          if (result.outcome === 'abandoned') {
+            subagents.updateTargetStatus?.(
+              runtime,
+              resolved.sessionId,
+              'cancelled',
+            );
+          }
+          res.status(200).json({
+            sessionId,
+            subagentRef,
+            taskId: resolved.taskId,
             ...result,
           });
         });

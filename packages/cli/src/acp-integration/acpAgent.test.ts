@@ -17738,6 +17738,317 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  // #259: the daemon's resume and abandon routes reach the child's own resume
+  // service, so a daemon-attached TUI never needs a local sidecar.
+  describe('sessionTaskResume and sessionTaskAbandon', () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+
+    async function startAgent(configOverrides: Record<string, unknown>) {
+      const innerConfig = await setupSessionMocks(sessionId);
+      Object.assign(innerConfig, configOverrides);
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      return {
+        agent,
+        stop: async () => {
+          mockConnectionState.resolve();
+          await agentPromise;
+        },
+      };
+    }
+
+    function registryWith(tasks: Array<Record<string, unknown>>) {
+      return {
+        get: vi.fn((id: string) => tasks.find((task) => task['id'] === id)),
+        getAll: vi.fn(() => tasks),
+        abandon: vi.fn(),
+      };
+    }
+
+    it('resumes a paused agent found by its tool call, with the first instruction', async () => {
+      const paused = {
+        id: 'agent-paused-1',
+        kind: 'agent',
+        status: 'paused',
+        toolUseId: 'call-paused-1',
+      };
+      const registry = registryWith([paused]);
+      const resumeBackgroundAgentWithOutcome = vi.fn(async () => {
+        paused.status = 'running';
+        return { resumed: true, task: paused };
+      });
+      const { agent, stop } = await startAgent({
+        getBackgroundTaskRegistry: vi.fn().mockReturnValue(registry),
+        resumeBackgroundAgentWithOutcome,
+      });
+
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskResume, {
+          sessionId,
+          taskId: 'call-paused-1',
+          message: '  pick up the TODO list  ',
+        }),
+      ).resolves.toEqual({ outcome: 'resumed', status: 'running' });
+      expect(resumeBackgroundAgentWithOutcome).toHaveBeenCalledWith(
+        'agent-paused-1',
+        'pick up the TODO list',
+      );
+
+      await stop();
+    });
+
+    it('answers a refused resume with its code, reason and status', async () => {
+      const paused = { id: 'agent-blocked', kind: 'agent', status: 'paused' };
+      const resumeBackgroundAgentWithOutcome = vi.fn(async () => ({
+        resumed: false,
+        code: 'resume_blocked',
+        reason: 'Subagent "deleted-agent" is no longer available.',
+        task: paused,
+      }));
+      const { agent, stop } = await startAgent({
+        getBackgroundTaskRegistry: vi
+          .fn()
+          .mockReturnValue(registryWith([paused])),
+        resumeBackgroundAgentWithOutcome,
+      });
+
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskResume, {
+          sessionId,
+          taskId: 'agent-blocked',
+        }),
+      ).resolves.toEqual({
+        outcome: 'refused',
+        code: 'resume_blocked',
+        reason: 'Subagent "deleted-agent" is no longer available.',
+        status: 'paused',
+      });
+      expect(resumeBackgroundAgentWithOutcome).toHaveBeenCalledWith(
+        'agent-blocked',
+        undefined,
+      );
+
+      await stop();
+    });
+
+    it('answers agent_not_found for an id it cannot resolve', async () => {
+      const resumeBackgroundAgentWithOutcome = vi.fn(async () => ({
+        resumed: false,
+        code: 'agent_not_found',
+        reason:
+          'No background agent "agent-gone" is registered in this session.',
+      }));
+      const { agent, stop } = await startAgent({
+        getBackgroundTaskRegistry: vi.fn().mockReturnValue(registryWith([])),
+        resumeBackgroundAgentWithOutcome,
+      });
+
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskResume, {
+          sessionId,
+          taskId: 'agent-gone',
+        }),
+      ).resolves.toEqual({
+        outcome: 'refused',
+        code: 'agent_not_found',
+        reason:
+          'No background agent "agent-gone" is registered in this session.',
+      });
+
+      await stop();
+    });
+
+    it('rejects a resume whose message is not a string', async () => {
+      const { agent, stop } = await startAgent({
+        getBackgroundTaskRegistry: vi.fn().mockReturnValue(registryWith([])),
+        resumeBackgroundAgentWithOutcome: vi.fn(),
+      });
+
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskResume, {
+          sessionId,
+          taskId: 'agent-1',
+          message: 42,
+        }),
+      ).rejects.toThrow('message must be a string');
+
+      await stop();
+    });
+
+    it('abandons a paused agent found by its tool call', async () => {
+      const paused = {
+        id: 'agent-paused-2',
+        kind: 'agent',
+        status: 'paused',
+        toolUseId: 'call-paused-2',
+      };
+      const registry = registryWith([paused]);
+      const abandonBackgroundAgent = vi.fn().mockReturnValue(true);
+      const { agent, stop } = await startAgent({
+        getBackgroundTaskRegistry: vi.fn().mockReturnValue(registry),
+        abandonBackgroundAgent,
+      });
+
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskAbandon, {
+          sessionId,
+          taskId: 'call-paused-2',
+        }),
+      ).resolves.toEqual({ outcome: 'abandoned', status: 'cancelled' });
+      expect(abandonBackgroundAgent).toHaveBeenCalledWith('agent-paused-2');
+      expect(registry.abandon).not.toHaveBeenCalled();
+
+      await stop();
+    });
+
+    it('falls back to the registry abandon for a paused entry without a sidecar', async () => {
+      const registry = registryWith([
+        { id: 'agent-no-meta', kind: 'agent', status: 'paused' },
+      ]);
+      const { agent, stop } = await startAgent({
+        getBackgroundTaskRegistry: vi.fn().mockReturnValue(registry),
+        abandonBackgroundAgent: vi.fn().mockReturnValue(false),
+      });
+
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskAbandon, {
+          sessionId,
+          taskId: 'agent-no-meta',
+        }),
+      ).resolves.toEqual({ outcome: 'abandoned', status: 'cancelled' });
+      expect(registry.abandon).toHaveBeenCalledWith('agent-no-meta');
+
+      await stop();
+    });
+
+    it('refuses to abandon an agent that is not paused, or is unknown', async () => {
+      const registry = registryWith([
+        { id: 'agent-running', kind: 'agent', status: 'running' },
+      ]);
+      const abandonBackgroundAgent = vi.fn();
+      const { agent, stop } = await startAgent({
+        getBackgroundTaskRegistry: vi.fn().mockReturnValue(registry),
+        abandonBackgroundAgent,
+      });
+
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskAbandon, {
+          sessionId,
+          taskId: 'agent-running',
+        }),
+      ).resolves.toEqual({
+        outcome: 'refused',
+        code: 'not_paused',
+        reason:
+          'Background agent "agent-running" is running; only a paused agent can be abandoned.',
+        status: 'running',
+      });
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskAbandon, {
+          sessionId,
+          taskId: 'agent-gone',
+        }),
+      ).resolves.toEqual({
+        outcome: 'refused',
+        code: 'agent_not_found',
+        reason:
+          'No background agent "agent-gone" is registered in this session.',
+      });
+      // The running agent is never abandoned; the unknown id is offered to
+      // the sidecar fallback, which finds nothing.
+      expect(abandonBackgroundAgent.mock.calls).toEqual([['agent-gone']]);
+      expect(registry.abandon).not.toHaveBeenCalled();
+
+      await stop();
+    });
+
+    // #259 review: a paused row the roster shows only from its sidecar.
+    it('abandons a paused agent known only from its sidecar', async () => {
+      const registry = registryWith([]);
+      const abandonBackgroundAgent = vi.fn().mockReturnValue(true);
+      const { agent, stop } = await startAgent({
+        getBackgroundTaskRegistry: vi.fn().mockReturnValue(registry),
+        abandonBackgroundAgent,
+      });
+
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskAbandon, {
+          sessionId,
+          taskId: 'agent-sidecar-only',
+        }),
+      ).resolves.toEqual({ outcome: 'abandoned', status: 'cancelled' });
+      expect(abandonBackgroundAgent).toHaveBeenCalledWith('agent-sidecar-only');
+      expect(registry.abandon).not.toHaveBeenCalled();
+
+      await stop();
+    });
+
+    // #259 review / rule #211: the phone's message path to a paused agent
+    // names why the resume failed instead of a bare resume_failed.
+    it('answers a message to a paused agent with the resume refusal code and reason', async () => {
+      const paused = { id: 'agent-paused-3', kind: 'agent', status: 'paused' };
+      const resumeBackgroundAgent = vi.fn();
+      const resumeBackgroundAgentWithOutcome = vi
+        .fn()
+        .mockResolvedValueOnce({
+          resumed: false,
+          code: 'capacity_full',
+          reason: 'maximum concurrent background agents (4) reached',
+          task: paused,
+        })
+        .mockResolvedValueOnce({ resumed: true, task: paused });
+      const { agent, stop } = await startAgent({
+        getBackgroundTaskRegistry: vi
+          .fn()
+          .mockReturnValue(registryWith([paused])),
+        resumeBackgroundAgent,
+        resumeBackgroundAgentWithOutcome,
+      });
+
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskMessage, {
+          sessionId,
+          taskId: 'agent-paused-3',
+          message: 'keep going',
+        }),
+      ).resolves.toEqual({
+        delivered: false,
+        reason: 'resume_failed',
+        code: 'capacity_full',
+        detail: 'maximum concurrent background agents (4) reached',
+        status: 'paused',
+      });
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskMessage, {
+          sessionId,
+          taskId: 'agent-paused-3',
+          message: 'keep going',
+        }),
+      ).resolves.toEqual({
+        delivered: true,
+        action: 'resumed',
+        status: 'running',
+      });
+      expect(resumeBackgroundAgentWithOutcome).toHaveBeenCalledWith(
+        'agent-paused-3',
+        'keep going',
+      );
+      expect(resumeBackgroundAgent).not.toHaveBeenCalled();
+
+      await stop();
+    });
+  });
+
   it('rejects sessionTaskCancel with invalid params', async () => {
     const agentPromise = runAcpAgent(
       mockConfig,

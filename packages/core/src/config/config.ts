@@ -12168,6 +12168,22 @@ export class Config {
     );
   }
 
+  /**
+   * Resume a paused background agent and report why when it does not
+   * resume: the refusal carries a code and a reason naming the cause.
+   */
+  async resumeBackgroundAgentWithOutcome(
+    agentId: string,
+    initialInput?: import('../agents/runtime/agent-types.js').AgentExternalInput,
+  ): Promise<
+    import('../agents/background-agent-resume.js').BackgroundAgentResumeOutcome
+  > {
+    return this.getBackgroundAgentResumeService().resumeBackgroundAgentWithOutcome(
+      agentId,
+      initialInput,
+    );
+  }
+
   async reviveCompletedBackgroundAgent(
     agentId: string,
     initialInput?: import('../agents/runtime/agent-types.js').AgentExternalInput,
