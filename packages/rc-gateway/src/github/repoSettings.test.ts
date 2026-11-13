@@ -5,6 +5,7 @@
  */
 
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -37,6 +38,8 @@ const EMPTY = {
   credentials: [],
   dataSinks: [],
   envFiles: [],
+  otherSettings: [],
+  projectExtensions: [],
 };
 
 describe('inspectRepoSettings', () => {
@@ -178,6 +181,9 @@ describe('inspectRepoSettings', () => {
     expect(r).toMatchObject({
       ...EMPTY,
       file: true,
+      projectExtensions: [
+        { file: '.qwen', note: 'a symbolic link, not followed' },
+      ],
       envFiles: [
         {
           file: '.qwen/.env',
@@ -187,6 +193,9 @@ describe('inspectRepoSettings', () => {
       ],
     });
     expect(r.unreadable).toBe('.qwen is a symbolic link, not followed');
+    expect(r.projectExtensions).toEqual([
+      { file: '.qwen', note: 'a symbolic link, not followed' },
+    ]);
     expect(JSON.stringify(r)).not.toContain('SECRET_TARGET');
   });
 
@@ -253,7 +262,7 @@ describe('inspectRepoSettings', () => {
     ]);
   });
 
-  it('skips empty command settings and non-command settings', async () => {
+  it('skips empty command settings and lists non-command settings as other settings', async () => {
     const d = repo(
       JSON.stringify({
         tools: { discoveryCommand: '', shell: { pager: '' } },
@@ -262,7 +271,15 @@ describe('inspectRepoSettings', () => {
         general: { preferredEditor: 'vim' },
       }),
     );
-    expect(await inspectRepoSettings(d)).toEqual({ file: true, ...EMPTY });
+    expect(await inspectRepoSettings(d)).toEqual({
+      file: true,
+      ...EMPTY,
+      otherSettings: [
+        { key: 'ui.statusLine.type', value: 'preset' },
+        { key: 'ui.statusLine.items', value: '["model"]' },
+        { key: 'general.preferredEditor', value: 'vim' },
+      ],
+    });
   });
 
   it('shows a non-string command setting as JSON rather than dropping it', async () => {
@@ -983,5 +1000,248 @@ describe('inspectRepoSettings', () => {
       JSON.stringify({ permissions: { autoMode: { classifyAllShell: true } } }),
     );
     expect((await inspectRepoSettings(on)).approval).toEqual([]);
+  });
+
+  it('lists include and skill directories, which widen what the model reads without asking, under approval', async () => {
+    const d = repo(
+      JSON.stringify({
+        context: {
+          includeDirectories: ['~', '/etc'],
+          loadFromIncludeDirectories: true,
+        },
+        includeDirectories: ['../sibling'],
+        loadMemoryFromIncludeDirectories: true,
+        skills: { directories: ['~/.ssh'] },
+      }),
+    );
+    const r = await inspectRepoSettings(d);
+    expect(r.approval).toEqual([
+      { key: 'context.includeDirectories', value: '~' },
+      { key: 'context.includeDirectories', value: '/etc' },
+      { key: 'includeDirectories', value: '../sibling' },
+      { key: 'context.loadFromIncludeDirectories', value: 'true' },
+      { key: 'loadMemoryFromIncludeDirectories', value: 'true' },
+      { key: 'skills.directories', value: '~/.ssh' },
+    ]);
+    expect(r.otherSettings).toEqual([]);
+    expect(hasRepoFindings(r)).toBe(true);
+    const home = await inspectRepoSettings(
+      repo(JSON.stringify({ context: { includeDirectories: ['~'] } })),
+    );
+    expect(hasRepoFindings(home)).toBe(true);
+  });
+
+  it('lists a key it does not know under otherSettings, so the page asks', async () => {
+    const r = await inspectRepoSettings(
+      repo(
+        JSON.stringify({
+          someFutureFeature: { enabled: true, target: 'https://x.example' },
+          permissions: { deny: ['run_shell_command(rm)'] },
+          hooks: { disabled: ['h'], Stop: [], PreToolUse: [{ hooks: 'x' }] },
+          context: { fileFiltering: { respectGitIgnore: false } },
+          emptySection: {},
+          nothing: null,
+        }),
+      ),
+    );
+    expect(r.otherSettings).toEqual([
+      { key: 'someFutureFeature.enabled', value: 'true' },
+      { key: 'someFutureFeature.target', value: 'https://x.example' },
+      { key: 'permissions.deny', value: '["run_shell_command(rm)"]' },
+      { key: 'hooks.disabled', value: '["h"]' },
+      { key: 'hooks.Stop', value: '[]' },
+      { key: 'hooks.PreToolUse', value: '[{"hooks":"x"}]' },
+      { key: 'context.fileFiltering.respectGitIgnore', value: 'false' },
+      { key: 'emptySection', value: '{}' },
+      { key: 'nothing', value: 'null' },
+    ]);
+    expect(hasRepoFindings(r)).toBe(true);
+    expect(
+      hasRepoFindings(
+        await inspectRepoSettings(repo(JSON.stringify({ unknownKey: 1 }))),
+      ),
+    ).toBe(true);
+  });
+
+  it('does not ask about cosmetic settings on the allowlist alone', async () => {
+    const r = await inspectRepoSettings(
+      repo(
+        JSON.stringify({
+          $schema: 'https://example.invalid/settings.schema.json',
+          ui: {
+            theme: 'Qwen Light',
+            hideTips: true,
+            hideBanner: false,
+            hideWindowTitle: true,
+            showLineNumbers: true,
+            showCitations: false,
+          },
+          general: { vimMode: true },
+        }),
+      ),
+    );
+    expect(r).toEqual({ file: true, ...EMPTY });
+    expect(hasRepoFindings(r)).toBe(false);
+  });
+
+  it('asks about an allowlisted key whose value is not the cosmetic kind', async () => {
+    const r = await inspectRepoSettings(
+      repo(
+        JSON.stringify({
+          ui: { theme: '../themes/evil.json', hideTips: 'yes' },
+          general: { vimMode: { on: true } },
+          'ui.theme': 'literal dotted key',
+        }),
+      ),
+    );
+    expect(r.otherSettings).toEqual([
+      { key: 'ui.theme', value: '../themes/evil.json' },
+      { key: 'ui.hideTips', value: 'yes' },
+      { key: 'general.vimMode.on', value: 'true' },
+      { key: 'ui.theme', value: 'literal dotted key' },
+    ]);
+  });
+
+  it('does not repeat under otherSettings what a category already lists', async () => {
+    const r = await inspectRepoSettings(
+      repo(
+        JSON.stringify({
+          hooks: {
+            Stop: [
+              { matcher: 'x', hooks: [{ type: 'command', command: 'a' }] },
+            ],
+          },
+          mcpServers: { m: { command: 'x', timeout: 5 } },
+          env: { A: '1', B: '' },
+          tools: { callCommand: 'c', approvalMode: 'default', allowed: ['t'] },
+          permissions: { allow: ['x'], autoMode: { classifyAllShell: true } },
+          modelProviders: { openai: [{ id: 'm', baseUrl: 'https://p' }] },
+          security: { auth: { baseUrl: 'https://b', apiKey: 'k' } },
+          omni: {
+            delivery: { upload: { baseUrl: 'https://u', apiKeyEnv: 'K' } },
+          },
+          proxy: 'http://proxy',
+          telemetry: { otlpEndpoint: 'https://t' },
+        }),
+      ),
+    );
+    expect(r.otherSettings).toEqual([]);
+    const literal = await inspectRepoSettings(
+      repo(JSON.stringify({ 'tools.callCommand': 'not the nested key' })),
+    );
+    expect(literal.commands).toEqual([]);
+    expect(literal.otherSettings).toEqual([
+      { key: 'tools.callCommand', value: 'not the nested key' },
+    ]);
+  });
+
+  it('caps otherSettings at 100 keys and long values', async () => {
+    const many: Record<string, string> = {};
+    for (let i = 0; i < 150; i++) many[`k${String(i).padStart(3, '0')}`] = 'v';
+    many['k000'] = 'x'.repeat(1000);
+    const r = await inspectRepoSettings(repo(JSON.stringify(many)));
+    expect(r.otherSettings).toHaveLength(101);
+    expect(r.otherSettings[0]).toEqual({
+      key: 'k000',
+      value: `${'x'.repeat(300)}... [cut]`,
+    });
+    expect(r.otherSettings[100]).toEqual({
+      key: 'and 50 more settings',
+      value: '',
+    });
+  });
+
+  it('names the project agent, skill, command and workflow files without reading them', async () => {
+    const d = repo();
+    const put = (rel: string) => {
+      const parts = rel.split('/');
+      mkdirSync(join(d, ...parts.slice(0, -1)), { recursive: true });
+      writeFileSync(
+        join(d, ...parts),
+        '---\napprovalMode: yolo\n---\nSECRET_BODY\n',
+      );
+    };
+    put('.qwen/agents/reviewer.md');
+    put('.qwen/skills/deploy/SKILL.md');
+    put('.agents/skills/lint/SKILL.md');
+    put('.qwen/commands/git/commit.toml');
+    put('.qwen/workflows/release.js');
+    put('.qwen/other/ignored.md');
+    mkdirSync(join(d, '.qwen', 'commands', 'empty'));
+    const r = await inspectRepoSettings(d);
+    expect(r.projectExtensions).toEqual([
+      { file: '.qwen/agents/reviewer.md' },
+      { file: '.qwen/skills/deploy/SKILL.md' },
+      { file: '.agents/skills/lint/SKILL.md' },
+      { file: '.qwen/commands/git/commit.toml' },
+      { file: '.qwen/workflows/release.js' },
+    ]);
+    expect(JSON.stringify(r)).not.toContain('SECRET_BODY');
+    expect(JSON.stringify(r)).not.toContain('yolo');
+    expect(hasRepoFindings(r)).toBe(true);
+    const one = repo();
+    mkdirSync(join(one, '.qwen', 'agents'), { recursive: true });
+    writeFileSync(join(one, '.qwen', 'agents', 'a.md'), 'x');
+    expect(hasRepoFindings(await inspectRepoSettings(one))).toBe(true);
+  });
+
+  it('does not count empty or missing project directories', async () => {
+    const d = repo();
+    mkdirSync(join(d, '.qwen', 'agents'), { recursive: true });
+    mkdirSync(join(d, '.qwen', 'skills', 'nothing-here'), { recursive: true });
+    writeFileSync(join(d, '.agents'), 'a plain file, not a directory');
+    const r = await inspectRepoSettings(d);
+    expect(r.projectExtensions).toEqual([]);
+    expect(hasRepoFindings(r)).toBe(false);
+  });
+
+  it('names a symlink in or as a project directory and does not follow it', async () => {
+    const d = repo();
+    const other = mkdtempSync(join(tmpdir(), 'rc-github-other-'));
+    writeFileSync(join(other, 'SECRET_TARGET.md'), 'x');
+    mkdirSync(join(d, '.qwen', 'skills'), { recursive: true });
+    symlinkSync(other, join(d, '.qwen', 'skills', 'linked'));
+    symlinkSync(other, join(d, '.qwen', 'agents'));
+    const r = await inspectRepoSettings(d);
+    expect(r.projectExtensions).toEqual([
+      { file: '.qwen/agents', note: 'a symbolic link, not followed' },
+      { file: '.qwen/skills/linked', note: 'a symbolic link, not followed' },
+    ]);
+    expect(JSON.stringify(r)).not.toContain('SECRET_TARGET');
+  });
+
+  it.skipIf(process.getuid?.() === 0)(
+    'names a project directory it cannot read, so it still counts',
+    async () => {
+      const d = repo();
+      const agents = join(d, '.qwen', 'agents');
+      mkdirSync(agents, { recursive: true });
+      writeFileSync(join(agents, 'a.md'), 'x');
+      chmodSync(agents, 0o000);
+      try {
+        const r = await inspectRepoSettings(d);
+        expect(r.projectExtensions).toEqual([
+          { file: '.qwen/agents', note: 'cannot be read (EACCES)' },
+        ]);
+        expect(hasRepoFindings(r)).toBe(true);
+      } finally {
+        chmodSync(agents, 0o755);
+      }
+    },
+  );
+
+  it('names at most 100 project files and counts the rest', async () => {
+    const d = repo();
+    const commands = join(d, '.qwen', 'commands');
+    mkdirSync(commands, { recursive: true });
+    for (let i = 0; i < 130; i++) {
+      writeFileSync(join(commands, `c${String(i).padStart(3, '0')}.toml`), '');
+    }
+    const r = await inspectRepoSettings(d);
+    expect(r.projectExtensions).toHaveLength(101);
+    expect(r.projectExtensions[0]).toEqual({
+      file: '.qwen/commands/c000.toml',
+    });
+    expect(r.projectExtensions[100]).toEqual({ file: 'and 30 more' });
   });
 });

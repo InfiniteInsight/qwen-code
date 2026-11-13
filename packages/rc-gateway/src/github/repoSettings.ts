@@ -21,7 +21,7 @@
  */
 
 import { constants } from 'node:fs';
-import { lstat, open } from 'node:fs/promises';
+import { lstat, open, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isInternalSecretEnvVar } from '@qwen-code/qwen-code-core';
 
@@ -61,6 +61,18 @@ export interface RepoSettingsFindings {
    * (never the values).
    */
   envFiles: Array<{ file: string; keys: string[]; unreadable?: string }>;
+  /**
+   * Every other `.qwen/settings.json` leaf the categories above do not
+   * report and OTHER_SETTINGS_HARMLESS does not name, by dotted path, so a
+   * setting this module does not know is asked about rather than passed.
+   */
+  otherSettings: Array<{ key: string; value: string }>;
+  /**
+   * Agent, skill, command and saved-workflow files the CLI loads from the
+   * project, by path relative to the repo, presence only: their contents are
+   * not read. `note` says why one was not looked into.
+   */
+  projectExtensions: Array<{ file: string; note?: string }>;
 }
 
 /**
@@ -136,6 +148,28 @@ const APPROVAL_LIST_SETTINGS: readonly string[] = [
   'permissions.autoMode.hints.allow',
   'permissions.autoMode.environment',
   'dualOutput.inputFile',
+];
+
+/**
+ * Settings that widen what the model may touch without asking, listed under
+ * approval with their values:
+ * - `context.includeDirectories` (v1 `includeDirectories`): added to the
+ *   workspace with `~` expanded (`cli/src/config/config.ts` loadCliConfig),
+ *   and read_file, grep and glob ask only outside the workspace. Not a
+ *   workspace-restricted setting (`settingsUtils.ts`
+ *   WORKSPACE_RESTRICTED_SETTINGS).
+ * - `context.loadFromIncludeDirectories` (v1
+ *   `loadMemoryFromIncludeDirectories`): loads memory files from those
+ *   directories into the prompt.
+ * - `skills.directories`: more directories scanned for skills, which can
+ *   define hooks and commands (settingsSchema.ts).
+ */
+const WIDENING_SETTINGS: readonly string[] = [
+  'context.includeDirectories',
+  'includeDirectories',
+  'context.loadFromIncludeDirectories',
+  'loadMemoryFromIncludeDirectories',
+  'skills.directories',
 ];
 
 /**
@@ -737,6 +771,14 @@ function approvalOf(
       value: shown(setText(classifyAllShell), [classifyAllShell]),
     });
   }
+  for (const key of WIDENING_SETTINGS) {
+    const value = at(settings, key);
+    const items = Array.isArray(value) ? value : [value];
+    for (const item of items) {
+      if (present(item))
+        out.push({ key, value: shown(valueText(item), [item]) });
+    }
+  }
   return out;
 }
 
@@ -902,6 +944,158 @@ function dataSinksOf(
   return out;
 }
 
+/**
+ * The few settings known to change nothing but how the terminal UI looks,
+ * each with the values that keep it that way. Kept small on purpose: a key
+ * not named here is listed under otherSettings, which costs the owner one
+ * tap, where a missed key would cost the guarantee that nothing takes effect
+ * unseen.
+ * - `$schema`: an editor hint; the CLI never reads it.
+ * - `ui.theme`: a built-in theme name only. A value the theme manager treats
+ *   as a path (ends in `.json`, starts with `.`, or is absolute;
+ *   `cli/src/ui/themes/theme-manager.ts` isPath) makes it read a file.
+ * - `ui.hideTips`, `ui.hideBanner`, `ui.hideWindowTitle`,
+ *   `ui.showLineNumbers`, `ui.showCitations`, `general.vimMode`: display and
+ *   keybinding switches, `true` or `false`.
+ */
+const isBool = (v: unknown): boolean => typeof v === 'boolean';
+const OTHER_SETTINGS_HARMLESS: Readonly<
+  Record<string, (v: unknown) => boolean>
+> = {
+  $schema: (v) => typeof v === 'string',
+  'ui.theme': (v) =>
+    typeof v === 'string' &&
+    !v.endsWith('.json') &&
+    !v.startsWith('.') &&
+    !v.startsWith('/') &&
+    !v.startsWith('\\') &&
+    !/^[A-Za-z]:/.test(v),
+  'ui.hideTips': isBool,
+  'ui.hideBanner': isBool,
+  'ui.hideWindowTitle': isBool,
+  'ui.showLineNumbers': isBool,
+  'ui.showCitations': isBool,
+  'general.vimMode': isBool,
+};
+
+export const OTHER_SETTINGS_MAX = 100;
+export const OTHER_SETTINGS_VALUE_MAX = 300;
+/** Deeper than this, a whole object is one leaf shown as JSON. */
+const OTHER_SETTINGS_DEPTH = 32;
+
+/**
+ * Whether a category above reports the leaf at `path` (or decides on its own
+ * that the value there asks nothing): the `mcpServers`, `env` and
+ * `modelProviders` maps whole, every `hooks.<event>` list, and each setting
+ * the category lists name, with everything below it.
+ */
+function reportedByCategory(
+  settings: Record<string, unknown>,
+  path: string[],
+): boolean {
+  const [top, second] = path;
+  if (top === 'mcpServers' || top === 'env' || top === 'modelProviders') {
+    return true;
+  }
+  if (top === 'hooks' && second !== undefined) {
+    // Only a list hooksOf shows whole: every entry a definition whose
+    // `hooks` are all objects. Anything else there (the config fields
+    // `enabled` and `disabled`, an empty or odd list) is listed as it is.
+    const hooks = settings['hooks'];
+    const definitions = isRecord(hooks) ? hooks[second] : undefined;
+    return (
+      Array.isArray(definitions) &&
+      definitions.length > 0 &&
+      definitions.every(
+        (d) =>
+          isRecord(d) &&
+          Array.isArray(d['hooks']) &&
+          d['hooks'].length > 0 &&
+          d['hooks'].every(isRecord),
+      )
+    );
+  }
+  const owned = [
+    ...COMMAND_SETTINGS,
+    ...APPROVAL_MODE_SETTINGS,
+    ...APPROVAL_LIST_SETTINGS,
+    'permissions.autoMode.classifyAllShell',
+    ...WIDENING_SETTINGS,
+    'security.auth.baseUrl',
+    'security.auth.apiKey',
+    'omni.delivery.upload.baseUrl',
+    ...(present(at(settings, 'omni.delivery.upload.baseUrl'))
+      ? ['omni.delivery.upload.apiKeyEnv']
+      : []),
+    'proxy',
+    ...DATA_SINK_SETTINGS,
+  ];
+  // By segment, so a literal key such as `"tools.sandbox"` (which `at` does
+  // not read either) is not taken for the nested one.
+  return owned.some((key) => {
+    const parts = key.split('.');
+    return parts.length <= path.length && parts.every((p, i) => p === path[i]);
+  });
+}
+
+function leavesOf(
+  v: unknown,
+  path: string[],
+  out: Array<[string[], unknown]>,
+): void {
+  if (
+    isRecord(v) &&
+    path.length < OTHER_SETTINGS_DEPTH &&
+    (path.length === 0 || Object.keys(v).length > 0)
+  ) {
+    for (const [key, value] of Object.entries(v)) {
+      leavesOf(value, [...path, key], out);
+    }
+    return;
+  }
+  out.push([path, v]);
+}
+
+function capped(text: string): string {
+  return text.length > OTHER_SETTINGS_VALUE_MAX
+    ? `${text.slice(0, OTHER_SETTINGS_VALUE_MAX)}... [cut]`
+    : text;
+}
+
+/**
+ * Fail closed: every leaf of the file that no category reports and that is
+ * not a harmless cosmetic setting, so a key this module does not know still
+ * makes the page ask. An array or an empty object is one leaf, shown as JSON.
+ */
+function otherSettingsOf(
+  settings: Record<string, unknown>,
+): RepoSettingsFindings['otherSettings'] {
+  const leaves: Array<[string[], unknown]> = [];
+  leavesOf(settings, [], leaves);
+  const out: RepoSettingsFindings['otherSettings'] = [];
+  let more = 0;
+  for (const [path, value] of leaves) {
+    if (reportedByCategory(settings, path)) continue;
+    const key = path.join('.');
+    const harmless =
+      path.every((part) => !part.includes('.')) &&
+      Object.hasOwn(OTHER_SETTINGS_HARMLESS, key)
+        ? OTHER_SETTINGS_HARMLESS[key]
+        : undefined;
+    if (harmless?.(value)) continue;
+    if (out.length >= OTHER_SETTINGS_MAX) {
+      more += 1;
+      continue;
+    }
+    out.push({
+      key: visible(capped(key)),
+      value: shown(capped(setText(value)), [value]),
+    });
+  }
+  if (more > 0) out.push({ key: `and ${more} more settings`, value: '' });
+  return out;
+}
+
 type SettingsPart = Pick<
   RepoSettingsFindings,
   | 'file'
@@ -912,6 +1106,7 @@ type SettingsPart = Pick<
   | 'approval'
   | 'credentials'
   | 'dataSinks'
+  | 'otherSettings'
 >;
 
 function unreadableSettings(reason: string): SettingsPart {
@@ -924,6 +1119,7 @@ function unreadableSettings(reason: string): SettingsPart {
     approval: [],
     credentials: [],
     dataSinks: [],
+    otherSettings: [],
   };
 }
 
@@ -943,6 +1139,7 @@ async function inspectSettingsFile(dir: string): Promise<SettingsPart> {
         approval: [],
         credentials: [],
         dataSinks: [],
+        otherSettings: [],
       };
     }
     if (read.kind === 'unreadable') return unreadableSettings(read.reason);
@@ -963,6 +1160,7 @@ async function inspectSettingsFile(dir: string): Promise<SettingsPart> {
       approval: approvalOf(settings),
       credentials: credentialsOf(settings),
       dataSinks: dataSinksOf(settings),
+      otherSettings: otherSettingsOf(settings),
     };
   } catch (e) {
     return unreadableSettings(`it could not be inspected: ${errorText(e)}`);
@@ -1036,9 +1234,133 @@ async function inspectEnvFiles(
 }
 
 /**
+ * The project directories the CLI loads agents, skills, commands and saved
+ * workflows from, relative to the session folder:
+ * - `.qwen/agents`: project subagents (core `subagents/subagent-manager.ts`
+ *   listSubagentsAtLevel). Their frontmatter can set an approval mode
+ *   (yolo included), MCP servers and hooks.
+ * - `.qwen/skills`, `.agents/skills`: project skills, one per directory
+ *   (core `skills/skill-manager.ts` getSkillsBaseDirs over
+ *   `config/storage.ts` SKILL_PROVIDER_CONFIG_DIRS).
+ * - `.qwen/commands`: project slash commands (cli
+ *   `services/FileCommandLoader.ts` getCommandDirectories via
+ *   `Storage.getProjectCommandsDir`).
+ * - `.qwen/workflows`: saved workflow scripts, surfaced as slash commands
+ *   (core `agents/runtime/workflow-saved.ts` getSavedWorkflowDirs).
+ * Agents and skills from `.claude/...` are read from the owner's home only,
+ * and extensions from the owner's extensions directory only, so neither is
+ * looked for in the repo.
+ */
+const PROJECT_EXTENSION_DIRS: ReadonlyArray<readonly string[]> = [
+  ['.qwen', 'agents'],
+  ['.qwen', 'skills'],
+  ['.agents', 'skills'],
+  ['.qwen', 'commands'],
+  ['.qwen', 'workflows'],
+];
+export const PROJECT_EXTENSIONS_MAX = 100;
+/** Entries looked at in all, so a huge tree cannot stall the clone. */
+const PROJECT_EXTENSIONS_VISIT_MAX = 10_000;
+const PROJECT_EXTENSIONS_DEPTH = 8;
+
+/**
+ * Names every file under PROJECT_EXTENSION_DIRS, sorted, without reading one
+ * and without following a symlink: a symlink, a directory that cannot be
+ * read or one too deep to walk is named with a note, so it still counts. A
+ * missing directory, or a plain file where one is expected, holds nothing
+ * the CLI loads. After PROJECT_EXTENSIONS_MAX names the rest are counted.
+ */
+async function inspectProjectExtensions(
+  dir: string,
+): Promise<RepoSettingsFindings['projectExtensions']> {
+  const out: RepoSettingsFindings['projectExtensions'] = [];
+  const seen = new Set<string>();
+  let more = 0;
+  let visited = 0;
+  let stopped = false;
+  const add = (file: string, note?: string): void => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    if (out.length >= PROJECT_EXTENSIONS_MAX) {
+      more += 1;
+      return;
+    }
+    out.push(
+      note !== undefined
+        ? { file: visible(file), note }
+        : { file: visible(file) },
+    );
+  };
+  const walk = async (abs: string, rel: string, depth: number) => {
+    let entries;
+    try {
+      entries = await readdir(abs, { withFileTypes: true });
+    } catch (e) {
+      add(rel, `cannot be read (${errCode(e)})`);
+      return;
+    }
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const entry of entries) {
+      if (visited >= PROJECT_EXTENSIONS_VISIT_MAX) {
+        stopped = true;
+        return;
+      }
+      visited += 1;
+      const childRel = `${rel}/${entry.name}`;
+      if (entry.isSymbolicLink()) {
+        add(childRel, 'a symbolic link, not followed');
+      } else if (entry.isDirectory()) {
+        if (depth + 1 >= PROJECT_EXTENSIONS_DEPTH) {
+          add(childRel, 'a directory too deep to list');
+        } else {
+          await walk(join(abs, entry.name), childRel, depth + 1);
+        }
+      } else {
+        add(childRel);
+      }
+    }
+  };
+  for (const parts of PROJECT_EXTENSION_DIRS) {
+    if (stopped) break;
+    let path = dir;
+    let found = true;
+    for (const [index, part] of parts.entries()) {
+      path = join(path, part);
+      const rel = parts.slice(0, index + 1).join('/');
+      try {
+        const st = await lstat(path);
+        if (st.isSymbolicLink()) {
+          add(rel, 'a symbolic link, not followed');
+          found = false;
+        } else if (!st.isDirectory()) {
+          found = false;
+        }
+      } catch (e) {
+        const code = errCode(e);
+        if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+          add(rel, `cannot be read (${code})`);
+        }
+        found = false;
+      }
+      if (!found) break;
+    }
+    if (found) await walk(path, parts.join('/'), 0);
+  }
+  if (stopped) {
+    out.push({
+      file: `and more not listed: stopped after ${PROJECT_EXTENSIONS_VISIT_MAX} entries`,
+    });
+  } else if (more > 0) {
+    out.push({ file: `and ${more} more` });
+  }
+  return out;
+}
+
+/**
  * Reads what `<dir>` brings: `.qwen/settings.json` (hooks, MCP servers,
  * command, approval, credential and data-sink settings), `.mcp.json` servers, and the
- * variable names of `.qwen/.env` and `.env`. Never throws: a file it cannot
+ * variable names of `.qwen/.env` and `.env`, then every other settings leaf
+ * and the names of the project's agent, skill, command and workflow files. Never throws: a file it cannot
  * read, parse or walk is reported as unreadable.
  */
 export async function inspectRepoSettings(
@@ -1047,6 +1369,17 @@ export async function inspectRepoSettings(
   const settings = await inspectSettingsFile(dir);
   const mcpJson = await inspectMcpJson(dir);
   const envFiles = await inspectEnvFiles(dir);
+  let projectExtensions: RepoSettingsFindings['projectExtensions'];
+  try {
+    projectExtensions = await inspectProjectExtensions(dir);
+  } catch (e) {
+    projectExtensions = [
+      {
+        file: '.qwen',
+        note: visible(`could not be inspected: ${errorText(e)}`),
+      },
+    ];
+  }
   return {
     ...settings,
     mcpServers: [...settings.mcpServers, ...mcpJson.servers],
@@ -1054,6 +1387,7 @@ export async function inspectRepoSettings(
       ? { mcpJsonUnreadable: mcpJson.unreadable }
       : {}),
     envFiles,
+    projectExtensions,
   };
 }
 
@@ -1074,6 +1408,8 @@ export function hasRepoFindings(findings: RepoSettingsFindings): boolean {
     findings.dataSinks.length > 0 ||
     findings.envFiles.some(
       (e) => e.unreadable !== undefined || e.keys.length > 0,
-    )
+    ) ||
+    findings.otherSettings.length > 0 ||
+    findings.projectExtensions.length > 0
   );
 }
