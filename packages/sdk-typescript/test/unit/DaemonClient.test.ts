@@ -3410,6 +3410,114 @@ describe('DaemonClient', () => {
       });
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
+
+    // #259: resume and abandon of a paused subagent on the daemon.
+    it('resumes a subagent with its first instruction', async () => {
+      const body = {
+        sessionId: 'with/slash',
+        subagentRef: 'agent/1',
+        taskId: 'researcher-1',
+        outcome: 'resumed',
+        status: 'running',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.resumeSubagentSession(
+          'with/slash',
+          'agent/1',
+          'pick up the TODO list',
+          'client-1',
+        ),
+      ).resolves.toEqual(body);
+
+      expect(calls[0]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/session/with%2Fslash/subagents/agent%2F1/resume',
+      });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        message: 'pick up the TODO list',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('resumes without an instruction and returns a refusal as data', async () => {
+      const body = {
+        sessionId: 's-1',
+        subagentRef: 'agent-1',
+        taskId: 'agent-1',
+        outcome: 'refused',
+        code: 'capacity_full',
+        reason: 'maximum concurrent background agents (4) reached',
+        status: 'paused',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.resumeSubagentSession('s-1', 'agent-1'),
+      ).resolves.toEqual(body);
+      expect(JSON.parse(calls[0]!.body!)).toEqual({});
+    });
+
+    it('abandons a subagent', async () => {
+      const body = {
+        sessionId: 'with/slash',
+        subagentRef: 'agent/1',
+        taskId: 'researcher-1',
+        outcome: 'abandoned',
+        status: 'cancelled',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.abandonSubagentSession('with/slash', 'agent/1', 'client-1'),
+      ).resolves.toEqual(body);
+
+      expect(calls[0]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/session/with%2Fslash/subagents/agent%2F1/abandon',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('throws the daemon 404 for an unknown subagent ref', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, {
+          error: 'Subagent session not found',
+          code: 'session_not_found',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.resumeSubagentSession('s-1', 'nobody'),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+      await expect(
+        client.abandonSubagentSession('s-1', 'nobody'),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+    });
+
+    it('exposes resume and abandon on a workspace client', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { outcome: 'resumed', status: 'running' }),
+      );
+      const workspace = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+      }).workspaceById('ws-1');
+
+      await workspace.resumeSubagentSession('s-1', 'agent-1', 'go on');
+      await workspace.abandonSubagentSession('s-1', 'agent-1');
+
+      expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+        'POST http://daemon/session/s-1/subagents/agent-1/resume',
+        'POST http://daemon/session/s-1/subagents/agent-1/abandon',
+      ]);
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ message: 'go on' });
+    });
   });
 
   describe('session rewind transport', () => {
