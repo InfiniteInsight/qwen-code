@@ -14,6 +14,7 @@ import { render } from 'ink-testing-library';
 import {
   BackgroundAgentResumeService,
   BackgroundTaskRegistry,
+  MAX_RETAINED_TERMINAL_AGENTS,
   type AgentTaskRegistration,
   type Config,
 } from '@qwen-code/qwen-code-core';
@@ -420,6 +421,39 @@ describe('subagent controls in a daemon-attached tab', () => {
       expect(h.registry.get('agent-paused')).toBeUndefined(),
     );
     expect(h.registry.get('agent-running')?.status).toBe('running');
+  });
+
+  // #259 review: the roster lists only the newest MAX_RETAINED_TERMINAL_AGENTS
+  // paused agents, so a full paused list says nothing about the ones it left
+  // out; a mirror pushed out of it still exists on the daemon.
+  it('keeps a paused mirror that only fell out of a full paused roster', async () => {
+    const paused = (index: number) =>
+      daemonAgent({
+        id: `agent-paused-${index}`,
+        description: `Paused ${index}`,
+        startTime: 1_000 + index,
+      });
+    const h = setupAttached(
+      Array.from({ length: MAX_RETAINED_TERMINAL_AGENTS }, (_, i) => paused(i)),
+    );
+    await vi.waitFor(() =>
+      expect(h.registry.get('agent-paused-0')?.status).toBe('paused'),
+    );
+
+    // A newer paused agent pushes agent-paused-0 out of the capped roster.
+    h.setRoster(
+      Array.from({ length: MAX_RETAINED_TERMINAL_AGENTS }, (_, i) =>
+        paused(i + 1),
+      ),
+    );
+    h.taskChanged();
+
+    await vi.waitFor(() =>
+      expect(
+        h.registry.get(`agent-paused-${MAX_RETAINED_TERMINAL_AGENTS}`)?.status,
+      ).toBe('paused'),
+    );
+    expect(h.registry.get('agent-paused-0')?.status).toBe('paused');
   });
 });
 

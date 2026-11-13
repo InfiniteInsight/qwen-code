@@ -16,6 +16,7 @@
  */
 
 import { useCallback, useEffect, useRef } from 'react';
+import { MAX_RETAINED_TERMINAL_AGENTS } from '@qwen-code/qwen-code-core/agents/background-tasks.js';
 import {
   type AgentTask,
   type AgentTaskRemoteActionResult,
@@ -610,8 +611,13 @@ export function useDaemonSubagentSync(
 
       // A paused agent the daemon's full roster no longer lists was abandoned
       // there (from the phone, or by the model's task_stop): drop the mirror
-      // so it does not stay listed here.
-      if (options.fullRoster) {
+      // so it does not stay listed here. The roster keeps only the newest
+      // MAX_RETAINED_TERMINAL_AGENTS paused agents, so a full paused list
+      // proves nothing about one it left out; prune only below the cap.
+      const listedPaused = tasks.filter(
+        (task) => task?.status === 'paused',
+      ).length;
+      if (options.fullRoster && listedPaused < MAX_RETAINED_TERMINAL_AGENTS) {
         const listed = new Set(tasks.map((task) => task?.id));
         for (const entry of registry.getAll()) {
           if (
