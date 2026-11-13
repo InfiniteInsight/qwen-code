@@ -720,10 +720,14 @@ function commandsOf(
   const env = settings['env'];
   if (isRecord(env)) {
     for (const [name, value] of Object.entries(env)) {
-      if (present(value)) {
+      // Every string, blank included: the CLI sets any string value
+      // (`environment.ts` loadEnvironment), and an empty one still means
+      // something to some programs (GIT_SSL_NO_VERIFY= turns off git's TLS
+      // check).
+      if (typeof value === 'string' || present(value)) {
         out.push({
           key: visible(`env.${name}`),
-          value: shown(valueText(value), [value]),
+          value: shown(setText(value), [value]),
         });
       }
     }
@@ -838,16 +842,23 @@ function credentialsOf(
   const protocols = isRecord(settings['providerProtocol'])
     ? settings['providerProtocol']
     : {};
+  if (isRecord(providers) && Object.keys(providers).length === 0) {
+    // An empty map still replaces the owner's (REPLACE merge).
+    out.push({ key: 'modelProviders', value: '{}' });
+  }
   if (isRecord(providers)) {
     for (const [provider, models] of Object.entries(providers)) {
       const base = `modelProviders.${provider}`;
+      if (Array.isArray(models) && models.length === 0) {
+        out.push({ key: visible(base), value: '[]' });
+        continue;
+      }
       if (!Array.isArray(models)) {
-        if (present(models)) {
-          out.push({
-            key: visible(base),
-            value: shown(valueText(models), [models]),
-          });
-        }
+        // Listed whatever it is: the map it sits in replaces the owner's.
+        out.push({
+          key: visible(base),
+          value: shown(setText(models), [models]),
+        });
         continue;
       }
       models.forEach((model, index) => {
@@ -994,8 +1005,10 @@ function reportedByCategory(
   path: string[],
 ): boolean {
   const [top, second] = path;
+  // Whole maps only when they are maps: another value there is walked by
+  // no category, so it is listed under otherSettings.
   if (top === 'mcpServers' || top === 'env' || top === 'modelProviders') {
-    return true;
+    return isRecord(settings[top]);
   }
   if (top === 'hooks' && second !== undefined) {
     // Only a list hooksOf shows whole: every entry a definition whose

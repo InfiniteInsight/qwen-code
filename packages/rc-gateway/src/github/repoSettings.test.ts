@@ -1244,4 +1244,62 @@ describe('inspectRepoSettings', () => {
     });
     expect(r.projectExtensions[100]).toEqual({ file: 'and 30 more' });
   });
+
+  it('lists a blank env value, which the CLI still sets, so GIT_SSL_NO_VERIFY="" asks', async () => {
+    const r = await inspectRepoSettings(
+      repo(JSON.stringify({ env: { GIT_SSL_NO_VERIFY: '' } })),
+    );
+    expect(r.commands).toEqual([{ key: 'env.GIT_SSL_NO_VERIFY', value: '""' }]);
+    expect(hasRepoFindings(r)).toBe(true);
+    const two = await inspectRepoSettings(
+      repo(JSON.stringify({ env: { A: '', B: '   ', C: 'x' } })),
+    );
+    expect(two.commands).toEqual([
+      { key: 'env.A', value: '""' },
+      { key: 'env.B', value: '"   "' },
+      { key: 'env.C', value: 'x' },
+    ]);
+  });
+
+  it('lists an empty modelProviders map or provider list, which replaces the owner providers', async () => {
+    const empty = await inspectRepoSettings(
+      repo(JSON.stringify({ modelProviders: {} })),
+    );
+    expect(empty.credentials).toEqual([{ key: 'modelProviders', value: '{}' }]);
+    expect(hasRepoFindings(empty)).toBe(true);
+    const list = await inspectRepoSettings(
+      repo(JSON.stringify({ modelProviders: { openai: [] } })),
+    );
+    expect(list.credentials).toEqual([
+      { key: 'modelProviders.openai', value: '[]' },
+    ]);
+    expect(hasRepoFindings(list)).toBe(true);
+    const nulled = await inspectRepoSettings(
+      repo(JSON.stringify({ modelProviders: { openai: null } })),
+    );
+    expect(nulled.credentials).toEqual([
+      { key: 'modelProviders.openai', value: 'null' },
+    ]);
+  });
+
+  it('lists an mcpServers, env or modelProviders value that is not a map, rather than dropping it', async () => {
+    const r = await inspectRepoSettings(
+      repo(
+        JSON.stringify({
+          mcpServers: ['x'],
+          env: 'A=1',
+          modelProviders: 'openai',
+        }),
+      ),
+    );
+    expect(hasRepoFindings(r)).toBe(true);
+    const shownKeys = [
+      ...r.otherSettings.map((o) => o.key),
+      ...r.credentials.map((c) => c.key),
+      ...r.commands.map((c) => c.key),
+    ];
+    for (const k of ['mcpServers', 'env', 'modelProviders']) {
+      expect(shownKeys).toContain(k);
+    }
+  });
 });
