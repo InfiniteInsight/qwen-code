@@ -14,7 +14,9 @@
  * route of their own) after attaching whatever listeners/CDP sessions they
  * need. `url` is the gateway origin, e.g. `http://127.0.0.1:41234`.
  */
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { EventEmitter, once } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
@@ -38,6 +40,10 @@ import {
 } from '../../src/hostActions.js';
 import { HostTabRegistry, type TabProcProbe } from '../../src/hostTabs.js';
 import { TerminalRequestLog } from '../../src/terminals.js';
+import { openGitHubDeps, type GitHubRouteDeps } from '../../src/routes/github.js';
+import type { CloneChild, CloneSpawner } from '../../src/github/clone.js';
+import type { GhRunner } from '../../src/github/credentials.js';
+import { resetRepoCache } from '../../src/github/repos.js';
 
 /**
  * `_meta` is the envelope the real EventBus stamps when it publishes
@@ -310,6 +316,71 @@ export interface BootViewerOptions {
    * `mirrored` names sessions a terminal already shows.
    */
   hostTabs?: { mirrored?: string[] };
+  /**
+   * #257: mount the real GitHub routes (`openGitHubDeps`) over a fake gh
+   * runner, a fake GitHub `fetch`, a token store in the boot's temp dir and a
+   * fake git spawner. Nothing touches the real `~/.qwen`, gh, a remote or the
+   * network, and every token the fakes hold is a made-up string listed in
+   * `viewer.github.secrets`.
+   *
+   * - `ghLogins`: logins `gh auth status` lists (each has a fake token).
+   * - `oauthClientId`: written to the temp `github-oauth.json`; absent, OAuth
+   *   connect is not set up.
+   * - `connected`: OAuth logins already in the token store (not in the brief's
+   *   shape; a page scenario cannot reach the store before the gateway reads it).
+   * - `repos`: the repos GitHub lists, keyed by account id (`gh:octocat`,
+   *   `oauth:octo-new`) or by bare login; each entry is a GitHub API repo
+   *   object (`full_name`, `private`, `default_branch`, `pushed_at`,
+   *   `description`).
+   * - `flow`: how a started device flow ends: `connect` (default; approved
+   *   after two pending polls, as the login `octo-new`), `deny` or `expire`.
+   * - `settings`: the text the fake clone writes as `.qwen/settings.json` in
+   *   the destination; null or absent writes none.
+   * - `cloneExit`: the fake git's exit code (default 0). A non-zero exit
+   *   writes nothing and prints one line on stderr.
+   */
+  github?: {
+    ghLogins?: string[];
+    oauthClientId?: string;
+    connected?: string[];
+    repos?: Record<string, unknown[]>;
+    flow?: 'connect' | 'deny' | 'expire';
+    settings?: string | null;
+    cloneExit?: number;
+  };
+}
+
+/** #257: the fake device code GitHub hands the harness gateway. */
+export const GITHUB_HARNESS_DEVICE_CODE = 'harness-device-code-secret-0123456789';
+/** #257: the user code the fake GitHub shows. */
+export const GITHUB_HARNESS_USER_CODE = 'WDJB-MJHT';
+/** #257: the login a `connect` flow connects. */
+export const GITHUB_HARNESS_NEW_LOGIN = 'octo-new';
+
+class HarnessGitChild extends EventEmitter implements CloneChild {
+  readonly pid = undefined;
+  readonly stdout = new PassThrough();
+  readonly stderr = new PassThrough();
+  kill(): boolean {
+    void this.exit(null);
+    return true;
+  }
+  async exit(code: number | null, stderrLine?: string) {
+    const ends = [once(this.stdout, 'end'), once(this.stderr, 'end')];
+    if (stderrLine) this.stderr.write(`${stderrLine}\n`);
+    this.stdout.end();
+    this.stderr.end();
+    await Promise.all(ends);
+    this.emit('exit', code, null);
+    this.emit('close', code, null);
+  }
+}
+
+function harnessJson(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
 }
 
 /** The label the harness's one host action carries. */
@@ -344,6 +415,174 @@ function harnessHostActions(): HostActions {
   );
 }
 
+/**
+ * The fakes behind the `github` option, over the REAL `openGitHubDeps` (the
+ * token store, the device flows and the clone jobs are the production ones).
+ */
+async function harnessGitHub(
+  o: NonNullable<BootViewerOptions['github']>,
+  dir: string,
+): Promise<NonNullable<Viewer['github']>> {
+  const rcDir = join(dir, 'rc');
+  mkdirSync(rcDir, { mode: 0o700 });
+  if (o.oauthClientId !== undefined) {
+    writeFileSync(
+      join(rcDir, 'github-oauth.json'),
+      JSON.stringify({ clientId: o.oauthClientId }),
+    );
+  }
+  const plain = (login: string) => login.replace(/[^A-Za-z0-9]/g, '');
+  const ghToken = (login: string) =>
+    `gho_harnessFakeGh${plain(login)}AAAAAAAAAAAAAAAA`;
+  const oauthToken = (login: string) =>
+    `gho_harnessFakeOauth${plain(login)}BBBBBBBBBBBBBBBB`;
+  const ghLogins = o.ghLogins ?? [];
+  const connected = o.connected ?? [];
+  const newLogin = GITHUB_HARNESS_NEW_LOGIN;
+  const accountOf = new Map<string, string>();
+  for (const l of ghLogins) accountOf.set(ghToken(l), `gh:${l}`);
+  for (const l of connected) accountOf.set(oauthToken(l), `oauth:${l}`);
+  accountOf.set(oauthToken(newLogin), `oauth:${newLogin}`);
+  const secrets = [...accountOf.keys(), GITHUB_HARNESS_DEVICE_CODE];
+  const requests: string[] = [];
+  const ghCalls: string[][] = [];
+  const clones: Array<{ args: string[]; dest: string }> = [];
+
+  const run: GhRunner = async (argv) => {
+    ghCalls.push([...argv]);
+    if (argv[1] === 'auth' && argv[2] === 'status') {
+      if (ghLogins.length === 0) {
+        return {
+          exitCode: 1,
+          stdout: '',
+          stderr: 'You are not logged into any GitHub hosts.\n',
+        };
+      }
+      const text = ghLogins
+        .map((l, i) =>
+          [
+            'github.com',
+            `  \u2713 Logged in to github.com account ${l} (keyring)`,
+            `  - Active account: ${i === 0}`,
+            "  - Token scopes: 'gist', 'read:org', 'repo'",
+          ].join('\n'),
+        )
+        .join('\n');
+      return { exitCode: 0, stdout: text + '\n', stderr: '' };
+    }
+    if (argv[1] === 'auth' && argv[2] === 'token') {
+      const user = argv[argv.indexOf('--user') + 1] ?? '';
+      if (ghLogins.includes(user)) {
+        return { exitCode: 0, stdout: `${ghToken(user)}\n`, stderr: '' };
+      }
+      return {
+        exitCode: 1,
+        stdout: '',
+        stderr: 'no oauth token found for github.com',
+      };
+    }
+    return { exitCode: 1, stdout: '', stderr: 'unexpected' };
+  };
+
+  let polls = 0;
+  let flow = o.flow ?? 'connect';
+  const fetchFake = (async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    const url = String(input instanceof Request ? input.url : input);
+    requests.push(`${init?.method ?? 'GET'} ${url.split('?')[0]}`);
+    if (url.startsWith('https://github.com/login/device/code')) {
+      return harnessJson({
+        device_code: GITHUB_HARNESS_DEVICE_CODE,
+        user_code: GITHUB_HARNESS_USER_CODE,
+        verification_uri: 'https://github.com/login/device',
+        expires_in: 900,
+        interval: 1,
+      });
+    }
+    if (url.startsWith('https://github.com/login/oauth/access_token')) {
+      polls++;
+      if (flow === 'deny') return harnessJson({ error: 'access_denied' });
+      if (flow === 'expire') return harnessJson({ error: 'expired_token' });
+      if (polls <= 2) return harnessJson({ error: 'authorization_pending' });
+      return harnessJson({
+        access_token: oauthToken(newLogin),
+        token_type: 'bearer',
+        scope: 'repo',
+      });
+    }
+    const auth = new Headers(init?.headers).get('authorization') ?? '';
+    const account = accountOf.get(auth.replace(/^(?:token|bearer)\s+/i, ''));
+    if (url === 'https://api.github.com/user') {
+      return account
+        ? harnessJson({ login: account.slice(account.indexOf(':') + 1) })
+        : harnessJson({ message: 'Bad credentials' }, 401);
+    }
+    if (url.startsWith('https://api.github.com/user/repos')) {
+      if (!account) return harnessJson({ message: 'Bad credentials' }, 401);
+      const login = account.slice(account.indexOf(':') + 1);
+      return harnessJson(o.repos?.[account] ?? o.repos?.[login] ?? []);
+    }
+    return harnessJson({ message: 'not found' }, 404);
+  }) as typeof globalThis.fetch;
+
+  const spawn: CloneSpawner = (_program, args) => {
+    const child = new HarnessGitChild();
+    const dest = args[args.length - 1] ?? '';
+    clones.push({ args: [...args], dest });
+    setImmediate(() => {
+      const code = o.cloneExit ?? 0;
+      if (code !== 0) {
+        void child.exit(code, 'fatal: harness clone failed');
+        return;
+      }
+      try {
+        mkdirSync(join(dest, '.git'), { recursive: true });
+        if (typeof o.settings === 'string') {
+          mkdirSync(join(dest, '.qwen'), { recursive: true });
+          writeFileSync(join(dest, '.qwen', 'settings.json'), o.settings);
+        }
+      } catch {
+        void child.exit(128, 'fatal: harness could not write the destination');
+        return;
+      }
+      void child.exit(0);
+    });
+    return child;
+  };
+
+  const deps = await openGitHubDeps({
+    rcDir,
+    env: { PATH: process.env['PATH'] },
+    log: () => {},
+    fetch: fetchFake,
+    run,
+    clones: {
+      spawn,
+      processGroups: false,
+      env: { PATH: process.env['PATH'] },
+    },
+    flows: {
+      // A poll every 10 ms instead of every second, so a flow ends well
+      // inside the page's own 2 s check.
+      setTimeout: (fn, ms) => setTimeout(fn, ms / 100),
+    },
+  });
+  if (!deps) throw new Error('github deps did not open');
+  const put = (
+    deps.store as unknown as {
+      put(l: string, t: string, s: string[]): Promise<void>;
+    }
+  ).put.bind(deps.store);
+  for (const l of connected) await put(l, oauthToken(l), ['repo']);
+  const setFlow = (f: 'connect' | 'deny' | 'expire') => {
+    flow = f;
+    polls = 0;
+  };
+  return { deps, requests, ghCalls, clones, secrets, rcDir, setFlow };
+}
+
 export interface Viewer {
   page: Page;
   /** Gateway origin, without a trailing slash. */
@@ -366,6 +605,22 @@ export interface Viewer {
     advance(ms: number): void;
     /** A launcher poll, now on the registry's clock. */
     poll(): Promise<void>;
+  };
+  /** #257: set when booted with `github`. */
+  github?: {
+    deps: GitHubRouteDeps;
+    /** The GitHub requests the fake saw, as `METHOD url`. */
+    requests: string[];
+    /** `gh` argvs the fake runner saw. */
+    ghCalls: string[][];
+    /** Each git clone the fake spawner ran: its argv and destination. */
+    clones: Array<{ args: string[]; dest: string }>;
+    /** Every fake token, and the device code: none may reach the page. */
+    secrets: string[];
+    /** The temp dir holding github-oauth.json and the token store. */
+    rcDir: string;
+    /** How the next device flow ends (restarts the pending count). */
+    setFlow(flow: 'connect' | 'deny' | 'expire'): void;
   };
   close(): Promise<void>;
 }
@@ -571,7 +826,9 @@ export async function bootViewer(
     : undefined;
   const mirrored = new Set(opts.hostTabs?.mirrored ?? []);
   const goneFolders = new Set<string>();
+  const github = opts.github ? await harnessGitHub(opts.github, dir) : undefined;
   const { app } = createGatewayApp({
+    ...(github ? { github: github.deps } : {}),
     ...(tabRegistry && tabRequests
       ? {
           terminalRequests: tabRequests,
@@ -632,6 +889,7 @@ export async function bootViewer(
     ...(daemonPool
       ? { pool: { workspaces: () => daemonPool.workspaces(), spawned } }
       : {}),
+    ...(github ? { github } : {}),
     ...(tabRegistry && tabRequests
       ? {
           hostTabs: {
@@ -653,6 +911,11 @@ export async function bootViewer(
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       if (daemonPool) await daemonPool.stopAll();
+      if (github) {
+        github.deps.flows.stopAll();
+        github.deps.clones.stopAll();
+        resetRepoCache();
+      }
       for (const own of spawnedStubs) await own.close();
       await stub.close();
       rmSync(dir, { recursive: true, force: true });

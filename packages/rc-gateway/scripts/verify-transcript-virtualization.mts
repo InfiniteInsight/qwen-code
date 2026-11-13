@@ -37,7 +37,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type { Page, Route } from 'playwright';
-import { bootViewer, harnessRuntimeRoot, HARNESS_HOST_NAME, HOST_ACTION_LABEL, type BootViewerOptions, type Frame, type Viewer } from './lib/viewerHarness.mjs';
+import { bootViewer, harnessRuntimeRoot, GITHUB_HARNESS_USER_CODE, HARNESS_HOST_NAME, HOST_ACTION_LABEL, type BootViewerOptions, type Frame, type Viewer } from './lib/viewerHarness.mjs';
 import { resolveChatsDir } from '../src/sessions/chatsPath.js';
 import type { StubDaemonOptions } from '../src/testing/stubDaemon.js';
 
@@ -3052,6 +3052,8 @@ type PageScenario =
         hooks?: StubDaemonOptions['hooks'];
         /** #212: the host tab routes over a real registry (see BootViewerOptions). */
         hostTabs?: { mirrored?: string[] };
+        /** #257: the GitHub routes over fakes (see BootViewerOptions). */
+        github?: BootViewerOptions['github'];
       };
       /** Runs before navigation (routes). */
       before?: (page: Page) => Promise<void>;
@@ -23035,6 +23037,7 @@ async function runPageScenario(
     runs: s.stub?.runs,
     hooks: s.stub?.hooks,
     hostTabs: s.stub?.hostTabs,
+    github: s.stub?.github,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];
@@ -33331,6 +33334,325 @@ PAGE_SCENARIOS.push({
       expect(sw!.checked === 'true', `the switch is aria-checked=${sw!.checked}, not back to true`);
       expect((await htIds(page)).length === 3, 'the threads came back although the save failed');
       return `the switch went back to ticked, the 3 rows stayed, the status line reads ${JSON.stringify(status.slice(0, 80))}`;
+    },
+  });
+}
+
+// #257. More > Host > GitHub: the accounts the gateway clones with, and
+// Connect with GitHub (device flow). The gateway side is the REAL routes over
+// a fake gh, a fake GitHub and a temp token store (BootViewerOptions.github),
+// so these scenarios meet the real answers, not the page's own idea of them.
+// Every token the fakes hold is a made-up string in viewer.github.secrets,
+// and none of them, nor the device code, may be anywhere in the page.
+{
+  type GhEntry = { account: string; login: string; how: string; err: string; forget: string | null; forgetH: number };
+  const ghEntries = (page: Page) =>
+    page.evaluate(String.raw`Array.from(document.querySelectorAll('#github-accounts .gh-entry')).map((e) => {
+      const b = e.querySelector('button');
+      const err = e.querySelector('.gh-err');
+      return {
+        account: e.dataset.account,
+        login: e.querySelector('.gh-login').textContent,
+        how: e.querySelector('.gh-how').textContent,
+        err: err ? err.textContent : '',
+        forget: b ? b.textContent : null,
+        forgetH: b ? Math.round(b.getBoundingClientRect().height) : 0,
+      };
+    })`) as Promise<GhEntry[]>;
+  const ghOpen = async (page: Page) => {
+    await page.click('#h1-more');
+    await page.waitForSelector('#more-github', { state: 'visible' });
+    await page.click('#more-screen .row[data-panel="github"]');
+    await page.waitForSelector('#panel-github', { state: 'visible' });
+  };
+  const ghWaitEntries = (page: Page, n: number) =>
+    page.waitForFunction(`document.querySelectorAll('#github-accounts .gh-entry').length === ${n}`, null, { timeout: 10_000 });
+  /** Which of `needles` are in the page's markup, text, storage or address. */
+  const ghLeaks = (page: Page, needles: string[]) =>
+    page.evaluate(
+      String.raw`((needles) => {
+        const hay = [
+          document.documentElement.outerHTML,
+          document.body.innerText,
+          JSON.stringify(Object.entries(localStorage)),
+          JSON.stringify(Object.entries(sessionStorage)),
+          location.href,
+        ].join('\n');
+        return needles.filter((n) => hay.includes(n));
+      })`.concat('(', JSON.stringify(needles), ')'),
+    ) as Promise<string[]>;
+  const ghNote = (page: Page) =>
+    page.evaluate(`(() => { const n = document.getElementById('github-note'); return n && !n.hidden ? n.textContent : ''; })()`) as Promise<string>;
+  const GH_CLIENT = 'Iv1.harnessclient';
+  const ghStatusPaths = (page: Page) => {
+    const seen: string[] = [];
+    page.on('request', (r) => {
+      const u = new URL(r.url());
+      if (r.method() === 'GET' && /^\/rc\/github\/oauth\/[0-9a-f]{32}$/.test(u.pathname)) seen.push(u.pathname);
+    });
+    return seen;
+  };
+  const ghStarts = (page: Page) => {
+    const seen: string[] = [];
+    page.on('request', (r) => {
+      if (r.method() === 'POST' && new URL(r.url()).pathname === '/rc/github/oauth/start') seen.push(r.url());
+    });
+    return seen;
+  };
+  const ghStart = async (page: Page) => {
+    await page.click('#github-connect-btn');
+    await page.waitForSelector('#github-code', { state: 'visible' });
+  };
+
+  PAGE_SCENARIOS.push({
+    name: "P571 More > Host > GitHub lists the laptop's gh logins and the connected accounts, and shows no token",
+    waitView: false,
+    stub: { github: { ghLogins: ['octocat', 'hubot'], connected: ['octo-oauth'], oauthClientId: GH_CLIENT } },
+    run: async ({ page, viewer }) => {
+      const gh = viewer.github!;
+      const sent: string[] = [];
+      page.on('request', (r) => {
+        const u = new URL(r.url());
+        if (u.pathname.startsWith('/rc/github')) sent.push(`${r.method()} ${u.pathname}`);
+      });
+      await ghOpen(page);
+      expect((await page.textContent('#panel-title'))?.trim() === 'GitHub', 'the panel is not titled GitHub');
+      await ghWaitEntries(page, 3);
+      const entries = await ghEntries(page);
+      const by = new Map(entries.map((e) => [e.account, e]));
+      for (const l of ['octocat', 'hubot']) {
+        const e = by.get(`gh:${l}`);
+        expect(!!e && e.login === l && e.how === 'gh on this host' && e.forget === null, `${l} reads ${JSON.stringify(e)}`);
+      }
+      const o = by.get('oauth:octo-oauth');
+      expect(!!o && o.login === 'octo-oauth' && o.how === 'connected just now', `the connected account reads ${JSON.stringify(o)}`);
+      expect(o!.forget === 'Forget' && o!.forgetH >= 44, `Forget is ${JSON.stringify([o!.forget, o!.forgetH])}`);
+      expect(gh.ghCalls.some((c) => c[2] === 'status'), 'the gateway never asked gh');
+      await shot(page, 'p571-github-accounts-390');
+      // Forget asks first; Keep it changes nothing and sends nothing.
+      await page.click('.gh-forget[data-login="octo-oauth"]');
+      await page.waitForSelector('#github-confirm', { state: 'visible' });
+      const ask = (await page.textContent('#github-confirm')) ?? '';
+      expect(ask.includes('Forget octo-oauth on this gateway?'), `the question reads ${JSON.stringify(ask)}`);
+      const btnH = (await page.evaluate(`Array.from(document.querySelectorAll('#github-confirm button')).map((b) => Math.round(b.getBoundingClientRect().height))`)) as number[];
+      expect(btnH.length === 2 && btnH.every((h) => h >= 44), `the confirm buttons are ${JSON.stringify(btnH)} px tall`);
+      await page.click('#github-forget-no');
+      expect(!(await page.isVisible('#github-confirm')) && (await ghEntries(page)).length === 3, 'Keep it changed something');
+      expect(!sent.some((s) => s.startsWith('DELETE')), `Keep it sent ${JSON.stringify(sent)}`);
+      await page.click('.gh-forget[data-login="octo-oauth"]');
+      await page.click('#github-forget-yes');
+      await page.waitForFunction(`document.querySelectorAll('#github-accounts .gh-entry[data-account="oauth:octo-oauth"]').length === 0`, null, { timeout: 10_000 });
+      await ghWaitEntries(page, 2);
+      const del = sent.filter((s) => s.startsWith('DELETE'));
+      expect(del.length === 1 && del[0] === 'DELETE /rc/github/accounts/oauth/octo-oauth', `the page sent ${JSON.stringify(del)}`);
+      const said = await ghNote(page);
+      expect(said.startsWith('Forgot octo-oauth on this gateway. Its token stays valid at GitHub until you revoke it there: '), `the note reads ${JSON.stringify(said)}`);
+      const link = (await page.evaluate(`(() => { const a = document.querySelector('#github-note a'); return a && { href: a.href, target: a.target, rel: a.rel, h: Math.round(a.getBoundingClientRect().height) }; })()`)) as { href: string; target: string; rel: string; h: number } | null;
+      expect(!!link && link.href === 'https://github.com/settings/applications' && link.target === '_blank' && link.rel === 'noopener' && link.h >= 44, `the revoke link is ${JSON.stringify(link)}`);
+      // A gh login that gh lists as failing says why, in words.
+      await page.route('**/rc/github/accounts', async (route) => {
+        const res = await route.fetch();
+        const body = (await res.json()) as { accounts: unknown[] };
+        body.accounts.push({ id: 'gh:stale-user', source: 'gh', login: 'stale-user', error: 'The token in keyring is invalid.' });
+        await route.fulfill({ response: res, json: body });
+      });
+      await page.evaluate('readGitHubAccounts()');
+      await ghWaitEntries(page, 3);
+      const stale = (await ghEntries(page)).find((e) => e.account === 'gh:stale-user');
+      expect(!!stale && stale.err === 'problem: The token in keyring is invalid.' && stale.forget === null, `the failing login reads ${JSON.stringify(stale)}`);
+      await page.unroute('**/rc/github/accounts');
+      await page.evaluate('readGitHubAccounts()');
+      await ghWaitEntries(page, 2);
+      // No token, and no device code, anywhere on the page.
+      const leaked = await ghLeaks(page, gh.secrets);
+      expect(leaked.length === 0, `the page holds ${JSON.stringify(leaked)}`);
+      expect(gh.secrets.length >= 3, 'the harness named no tokens to look for');
+      // The row counts the accounts when More shows again.
+      await page.click('#panel-back');
+      const val = (await page.textContent('#more-screen .row[data-panel="github"] .val')) ?? '';
+      expect(val === '2', `the row reads ${JSON.stringify(val)}`);
+      // An older gateway has no GitHub row.
+      await page.evaluate('caps.remoteControl.githubClone = false; undefined');
+      await page.click('#more-back');
+      await page.click('#h1-more');
+      await page.waitForSelector('#more-screen .row[data-panel="daemons"]', { state: 'visible' });
+      expect(!(await page.isVisible('#more-github')), 'a gateway without githubClone shows the GitHub row');
+      return 'two gh logins (no Forget) and one connected account (44px Forget, asks first); Forget sent one DELETE and said the token stays valid at GitHub with the applications link; a failing login says why; no fake token or device code anywhere in the page; the row counts 2 and goes on an older gateway';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P572 Connect with GitHub shows the code and the link, and the account appears when GitHub approves',
+    waitView: false,
+    stub: { github: { ghLogins: ['octocat'], oauthClientId: GH_CLIENT, flow: 'connect' } },
+    run: async ({ page, viewer }) => {
+      const gh = viewer.github!;
+      const consoleLines: string[] = [];
+      page.on('console', (m) => consoleLines.push(m.text()));
+      const starts = ghStarts(page);
+      const polls = ghStatusPaths(page);
+      await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: viewer.url });
+      await ghOpen(page);
+      await ghWaitEntries(page, 1);
+      expect((await page.textContent('#github-connect-btn')) === 'Connect with GitHub', 'the button does not read Connect with GitHub');
+      await ghStart(page);
+      const look = (await page.evaluate(`(() => {
+        const code = document.getElementById('github-code');
+        const cs = getComputedStyle(code);
+        const a = document.getElementById('github-open');
+        const copy = document.getElementById('github-copy');
+        const btn = document.getElementById('github-connect-btn');
+        return {
+          code: code.textContent, font: cs.fontFamily, size: parseFloat(cs.fontSize),
+          href: a.href, target: a.target, rel: a.rel, label: a.textContent, linkH: Math.round(a.getBoundingClientRect().height),
+          copyLabel: copy.textContent, copyH: Math.round(copy.getBoundingClientRect().height),
+          btn: btn.textContent, btnDisabled: btn.disabled,
+        };
+      })()`)) as Record<string, string | number | boolean>;
+      expect(look['code'] === GITHUB_HARNESS_USER_CODE, `the code reads ${JSON.stringify(look['code'])}`);
+      expect(/mono/i.test(String(look['font'])) && Number(look['size']) >= 24, `the code is ${look['font']} at ${look['size']}px`);
+      expect(look['href'] === 'https://github.com/login/device' && look['target'] === '_blank' && look['rel'] === 'noopener' && look['label'] === 'Open github.com/login/device', `the link is ${JSON.stringify(look)}`);
+      expect(Number(look['linkH']) >= 44 && Number(look['copyH']) >= 44 && look['copyLabel'] === 'Copy code', `the tap targets are ${JSON.stringify(look)}`);
+      expect(look['btn'] === 'Waiting for GitHub…' && look['btnDisabled'] === true, `the connect button is ${JSON.stringify([look['btn'], look['btnDisabled']])}`);
+      // Control for the leak checks below: they do find the code while it is shown.
+      expect((await ghLeaks(page, [GITHUB_HARNESS_USER_CODE])).length === 1, 'the leak check does not see the code while it is shown');
+      await shot(page, 'p572-github-code-390');
+      // A second press while one is pending starts nothing.
+      await page.evaluate('connectGitHub(); connectGitHub(); undefined');
+      expect(starts.length === 1, `${starts.length} starts went out`);
+      // Copy says what happened, in words either way.
+      await page.click('#github-copy');
+      await page.waitForSelector('#github-copy-note', { state: 'visible' });
+      const copied = (await page.textContent('#github-copy-note')) ?? '';
+      if (copied === 'Code copied.') {
+        const clip = (await page.evaluate('navigator.clipboard.readText()')) as string;
+        expect(clip === GITHUB_HARNESS_USER_CODE, `the clipboard holds ${JSON.stringify(clip)}`);
+      } else {
+        expect(copied.startsWith('Could not copy the code'), `the copy note reads ${JSON.stringify(copied)}`);
+      }
+      // GitHub approves; the next check (2 s) sees it.
+      await page.waitForFunction(`document.querySelector('#github-accounts .gh-entry[data-account="oauth:octo-new"]') !== null`, null, { timeout: 15_000 });
+      const after = await ghEntries(page);
+      const added = after.find((e) => e.account === 'oauth:octo-new');
+      expect(after.length === 2 && added!.login === 'octo-new' && added!.how === 'connected just now' && added!.forget === 'Forget', `the accounts are ${JSON.stringify(after)}`);
+      expect((await ghNote(page)).startsWith('Connected the GitHub account octo-new.'), `the note reads ${JSON.stringify(await ghNote(page))}`);
+      expect(!(await page.isVisible('#github-flow')) && (await page.$('#github-code')) === null, 'the code is still on the page after the flow ended');
+      expect((await page.textContent('#github-connect-btn')) === 'Connect with GitHub', 'the button does not offer Connect again');
+      // Nothing left polling, and nothing secret anywhere.
+      const seen = polls.length;
+      expect(seen >= 1, 'the page never checked the flow');
+      await page.waitForTimeout(2600);
+      expect(polls.length === seen, `${polls.length - seen} checks went out after the flow ended`);
+      const leaked = await ghLeaks(page, [...gh.secrets, GITHUB_HARNESS_USER_CODE]);
+      expect(leaked.length === 0, `the page still holds ${JSON.stringify(leaked)}`);
+      const said = consoleLines.filter((l) => [...gh.secrets, GITHUB_HARNESS_USER_CODE].some((s) => l.includes(s)));
+      expect(said.length === 0, `the console said ${JSON.stringify(said)}`);
+      // A second connect, abandoned by closing the panel: the code goes at once
+      // and nothing keeps polling.
+      await page.evaluate('connectGitHub(); undefined');
+      await page.waitForSelector('#github-code', { state: 'visible' });
+      await page.click('#panel-back');
+      expect((await ghLeaks(page, [GITHUB_HARNESS_USER_CODE])).length === 0, 'the code stayed on the page after the panel closed');
+      const seen2 = polls.length;
+      await page.waitForTimeout(2600);
+      expect(polls.length === seen2, `${polls.length - seen2} checks went out after the panel closed`);
+      await page.click('#more-screen .row[data-panel="github"]');
+      await page.waitForSelector('#panel-github', { state: 'visible' });
+      expect(!(await page.isVisible('#github-flow')), 'a closed flow came back when the panel reopened');
+      expect(gh.requests.filter((r) => r.startsWith('POST https://github.com/login/device/code')).length === 2, `GitHub was asked ${JSON.stringify(gh.requests)}`);
+      return `the code ${GITHUB_HARNESS_USER_CODE} in large monospace with Copy code and the github.com/login/device link (_blank, noopener, 44px); one start for two presses; octo-new appeared on approval and no code, token or poll was left; closing the panel dropped the second code and its poll`;
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P573 a denied, expired or forgotten-by-restart flow says what happened and offers to start again',
+    waitView: false,
+    stub: { github: { ghLogins: ['octocat'], oauthClientId: GH_CLIENT, flow: 'deny' } },
+    run: async ({ page, viewer }) => {
+      const gh = viewer.github!;
+      const again = async () => {
+        await page.waitForFunction(`document.getElementById('github-connect-btn') && !document.getElementById('github-connect-btn').disabled && document.getElementById('github-connect-btn').textContent === 'Start again'`, null, { timeout: 15_000 });
+        const h = (await page.evaluate(`Math.round(document.getElementById('github-connect-btn').getBoundingClientRect().height)`)) as number;
+        expect(h >= 44, `Start again is ${h}px tall`);
+      };
+      await ghOpen(page);
+      await ghWaitEntries(page, 1);
+      // Denied on github.com.
+      await ghStart(page);
+      await again();
+      expect((await ghNote(page)) === 'GitHub says the request was denied on github.com, so nothing was connected.', `denied reads ${JSON.stringify(await ghNote(page))}`);
+      expect((await page.$('#github-code')) === null && (await ghEntries(page)).length === 1, 'a denied flow left a code or an account');
+      await shot(page, 'p573-github-denied-390');
+      // The code was not given in time.
+      gh.setFlow('expire');
+      await page.click('#github-connect-btn');
+      await page.waitForSelector('#github-code', { state: 'visible' });
+      await page.waitForFunction(`document.getElementById('github-note').textContent.startsWith('The code expired')`, null, { timeout: 15_000 });
+      await again();
+      expect((await ghNote(page)) === 'The code expired before it was approved on GitHub, so nothing was connected.', `expired reads ${JSON.stringify(await ghNote(page))}`);
+      // The gateway restarted: it no longer knows the flow (404 flow_not_found).
+      await page.route('**/rc/github/oauth/*', (route) =>
+        route.request().method() === 'GET'
+          ? route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'No GitHub connection by that id', code: 'flow_not_found' }) })
+          : route.continue(),
+      );
+      await page.click('#github-connect-btn');
+      await page.waitForSelector('#github-code', { state: 'visible' });
+      await page.waitForFunction(`document.getElementById('github-note').textContent.startsWith('The gateway no longer knows')`, null, { timeout: 15_000 });
+      await again();
+      expect((await ghNote(page)) === 'The gateway no longer knows this connection (it probably restarted), so nothing was connected.', `lost reads ${JSON.stringify(await ghNote(page))}`);
+      expect((await page.$('#github-code')) === null, 'the code stayed after the flow was lost');
+      await page.unroute('**/rc/github/oauth/*');
+      // A check that cannot reach the gateway says why and keeps trying until it can.
+      gh.setFlow('connect');
+      let blocked = 0;
+      await page.route('**/rc/github/oauth/*', (route) => {
+        if (route.request().method() !== 'GET') return route.continue();
+        if (blocked++ === 0) return route.abort('connectionrefused');
+        return route.continue();
+      });
+      await page.click('#github-connect-btn');
+      await page.waitForSelector('#github-code', { state: 'visible' });
+      await page.waitForSelector('#github-flow .gh-warn', { state: 'visible', timeout: 15_000 });
+      const warn = (await page.textContent('#github-flow .gh-warn')) ?? '';
+      expect(warn.startsWith('could not reach the gateway at ') && warn.includes('during checking the GitHub connection') && warn.endsWith('. Still trying.'), `the failed check reads ${JSON.stringify(warn)}`);
+      expect((await page.textContent('#github-code')) === GITHUB_HARNESS_USER_CODE, 'the code went when one check failed');
+      // And the start again worked: GitHub approves on the next check.
+      await page.waitForFunction(`document.querySelector('#github-accounts .gh-entry[data-account="oauth:octo-new"]') !== null`, null, { timeout: 15_000 });
+      expect((await ghNote(page)).startsWith('Connected the GitHub account octo-new.'), `the note reads ${JSON.stringify(await ghNote(page))}`);
+      return 'denied, expired and a 404 flow_not_found each said what happened in words, dropped the code, and left Start again (44px); a check that could not reach the gateway named the cause, kept the code and tried again until GitHub approved';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P574 a gateway without a client id says how to set OAuth up and names the file',
+    waitView: false,
+    stub: { github: { ghLogins: ['octocat'] } },
+    run: async ({ page, viewer }) => {
+      const gh = viewer.github!;
+      const want = `OAuth is not set up on this gateway. Register a GitHub OAuth App with device flow on, then put its client ID in ${gh.rcDir}/github-oauth.json.`;
+      await ghOpen(page);
+      await ghWaitEntries(page, 1);
+      await page.waitForFunction(`document.getElementById('github-connect').textContent.startsWith('OAuth is not set up')`, null, { timeout: 10_000 });
+      const said = (await page.textContent('#github-connect')) ?? '';
+      expect(said === want, `the panel reads ${JSON.stringify(said)}`);
+      expect((await page.$('#github-connect-btn')) === null, 'a Connect button is offered with no client id');
+      expect((await ghEntries(page))[0]!.login === 'octocat', 'the gh login is not listed');
+      await shot(page, 'p574-github-not-configured-390');
+      // The page that thinks it is configured learns from the gateway's own refusal.
+      await page.route('**/rc/github/accounts', async (route) => {
+        const res = await route.fetch();
+        const body = (await res.json()) as Record<string, unknown>;
+        body['oauthConfigured'] = true;
+        await route.fulfill({ response: res, json: body });
+      });
+      await page.evaluate('readGitHubAccounts()');
+      await page.waitForSelector('#github-connect-btn', { state: 'visible' });
+      await page.click('#github-connect-btn');
+      await page.waitForFunction(`document.getElementById('github-connect').textContent.startsWith('OAuth is not set up')`, null, { timeout: 10_000 });
+      expect(((await page.textContent('#github-connect')) ?? '') === want, 'the refused start did not give the same words');
+      expect((await page.$('#github-code')) === null && !gh.requests.some((r) => r.includes('/login/device/code')), 'a flow started with no client id');
+      return `the Connect button is replaced by the words naming ${gh.rcDir}/github-oauth.json; a start the gateway refuses (409 oauth_not_configured) gives the same words; the gh login is still listed`;
     },
   });
 }

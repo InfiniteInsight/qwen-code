@@ -1343,6 +1343,130 @@
         color: var(--g1-ink-hi);
         font-size: 14px;
       }
+      /* #257. More > Host > GitHub: the accounts the gateway can clone with,
+         and the device-flow code while a connection waits for GitHub. */
+      #github-note {
+        margin: 0 4px 12px;
+        font-size: 13px;
+        line-height: 1.4;
+        color: var(--g1-ink-mid);
+      }
+      #github-note p {
+        margin: 0 0 6px;
+      }
+      #github-note .gh-warn {
+        color: var(--g1-warn);
+      }
+      #github-note[hidden],
+      #github-empty[hidden],
+      #github-flow[hidden],
+      #github-confirm[hidden] {
+        display: none;
+      }
+      #github-empty {
+        margin: 0 4px 12px;
+        font-size: 14px;
+        color: var(--g1-ink-mid);
+      }
+      #github-accounts .gh-entry {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-height: 64px;
+        box-sizing: border-box;
+        padding: 10px 12px;
+        margin-bottom: 8px;
+        border-radius: 10px;
+        background: var(--g1-band);
+      }
+      #github-accounts .gh-text {
+        flex: 1 1 auto;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      #github-accounts .gh-login {
+        color: var(--g1-ink-hi);
+        font-size: 15px;
+        overflow-wrap: anywhere;
+      }
+      #github-accounts .gh-how,
+      #github-accounts .gh-err {
+        color: var(--g1-ink-mid);
+        font-size: 12px;
+        overflow-wrap: anywhere;
+      }
+      #github-accounts .gh-err {
+        color: var(--g1-warn);
+      }
+      #github-panel-body button,
+      #github-accounts .gh-entry button,
+      #github-flow button,
+      #github-confirm button {
+        min-height: 44px;
+        min-width: 44px;
+        padding: 0 14px;
+        border-radius: 8px;
+        background: var(--g1-page);
+        color: var(--g1-ink-hi);
+        font-size: 14px;
+      }
+      #github-accounts .gh-entry button {
+        flex: none;
+      }
+      #github-connect {
+        margin: 12px 4px;
+        font-size: 14px;
+        line-height: 1.4;
+        color: var(--g1-ink-mid);
+      }
+      #github-flow,
+      #github-confirm {
+        margin: 12px 0;
+        padding: 12px;
+        border-radius: 10px;
+        background: var(--g1-band);
+        color: var(--g1-ink-hi);
+        font-size: 14px;
+        line-height: 1.4;
+      }
+      #github-flow .gh-code {
+        margin: 8px 0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 32px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        user-select: all;
+        -webkit-user-select: all;
+        overflow-wrap: anywhere;
+      }
+      #github-flow .gh-actions,
+      #github-confirm .gh-actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        margin-top: 8px;
+      }
+      #github-flow a.gh-open,
+      #github-note a {
+        display: inline-flex;
+        align-items: center;
+        min-height: 44px;
+        color: var(--g1-link, var(--g1-ink-hi));
+        text-decoration: underline;
+      }
+      #github-flow .gh-sub {
+        font-size: 13px;
+        color: var(--g1-ink-mid);
+        margin-top: 6px;
+      }
+      #github-flow .gh-warn {
+        font-size: 13px;
+        color: var(--g1-warn);
+        margin-top: 6px;
+      }
       #wt-reset {
         align-self: flex-start;
         min-height: 40px;
@@ -4206,6 +4330,13 @@
               <span class="lbl">Closed tabs</span><span class="val"></span>
               <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
             </button>
+            <!-- #257. The GitHub accounts the gateway clones with, and Connect
+                 with GitHub (device flow). Last in the group, after Closed
+                 tabs; hidden on a gateway without caps.remoteControl.githubClone. -->
+            <button type="button" class="row" id="more-github" data-panel="github" hidden>
+              <span class="lbl">GitHub</span><span class="val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
           </div>
           <div class="mgrp" role="group" aria-labelledby="more-g-phone">
             <div class="grp" id="more-g-phone">This phone</div>
@@ -4914,6 +5045,17 @@
             <div id="closed-tabs-note" role="status" hidden></div>
             <div id="closed-tabs-list"></div>
             <div id="closed-tabs-empty" hidden>No closed tabs in the last 7 days.</div>
+          </div>
+          <div class="panel" id="panel-github" data-panel="github" hidden>
+            <div id="github-panel-body">
+              <p class="lede">GitHub accounts this gateway can clone repos with. A gh login is read from the host's gh. A connected account is a GitHub login you approved here, kept on the host.</p>
+              <div id="github-note" role="status" hidden></div>
+              <div id="github-accounts"></div>
+              <div id="github-empty" hidden></div>
+              <div id="github-confirm" hidden></div>
+              <div id="github-connect"></div>
+              <div id="github-flow" hidden></div>
+            </div>
           </div>
           <div class="panel" id="panel-diag" data-panel="diag" hidden>
             <p class="lede">What the daemon says about the machine it runs on, the live connections to it, and the gateway's audit history.</p>
@@ -6979,6 +7121,7 @@
         renderMoreValues();
         void readHostActions(); // #192: the Host rows, read as More opens
         void readHostTabs(); // #256: the Closed tabs row's count, read as More opens
+        $('more-github').hidden = !githubOn(); // #257: no row on an older gateway
         if (quiet) return;
         const first = scr.querySelector('.row');
         if (first) first.focus({ preventScroll: true });
@@ -7016,6 +7159,7 @@
         const key = openPanelKey;
         openPanelKey = null;
         savePanel(null);
+        if (key === 'github') stopGitHubFlow(); // #257: the code leaves the page with the panel
         // What a panel loaded can change a row's value (the token count, the
         // bridges' names), so More is redrawn before it shows again.
         renderMoreValues();
@@ -7045,6 +7189,16 @@
       // What a screen does as it opens. The Models card read llama-swap when
       // its <details> opened; the screen that holds it is what opens now.
       function onPanelOpen(key) {
+        if (key !== 'github') stopGitHubFlow(); // #257
+        if (key === 'github') {
+          // A saved panel from a newer gateway, opened on an older one.
+          if (!githubOn()) {
+            closePanel(false);
+            return;
+          }
+          renderGitHub();
+          void readGitHubAccounts();
+        }
         if (key === 'daemons') void runLlamaSwapRefresh();
         if (key === 'install') renderInstall();
         if (key === 'files') {
@@ -7386,6 +7540,9 @@
         }
         if (hostTabsOn() && hostTabs.closed.length) {
           v['closed-tabs'] = String(hostTabs.closed.length); // #256
+        }
+        if (githubOn() && githubState.accounts && githubState.accounts.length) {
+          v.github = String(githubState.accounts.length); // #257
         }
         if (moreFacts.sessions !== null) v.sessions = String(moreFacts.sessions);
         if (moreFacts.bridges !== null) {
@@ -9705,6 +9862,521 @@
         const entry = b && b.closest('.ct-entry');
         if (!entry || b.disabled) return;
         void reopenClosedTab(entry.dataset.tab);
+      });
+
+      // #257. More > Host > GitHub: the accounts the gateway can clone with
+      // (the host's gh logins, read-only, and the OAuth accounts connected
+      // here, each with Forget) and Connect with GitHub, the device flow. The
+      // flow's user code is shown only while its flow is pending. It is kept
+      // in this one object and in the page's text, never in storage, the URL
+      // or the console, and it leaves the page when the flow ends or the panel
+      // closes. Polling is one chain of timeouts, so only one flow polls, and
+      // a failed check is shown and tried again until the code expires.
+      const GITHUB_POLL_MS = 2000;
+      const GITHUB_POLL_MARGIN_MS = 5000;
+      const GITHUB_REVOKE_URL = 'https://github.com/settings/applications';
+      const GITHUB_FAILED_WORDS = {
+        scope_missing: 'the grant did not include repo access',
+        expiring_token_unsupported:
+          'the client id is a GitHub App, which gives expiring tokens; use an OAuth App',
+        device_flow_disabled:
+          'device flow is off for this OAuth App; turn it on in the app settings on GitHub',
+        incorrect_client_credentials: 'GitHub does not know this client id',
+        user_lookup_failed: 'GitHub would not say whose token it was',
+        store_failed: 'the gateway could not save the token',
+        stopped: 'the gateway was shutting down',
+      };
+      const githubState = {
+        accounts: null, // GitHubAccount[] from the last good read
+        oauthConfigured: null, // null until the first read says
+        configPath: '',
+        ghError: '',
+        loading: false,
+        loadError: '',
+        readSeq: 0,
+        gen: 0, // bumped on every start and stop: an overtaken answer is dropped
+        starting: false,
+        flow: null, // { id, userCode, uri, minutes, deadline, pollErr, copyNote, timer }
+        startError: '',
+        ended: '', // how the last flow ended, in words
+        retry: false, // the last flow did not connect: offer Start again
+        confirm: '', // the login whose Forget awaits a yes
+        forgetting: false,
+        notice: '', // a result worth saying: connected, forgotten
+        noticeRevoke: false, // the notice links the GitHub applications page
+      };
+      let githubSig = '';
+      function githubOn() {
+        const rc = caps && caps.remoteControl;
+        return !!(rc && rc.githubClone === true);
+      }
+      function githubAuth() {
+        return { Authorization: 'Bearer ' + token() };
+      }
+      // The accounts, or null when they could not be read (githubState.loadError
+      // then says why). Task 8's clone screen reads the same list.
+      async function readGitHubAccounts() {
+        if (!token() || !githubOn()) return null;
+        const seq = ++githubState.readSeq;
+        githubState.loading = true;
+        renderGitHub();
+        const did = 'reading the GitHub accounts';
+        let res = null;
+        let body = null;
+        let threw = null;
+        try {
+          res = await fetch('/rc/github/accounts', { headers: githubAuth() });
+          body = await res.json().catch(() => null);
+        } catch (e) {
+          threw = e;
+        }
+        if (seq !== githubState.readSeq) return githubState.accounts;
+        githubState.loading = false;
+        if (threw || !res.ok || !body || !Array.isArray(body.accounts)) {
+          githubState.loadError = threw
+            ? failureOf(threw, did)
+            : !res.ok
+              ? describeFailure(res, body, did)
+              : did + ' failed: the answer had no account list';
+          renderGitHub();
+          return null;
+        }
+        githubState.loadError = '';
+        githubState.accounts = body.accounts.filter(
+          (a) => a && typeof a.login === 'string' && typeof a.id === 'string',
+        );
+        githubState.oauthConfigured = body.oauthConfigured === true;
+        githubState.configPath =
+          typeof body.oauthConfigPath === 'string' ? body.oauthConfigPath : '';
+        githubState.ghError =
+          typeof body.ghError === 'string' ? body.ghError : '';
+        renderGitHub();
+        return githubState.accounts;
+      }
+      // Ends any flow and forgets every word about one: the code is gone from
+      // the page when this returns.
+      function stopGitHubFlow() {
+        githubState.gen++;
+        const f = githubState.flow;
+        if (f && f.timer) clearTimeout(f.timer);
+        githubState.flow = null;
+        githubState.starting = false;
+        githubState.startError = '';
+        githubState.ended = '';
+        githubState.retry = false;
+        githubState.confirm = '';
+        githubState.notice = '';
+        githubState.noticeRevoke = false;
+        renderGitHub();
+      }
+      async function connectGitHub() {
+        if (!githubOn() || githubState.starting || githubState.flow) return;
+        githubState.starting = true;
+        githubState.startError = '';
+        githubState.ended = '';
+        githubState.notice = '';
+        githubState.noticeRevoke = false;
+        githubState.confirm = '';
+        const gen = ++githubState.gen;
+        renderGitHub();
+        const did = 'starting the GitHub connection';
+        let res = null;
+        let body = null;
+        let threw = null;
+        try {
+          res = await fetch('/rc/github/oauth/start', {
+            method: 'POST',
+            headers: githubAuth(),
+          });
+          body = await res.json().catch(() => null);
+        } catch (e) {
+          threw = e;
+        }
+        if (gen !== githubState.gen) return; // the panel closed meanwhile
+        githubState.starting = false;
+        if (threw) {
+          githubState.startError = failureOf(threw, did);
+        } else if (
+          res.status === 409 &&
+          body &&
+          body.code === 'oauth_not_configured'
+        ) {
+          githubState.oauthConfigured = false;
+          if (typeof body.configPath === 'string') {
+            githubState.configPath = body.configPath;
+          }
+        } else if (!res.ok) {
+          githubState.startError = describeFailure(res, body, did);
+        } else if (
+          !body ||
+          typeof body.flowId !== 'string' ||
+          typeof body.userCode !== 'string' ||
+          !Number.isFinite(body.expiresIn)
+        ) {
+          githubState.startError =
+            did + ' failed: the answer had no code to show';
+        } else {
+          githubState.flow = {
+            id: body.flowId,
+            userCode: body.userCode,
+            uri:
+              typeof body.verificationUri === 'string' &&
+              body.verificationUri.startsWith('https://github.com/')
+                ? body.verificationUri
+                : 'https://github.com/login/device',
+            minutes: Math.max(1, Math.round(body.expiresIn / 60)),
+            deadline:
+              Date.now() + body.expiresIn * 1000 + GITHUB_POLL_MARGIN_MS,
+            pollErr: '',
+            copyNote: '',
+            timer: null,
+          };
+          scheduleGitHubPoll(gen);
+        }
+        renderGitHub();
+      }
+      function scheduleGitHubPoll(gen) {
+        const f = githubState.flow;
+        if (!f) return;
+        f.timer = setTimeout(() => void pollGitHubFlow(gen), GITHUB_POLL_MS);
+      }
+      async function pollGitHubFlow(gen) {
+        const f = githubState.flow;
+        if (!f || gen !== githubState.gen) return;
+        f.timer = null;
+        if (Date.now() > f.deadline) {
+          endGitHubFlow(gen, 'expired', null);
+          return;
+        }
+        const did = 'checking the GitHub connection';
+        let res = null;
+        let body = null;
+        let threw = null;
+        try {
+          res = await fetch(
+            '/rc/github/oauth/' + encodeURIComponent(f.id),
+            { headers: githubAuth() },
+          );
+          body = await res.json().catch(() => null);
+        } catch (e) {
+          threw = e;
+        }
+        if (gen !== githubState.gen || githubState.flow !== f) return;
+        if (threw) {
+          f.pollErr = failureOf(threw, did);
+        } else if (
+          res.status === 404 &&
+          body &&
+          body.code === 'flow_not_found'
+        ) {
+          endGitHubFlow(gen, 'lost', null);
+          return;
+        } else if (!res.ok) {
+          f.pollErr = describeFailure(res, body, did);
+        } else if (!body || typeof body.state !== 'string') {
+          f.pollErr = did + ' failed: the answer had no state';
+        } else if (body.state !== 'pending') {
+          endGitHubFlow(gen, body.state, body);
+          return;
+        } else {
+          f.pollErr = '';
+        }
+        renderGitHub();
+        scheduleGitHubPoll(gen);
+      }
+      function endGitHubFlow(gen, how, body) {
+        if (gen !== githubState.gen) return;
+        const f = githubState.flow;
+        if (f && f.timer) clearTimeout(f.timer);
+        githubState.flow = null;
+        githubState.retry = how !== 'connected';
+        if (how === 'connected') {
+          const who = body && typeof body.login === 'string' ? body.login : '';
+          githubState.notice =
+            'Connected the GitHub account' + (who ? ' ' + who : '') +
+            '. Clones can use it now.';
+          void readGitHubAccounts();
+        } else if (how === 'denied') {
+          githubState.ended =
+            'GitHub says the request was denied on github.com, so nothing was connected.';
+        } else if (how === 'expired') {
+          githubState.ended =
+            'The code expired before it was approved on GitHub, so nothing was connected.';
+        } else if (how === 'lost') {
+          githubState.ended =
+            'The gateway no longer knows this connection (it probably restarted), so nothing was connected.';
+        } else {
+          const code = body && typeof body.code === 'string' ? body.code : '';
+          githubState.ended =
+            'The connection failed' +
+            (code ? ': ' + (GITHUB_FAILED_WORDS[code] || code) : '') +
+            ', so nothing was connected.';
+        }
+        renderGitHub();
+      }
+      async function copyGitHubCode() {
+        const f = githubState.flow;
+        if (!f) return;
+        const ok = await copyText(f.userCode);
+        if (githubState.flow !== f) return;
+        f.copyNote = ok
+          ? 'Code copied.'
+          : 'Could not copy the code here. Touch and hold it to select it, then copy.';
+        renderGitHub();
+      }
+      async function forgetGitHubAccount(login) {
+        if (githubState.forgetting) return;
+        githubState.forgetting = true;
+        githubState.confirm = '';
+        renderGitHub();
+        const did = 'forgetting the GitHub account ' + login;
+        let res = null;
+        let body = null;
+        let threw = null;
+        try {
+          res = await fetch(
+            '/rc/github/accounts/oauth/' + encodeURIComponent(login),
+            { method: 'DELETE', headers: githubAuth() },
+          );
+          body = await res.json().catch(() => null);
+        } catch (e) {
+          threw = e;
+        }
+        githubState.forgetting = false;
+        if (threw) {
+          githubState.startError = failureOf(threw, did);
+        } else if (!res.ok) {
+          githubState.startError = describeFailure(res, body, did);
+        } else {
+          githubState.startError = '';
+          githubState.notice =
+            'Forgot ' + login + ' on this gateway. Its token stays valid at GitHub until you revoke it there: ';
+          githubState.noticeRevoke = true;
+        }
+        renderGitHub();
+        void readGitHubAccounts();
+      }
+      function githubWhen(iso) {
+        const t = typeof iso === 'string' ? relativeTime(iso) : '';
+        return t ? 'connected ' + t : 'connected';
+      }
+      function githubLink(cls, href, text) {
+        const a = document.createElement('a');
+        if (cls) a.className = cls;
+        a.href = href;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.textContent = text;
+        return a;
+      }
+      function githubBtn(id, text, label) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        if (id) b.id = id;
+        b.textContent = text;
+        if (label) b.setAttribute('aria-label', label);
+        return b;
+      }
+      function renderGitHub() {
+        const st = githubState;
+        const f = st.flow;
+        const accounts = st.accounts || [];
+        // What the panel is drawn from; the poll redraws only on a change,
+        // so a button being pressed is not replaced under the finger.
+        const sig = JSON.stringify([
+          accounts.map((a) => [a.id, a.source, a.login, a.connectedAt, a.error]),
+          st.accounts === null,
+          st.oauthConfigured,
+          st.configPath,
+          st.ghError,
+          st.loading,
+          st.loadError,
+          st.starting,
+          f && [f.id, f.userCode, f.uri, f.minutes, f.pollErr, f.copyNote],
+          st.startError,
+          st.ended,
+          st.retry,
+          st.confirm,
+          st.forgetting,
+          st.notice,
+          st.noticeRevoke,
+        ]);
+        if (sig === githubSig) return;
+        githubSig = sig;
+        const had = document.activeElement;
+        const focusId =
+          had && had.id && $('panel-github').contains(had) ? had.id : '';
+
+        // The note: problems first, then what just happened.
+        const note = $('github-note');
+        note.textContent = '';
+        const say = (text, warn, link) => {
+          const p = document.createElement('p');
+          if (warn) p.className = 'gh-warn';
+          p.append(text);
+          if (link) p.append(link);
+          note.append(p);
+        };
+        if (st.loadError) say(st.loadError, true);
+        if (st.ghError) say('gh could not list its logins: ' + st.ghError, true);
+        if (st.startError) say(st.startError, true);
+        if (st.ended) say(st.ended, true);
+        if (st.notice) {
+          say(
+            st.notice,
+            false,
+            st.noticeRevoke
+              ? githubLink('', GITHUB_REVOKE_URL, 'github.com/settings/applications')
+              : null,
+          );
+        }
+        note.hidden = note.childElementCount === 0;
+
+        // The accounts.
+        const box = $('github-accounts');
+        box.textContent = '';
+        for (const a of accounts) {
+          const el = document.createElement('div');
+          el.className = 'gh-entry';
+          el.dataset.account = a.id;
+          const text = document.createElement('div');
+          text.className = 'gh-text';
+          const lines = [
+            ['gh-login', a.login],
+            [
+              'gh-how',
+              a.source === 'gh' ? 'gh on this host' : githubWhen(a.connectedAt),
+            ],
+          ];
+          if (typeof a.error === 'string' && a.error) {
+            lines.push(['gh-err', 'problem: ' + a.error]);
+          }
+          for (const [cls, v] of lines) {
+            const d = document.createElement('span');
+            d.className = cls;
+            d.textContent = v;
+            text.append(d);
+          }
+          el.append(text);
+          if (a.source === 'oauth') {
+            const b = githubBtn('', 'Forget', 'Forget ' + a.login);
+            b.className = 'gh-forget';
+            b.dataset.login = a.login;
+            b.disabled = st.forgetting;
+            el.append(b);
+          }
+          box.append(el);
+        }
+        const empty = $('github-empty');
+        const emptyText = st.loading && st.accounts === null
+          ? 'Reading the GitHub accounts…'
+          : st.accounts !== null && accounts.length === 0
+            ? 'No GitHub accounts yet. Connect one below, or log in with gh on the host.'
+            : '';
+        empty.textContent = emptyText;
+        empty.hidden = emptyText === '';
+
+        // Forget's question.
+        const conf = $('github-confirm');
+        conf.textContent = '';
+        conf.hidden = !st.confirm;
+        if (st.confirm) {
+          const q = document.createElement('p');
+          q.textContent =
+            'Forget ' + st.confirm + ' on this gateway? Clones with this account will stop working until you connect it again.';
+          const acts = document.createElement('div');
+          acts.className = 'gh-actions';
+          const yes = githubBtn('github-forget-yes', 'Forget ' + st.confirm);
+          yes.dataset.login = st.confirm;
+          acts.append(yes, githubBtn('github-forget-no', 'Keep it'));
+          conf.append(q, acts);
+        }
+
+        // Connect, or why it cannot.
+        const conn = $('github-connect');
+        conn.textContent = '';
+        if (st.oauthConfigured === false) {
+          conn.textContent =
+            'OAuth is not set up on this gateway. Register a GitHub OAuth App with device flow on, then put its client ID in ' +
+            st.configPath +
+            '.';
+        } else {
+          const b = githubBtn(
+            'github-connect-btn',
+            st.starting
+              ? 'Asking GitHub…'
+              : f
+                ? 'Waiting for GitHub…'
+                : st.retry
+                  ? 'Start again'
+                  : 'Connect with GitHub',
+          );
+          b.disabled = st.starting || !!f;
+          conn.append(b);
+        }
+
+        // The code, while the flow is pending: the only place it is drawn.
+        const flow = $('github-flow');
+        flow.textContent = '';
+        flow.hidden = !f;
+        if (f) {
+          const lead = document.createElement('div');
+          lead.textContent = 'On github.com, enter this code:';
+          const code = document.createElement('div');
+          code.id = 'github-code';
+          code.className = 'gh-code';
+          code.textContent = f.userCode;
+          const acts = document.createElement('div');
+          acts.className = 'gh-actions';
+          acts.append(
+            githubBtn('github-copy', 'Copy code'),
+            githubLink('gh-open', f.uri, 'Open github.com/login/device'),
+          );
+          acts.lastChild.id = 'github-open';
+          const sub = document.createElement('div');
+          sub.className = 'gh-sub';
+          sub.textContent =
+            'Waiting for you to approve it on GitHub. The code works for ' +
+            f.minutes +
+            ' min. This page checks every 2 s.';
+          flow.append(lead, code, acts, sub);
+          if (f.copyNote) {
+            const c = document.createElement('div');
+            c.className = 'gh-sub';
+            c.id = 'github-copy-note';
+            c.textContent = f.copyNote;
+            flow.append(c);
+          }
+          if (f.pollErr) {
+            const e = document.createElement('div');
+            e.className = 'gh-warn';
+            e.textContent = f.pollErr + '. Still trying.';
+            flow.append(e);
+          }
+        }
+        if (focusId) {
+          const again = document.getElementById(focusId);
+          if (again && again !== document.activeElement && !again.disabled) {
+            again.focus({ preventScroll: true });
+          }
+        }
+      }
+      $('panel-github').addEventListener('click', (e) => {
+        const b = e.target.closest('button');
+        if (!b || b.disabled) return;
+        if (b.id === 'github-connect-btn') void connectGitHub();
+        else if (b.id === 'github-copy') void copyGitHubCode();
+        else if (b.classList.contains('gh-forget')) {
+          githubState.confirm = b.dataset.login;
+          renderGitHub();
+          const yes = $('github-forget-yes');
+          if (yes) yes.focus({ preventScroll: true });
+        } else if (b.id === 'github-forget-no') {
+          githubState.confirm = '';
+          renderGitHub();
+        } else if (b.id === 'github-forget-yes') {
+          void forgetGitHubAccount(b.dataset.login);
+        }
       });
 
       // #184. The inspector sheet's rows, in #session-footer, the drawer
