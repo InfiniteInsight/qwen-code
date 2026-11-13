@@ -2285,6 +2285,22 @@
         border-radius: 50%;
         background: #3fb950;
       }
+      /* #255. What the conversation is doing, in the status line's colours
+         (#h1-status .dot), so the list and the open conversation agree:
+         waiting on you, working, background work, open. The words are the
+         dot's name and title (LIVE_DOT_WORDS), never the colour alone. */
+      #past-list .s .dot[data-state='wait'] {
+        background: var(--g1-warn);
+      }
+      #past-list .s .dot[data-state='run'] {
+        background: var(--g1-link);
+      }
+      #past-list .s .dot[data-state='bg'] {
+        background: #a371f7;
+      }
+      #past-list .s .dot[data-state='idle'] {
+        background: #3fb950;
+      }
       /* #212. The conversation's tab on the host crashed or was lost: a word
          in a pill after the title, red for crashed, amber for lost. It never
          shrinks; the title gives way instead. */
@@ -17577,6 +17593,7 @@
             startPastConvosPoll(); // issue #35: keep the past-conversations list fresh
             startHostTabsPoll(); // #212: crashed and lost tabs on the host
             startPendingCardsPoll(); // issue #46: recover lost question cards while watching
+            startLiveTick(); // #255: the laptop's list pane is up from the start
             applyWorkspaceControlGating();
             renderRecentWorkspaces();
             void browseToSavedFolder(); // #182: the folder the reader left
@@ -17696,6 +17713,7 @@
           startPastConvosPoll(); // issue #35: same as the auth-gate path
           startHostTabsPoll(); // #212: same as the auth-gate path
           startPendingCardsPoll(); // issue #46: same as the auth-gate path
+          startLiveTick(); // #255: same as the auth-gate path
           // authGate() (above) only populates the directory picker for a
           // token that ALREADY existed at script load — a fresh pair (QR or
           // manual code) has no such run, so #dir-list would otherwise show
@@ -22075,6 +22093,7 @@
         if (!paneLayout()) {
           $('h1-title').setAttribute('aria-expanded', String(open));
         }
+        if (!open && !listShown()) stopLiveTick(); // #255: off screen
         if (!open) return;
         closeH1Menu(false);
         setMoreOpen(false);
@@ -22089,6 +22108,7 @@
         // opened in another folder since shows its live dot as the list opens.
         if (curDirPath) void refreshPastConversations(curDirPath);
         $('list-back').focus({ preventScroll: true });
+        startLiveTick(); // #255: the dots, read every second while it is up
       }
       function closeListToChat() {
         setListOpen(false);
@@ -22597,7 +22617,11 @@
       // only the refreshes the list always had (the poll, a watch starting
       // or ending, the tab coming back, an archive, delete or rename) read
       // again. A folder that leaves the set leaves the cache.
-      const folderRows = new Map(); // cwd -> { sessions, truncated }
+      // #255: the listing as read (raw) and the live-state map read beside it
+      // (live, null when unread or unreadable) are kept apart, merged when
+      // drawn (mergeFolderRows), so the 1 s live tick can replace `live`
+      // and merge again without reading the disk.
+      const folderRows = new Map(); // cwd -> { raw, live, truncated }
       // The current folder and MAX_RECENT recent ones: at most six reads.
       const LIST_FOLDERS_MAX = MAX_RECENT + 1;
       function listFoldersFrom(current) {
@@ -22821,15 +22845,9 @@
           head.appendChild(tt);
           // issue #89: open on the daemon right now, from its own snapshot
           // rather than the transcript, so it says something the disk scan
-          // cannot. A dot as drawn, named for a screen reader.
-          if (s.live) {
-            const dot = document.createElement('span');
-            dot.className = 'dot';
-            dot.setAttribute('role', 'img');
-            dot.setAttribute('aria-label', 'open');
-            dot.title = 'open on the host';
-            head.appendChild(dot);
-          }
+          // cannot. A dot as drawn, named for a screen reader. #255: coloured
+          // and named for what the conversation is doing (liveDot).
+          if (s.live) head.appendChild(liveDot(s));
           // #212: its terminal tab on the host crashed or was lost. Words,
           // not a colour alone, and part of the row's name for a screen
           // reader; the sheet's Host tab line has the verbs.
@@ -23344,10 +23362,13 @@
       // the list is drawn from all of them merged, so a caller handing in
       // one folder's rows still gets exactly those when no recent folder
       // holds any.
-      function renderPastConversations(sessions, cwd, truncated) {
+      // #255: `sessions` are the listing as read and `live` the live-state map
+      // read beside it (absent: none), kept apart in folderRows.
+      function renderPastConversations(sessions, cwd, truncated, live) {
         if (typeof cwd === 'string' && cwd) {
           folderRows.set(cwd, {
-            sessions: Array.isArray(sessions) ? sessions : [],
+            raw: Array.isArray(sessions) ? sessions : [],
+            live: live || null,
             truncated: Boolean(truncated),
           });
         }
@@ -23396,7 +23417,7 @@
         for (const cwd of folders) {
           const got = folderRows.get(cwd);
           if (!got) continue;
-          for (const s of got.sessions) {
+          for (const s of mergeLiveSessions(got.raw, got.live)) {
             if (!s || !s.sessionId || seen.has(s.sessionId)) continue;
             seen.add(s.sessionId);
             out.push({ ...s, cwd: cwd });
@@ -23572,7 +23593,7 @@
         const t = Date.parse(c.updatedAt);
         if (Number.isNaN(t)) return false;
         let oldest = Infinity;
-        for (const s of got.sessions) {
+        for (const s of got.raw) {
           if (!s || s.liveOnly) continue;
           const u = Date.parse(s.updatedAt);
           if (!Number.isNaN(u) && u < oldest) oldest = u;
@@ -23798,6 +23819,7 @@
       // daemon the gateway already runs for that folder and otherwise says
       // nothing is open there, so asking it about a folder costs no daemon.
       async function readLiveStates(cwd, spawn) {
+        liveReadsInFlight.set(cwd, (liveReadsInFlight.get(cwd) || 0) + 1);
         try {
           const res = await fetch(
             '/rc/sessions/live-state?workspace=' +
@@ -23815,8 +23837,16 @@
           return m;
         } catch {
           return null;
+        } finally {
+          const left = (liveReadsInFlight.get(cwd) || 1) - 1;
+          if (left > 0) liveReadsInFlight.set(cwd, left);
+          else liveReadsInFlight.delete(cwd);
         }
       }
+      // #255: each folder's live-state reads not answered yet, the 30 s
+      // refresh's and the 1 s tick's alike. The tick skips a folder that has
+      // one out, so a slow daemon never gathers a read a second.
+      const liveReadsInFlight = new Map(); // cwd -> reads out
 
       // Merged before the filter and the pager, so a conversation that exists
       // only in memory is searchable and paginable like any other row. Live-
@@ -23833,7 +23863,8 @@
         const marked = list.map((s) => {
           if (s && live.has(s.sessionId)) {
             seen.add(s.sessionId);
-            return { ...s, live: true };
+            // #255: and the snapshot entry itself, which the dot is read from.
+            return { ...s, live: true, liveState: live.get(s.sessionId) };
           }
           return s;
         });
@@ -23845,6 +23876,7 @@
             live: true,
             liveOnly: true,
             updatedAt: typeof st.updatedAt === 'string' ? st.updatedAt : undefined,
+            liveState: st, // #255
           });
         }
         return only.concat(marked);
@@ -23860,6 +23892,61 @@
           caps.remoteControl &&
           caps.remoteControl.liveStateNoSpawn === true
         );
+      }
+
+      // #255. What a live row's dot says, from its live-state entry
+      // (s.liveState), highest first: waiting on the reader (a permission or
+      // a question), working (a turn open), background work (no turn open,
+      // something still running), else open. The status line's own states
+      // and colours (#h1-status), so the list and the open conversation
+      // agree, with words as the dot's name and title, never colour alone.
+      const LIVE_DOT_WORDS = {
+        wait: 'waiting on you',
+        run: 'working',
+        bg: 'background work',
+        idle: 'open',
+      };
+      function liveDotState(st) {
+        if (!st) return 'idle';
+        if (st.isWaitingForPermission === true) return 'wait';
+        if (st.isWaitingForUserQuestion === true) return 'wait';
+        if (st.hasActivePrompt === true) return 'run';
+        if (st.activeWorkState === 'active') return 'run';
+        if (st.hasRunningBackgroundTasks === true) return 'bg';
+        return 'idle';
+      }
+      function paintLiveDot(dot, s) {
+        const state = liveDotState(s.liveState);
+        if (dot.dataset.state === state) return;
+        dot.dataset.state = state;
+        dot.setAttribute('aria-label', LIVE_DOT_WORDS[state]);
+        dot.title = LIVE_DOT_WORDS[state];
+      }
+      function liveDot(s) {
+        const dot = document.createElement('span');
+        dot.className = 'dot';
+        dot.setAttribute('role', 'img');
+        paintLiveDot(dot, s);
+        return dot;
+      }
+      // Brings the marks on the rows drawn to what pastConvos says now, row
+      // by row (data-session), without rebuilding one: the reader's place,
+      // focus and an open row menu stay as they are. A row that has gained
+      // or lost its live dot gets it or loses it here too.
+      function paintRowMarks() {
+        const by = new Map();
+        for (const s of pastConvos) {
+          if (s && s.sessionId) by.set(String(s.sessionId), s);
+        }
+        for (const row of $('past-list').querySelectorAll('.s[data-session]')) {
+          const s = by.get(row.dataset.session);
+          const head = row.querySelector('.t');
+          if (!s || !head) continue;
+          const dot = head.querySelector('.dot');
+          if (s.live && dot) paintLiveDot(dot, s);
+          else if (s.live) head.querySelector('.tt').after(liveDot(s));
+          else if (dot) dot.remove();
+        }
       }
 
       // One folder's rows, or null when its listing could not be read, with
@@ -23880,7 +23967,10 @@
           // One tick, both reads. The snapshot rides this poll rather than
           // keeping a timer of its own, so the list and its markers cannot
           // drift apart by a poll interval, and the rail gains a request
-          // rather than a second cadence.
+          // rather than a second cadence. #255: the dots now also have a 1 s
+          // read of their own (startLiveTick), of the snapshot alone; this
+          // one still brings a snapshot with every listing, so a new row
+          // arrives with its dot.
           const [res, states] = await Promise.all([
             fetch('/rc/sessions?cwd=' + encodeURIComponent(cwd), {
               headers: { Authorization: 'Bearer ' + token() } },
@@ -23896,8 +23986,11 @@
           folderReadFailures.delete(cwd);
           // issue #36: pass the server's `truncated` flag through so the
           // 500-file cap is visible in the list.
+          // #255: the listing and the live map kept apart (folderRows), merged
+          // when drawn.
           return {
-            sessions: mergeLiveSessions(body.sessions, states),
+            raw: Array.isArray(body.sessions) ? body.sessions : [],
+            live: states,
             truncated: Boolean(body.truncated),
           };
         } catch (e) {
@@ -23942,14 +24035,15 @@
             );
           }
           renderPastConversations(
-            last ? last.sessions : [],
+            last ? last.raw : [],
             cwd,
             last ? last.truncated : false,
+            last ? last.live : null,
           );
           return;
         }
         folderReadFailedFor = null;
-        renderPastConversations(mine.sessions, cwd, mine.truncated);
+        renderPastConversations(mine.raw, cwd, mine.truncated, mine.live);
       }
 
       // issue #35: folder browsing is no longer the ONLY refresh trigger. A
@@ -23967,6 +24061,80 @@
           void refreshPastConversations(curDirPath);
         }, 30000);
       }
+
+      // #255. The dots' own read, every second while the list is on screen
+      // and the page is visible: each folder in the view, its live-state
+      // alone, never its listing. Every read is spawn=0, the current
+      // folder's too, so the tick never starts a daemon and never keeps one
+      // from idling out; and only on a gateway that says it honours spawn=0
+      // (liveStateNoSpawn), since an older one would start a daemon per
+      // folder asked about. A folder with a live-state read still out is
+      // skipped, so a slow daemon never gathers reads. A read that fails
+      // keeps the folder's last live map and says nothing: the 30 s read
+      // reports a folder it cannot read. The rows are rebuilt only when the
+      // set of live conversations changed; otherwise only their marks are
+      // painted (paintRowMarks).
+      const LIVE_TICK_MS = 1000;
+      let liveTickId = null;
+      function liveTickWanted() {
+        return (
+          !document.hidden && listShown() && liveStateNoSpawn() && !!token()
+        );
+      }
+      function startLiveTick() {
+        if (liveTickId !== null || !liveTickWanted()) return;
+        liveTickId = setInterval(liveTick, LIVE_TICK_MS);
+      }
+      function stopLiveTick() {
+        if (liveTickId === null) return;
+        clearInterval(liveTickId);
+        liveTickId = null;
+      }
+      function liveTick() {
+        if (!liveTickWanted()) {
+          stopLiveTick();
+          return;
+        }
+        for (const cwd of viewFolders()) {
+          // A folder whose listing was never read has no rows to mark.
+          const got = folderRows.get(cwd);
+          if (!got || liveReadsInFlight.has(cwd)) continue;
+          void readLiveStates(cwd, false).then((live) =>
+            liveTickLanded(cwd, got, live),
+          );
+        }
+      }
+      function liveSessionIds() {
+        return pastConvos
+          .filter((s) => s && s.live)
+          .map((s) => String(s.sessionId))
+          .sort()
+          .join('\n');
+      }
+      function liveTickLanded(cwd, got, live) {
+        // Failed: the last live map stays. The folder's rows read again
+        // while this was out: they came with a live map of their own, and
+        // the next tick reads again.
+        if (!live || folderRows.get(cwd) !== got) return;
+        got.live = live;
+        const was = liveSessionIds();
+        const folders = listFolders();
+        pastConvos = withCatalog(mergeFolderRows(folders), folders);
+        if (liveSessionIds() === was) {
+          paintRowMarks();
+          return;
+        }
+        renderList();
+        syncFolderMenuCounts();
+      }
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) stopLiveTick();
+        else startLiveTick();
+      });
+      PANE_QUERY.addEventListener('change', () => {
+        if (listShown()) startLiveTick();
+        else stopLiveTick();
+      });
 
       // issue #46: while a session is watched, the event stream is the
       // only card source — if a permission_request frame was lost (ring
