@@ -24,6 +24,11 @@ export type ForkRecord = Record<string, unknown>;
  * Everything else (notably `cwd`, which `loadSession` re-checks for project
  * ownership, and the message content) is copied verbatim. The input array and
  * its records are never mutated.
+ *
+ * #255: the records {@link FORK_DROPPED_SUBTYPES} names are not copied, as
+ * core does not copy them, and the chain is rebuilt over what is left, so a
+ * dropped chain root (a sub-session's `parent_session`) re-roots the fork at
+ * the first kept record.
  */
 export function forkRecords(
   records: readonly ForkRecord[],
@@ -31,7 +36,7 @@ export function forkRecords(
   newId: string,
 ): ForkRecord[] {
   let prevUuid: string | null = null;
-  return records.map((record) => {
+  return records.filter(forkCopies).map((record) => {
     const uuid = typeof record['uuid'] === 'string' ? record['uuid'] : null;
     const next: ForkRecord = {
       ...record,
@@ -45,6 +50,29 @@ export function forkRecords(
     prevUuid = uuid;
     return next;
   });
+}
+
+/**
+ * The system records core `SessionService.forkSession` never copies into a
+ * fork (`packages/core/src/services/sessionService.ts:4092-4104`): "A fork is
+ * a fresh top-level session with its own creation metadata", so inheriting
+ * them would attribute the fork to the source's spawner or creator. Core also
+ * drops `custom_title`, but only for a fork given a `source`, which this route
+ * never passes, so a title is copied here as it is there.
+ */
+export const FORK_DROPPED_SUBTYPES: ReadonlySet<string> = new Set([
+  'session_sources_snapshot',
+  'parent_session',
+  'session_source',
+  'turn_result',
+]);
+
+function forkCopies(record: ForkRecord): boolean {
+  return !(
+    record['type'] === 'system' &&
+    typeof record['subtype'] === 'string' &&
+    FORK_DROPPED_SUBTYPES.has(record['subtype'])
+  );
 }
 
 /**

@@ -128,6 +128,28 @@ describe('forkRecords', () => {
     expect(src[1].parentUuid).toBe('u0');
     expect(src[0].forkedFrom).toBeUndefined();
   });
+
+  it("drops core forkSession's creation records and chains what is left from null (#255)", () => {
+    const sys = (uuid: string, subtype: string) => ({
+      uuid,
+      sessionId: 'src',
+      type: 'system',
+      subtype,
+      systemPayload: {},
+    });
+    const src = [
+      sys('ps', 'parent_session'),
+      sys('so', 'session_source'),
+      ...sample(),
+      sys('tr', 'turn_result'),
+      sys('ss', 'session_sources_snapshot'),
+      sys('ct', 'custom_title'),
+    ];
+    const out = forkRecords(src, 'src', 'NEW');
+    // custom_title stays: core drops it only for a fork given a source.
+    expect(out.map((r) => r.uuid)).toEqual(['u0', 'u1', 'u2', 'ct']);
+    expect(out.map((r) => r.parentUuid)).toEqual([null, 'u0', 'u1', 'u2']);
+  });
 });
 
 describe('serializeForked', () => {
