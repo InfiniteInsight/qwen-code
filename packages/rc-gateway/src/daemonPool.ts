@@ -46,6 +46,9 @@ import type {
   DaemonSessionAgentsStatus,
   DaemonAgentTrace,
   DaemonSessionSavedWorkflowStatus,
+  DaemonSubagentPauseResult,
+  DaemonSubagentResumeResult,
+  DaemonSubagentAbandonResult,
 } from '@qwen-code/sdk';
 import {
   DaemonTransportClosedError,
@@ -618,7 +621,25 @@ export interface SessionDaemon {
     action?: 'queued' | 'resumed' | 'continued' | 'revived';
     status?: string;
     reason?: string;
+    code?: string;
+    detail?: string;
   }>;
+  pauseSubagentSession(
+    sessionId: string,
+    subagentRef: string,
+    clientId?: string,
+  ): Promise<DaemonSubagentPauseResult>;
+  resumeSubagentSession(
+    sessionId: string,
+    subagentRef: string,
+    message?: string,
+    clientId?: string,
+  ): Promise<DaemonSubagentResumeResult>;
+  abandonSubagentSession(
+    sessionId: string,
+    subagentRef: string,
+    clientId?: string,
+  ): Promise<DaemonSubagentAbandonResult>;
   cancelSessionTask(
     sessionId: string,
     taskId: string,
@@ -2658,9 +2679,42 @@ export class DaemonPool implements SessionDaemon {
     action?: 'queued' | 'resumed' | 'continued' | 'revived';
     status?: string;
     reason?: string;
+    code?: string;
+    detail?: string;
   }> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.messageSubagentSession(sessionId, subagentRef, message, clientId),
+    );
+  }
+
+  async pauseSubagentSession(
+    sessionId: string,
+    subagentRef: string,
+    clientId?: string,
+  ): Promise<DaemonSubagentPauseResult> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.pauseSubagentSession(sessionId, subagentRef, clientId),
+    );
+  }
+
+  async resumeSubagentSession(
+    sessionId: string,
+    subagentRef: string,
+    message?: string,
+    clientId?: string,
+  ): Promise<DaemonSubagentResumeResult> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.resumeSubagentSession(sessionId, subagentRef, message, clientId),
+    );
+  }
+
+  async abandonSubagentSession(
+    sessionId: string,
+    subagentRef: string,
+    clientId?: string,
+  ): Promise<DaemonSubagentAbandonResult> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.abandonSubagentSession(sessionId, subagentRef, clientId),
     );
   }
 

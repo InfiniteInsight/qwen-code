@@ -50,6 +50,8 @@ function fakeDaemon(
     action?: 'queued' | 'resumed' | 'continued';
     status?: string;
     reason?: string;
+    code?: string;
+    detail?: string;
     thrown?: unknown;
   } = {},
 ) {
@@ -71,6 +73,8 @@ function fakeDaemon(
         ...(behaviour.action ? { action: behaviour.action } : {}),
         ...(behaviour.status ? { status: behaviour.status } : {}),
         ...(behaviour.reason ? { reason: behaviour.reason } : {}),
+        ...(behaviour.code ? { code: behaviour.code } : {}),
+        ...(behaviour.detail ? { detail: behaviour.detail } : {}),
       };
     },
   } as unknown as SessionDaemon;
@@ -169,6 +173,37 @@ describe('POST /session/:id/subagents/:subagentRef/message', () => {
     expect(entries[0]).toMatchObject({
       action: 'subagent_message_failed',
       detail: { reason: 'status_cancelled' },
+    });
+  });
+
+  it('forwards code and detail on resume_failed and records code in audit (#260)', async () => {
+    const { daemon } = fakeDaemon({
+      delivered: false,
+      status: 'paused',
+      reason: 'resume_failed',
+      code: 'resume_blocked',
+      detail:
+        'Background task worktree isolation cannot be reconstructed after session restore.',
+    });
+    const { audit, entries } = recorder();
+    const out = await call(daemon, audit);
+    expect(out.status).toBe(200);
+    expect(out.body).toEqual({
+      sessionId: SESS,
+      subagentRef: REF,
+      delivered: false,
+      status: 'paused',
+      reason: 'resume_failed',
+      code: 'resume_blocked',
+      detail:
+        'Background task worktree isolation cannot be reconstructed after session restore.',
+    });
+    expect(entries[0]).toMatchObject({
+      action: 'subagent_message_failed',
+      detail: {
+        reason: 'resume_failed',
+        code: 'resume_blocked',
+      },
     });
   });
 

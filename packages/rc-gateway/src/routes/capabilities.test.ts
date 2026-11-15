@@ -592,3 +592,54 @@ describe('githubClone (#257)', () => {
     }
   });
 });
+
+describe('subagentControls (#267)', () => {
+  it('reports true iff daemon capabilities include session_subagent_controls', async () => {
+    const withControls = await mount({
+      daemonStatus: async () => ({
+        v: 1,
+        mode: 'http-bridge',
+        features: ['session_agents', 'session_subagent_controls'],
+        modelServices: [],
+      }),
+    });
+    const withoutControls = await mount({
+      daemonStatus: async () => ({
+        v: 1,
+        mode: 'http-bridge',
+        features: ['session_agents'],
+        modelServices: [],
+      }),
+    });
+    const unwired = await mount({});
+    const dead = await mount({
+      daemonStatus: async () => {
+        throw new Error('down');
+      },
+    });
+    try {
+      const on = await (
+        await fetch(`${withControls.base}/rc/capabilities`)
+      ).json();
+      expect(on.remoteControl.subagentControls).toBe(true);
+
+      const off = await (
+        await fetch(`${withoutControls.base}/rc/capabilities`)
+      ).json();
+      expect(off.remoteControl.subagentControls).toBe(false);
+
+      const bare = await (
+        await fetch(`${unwired.base}/rc/capabilities`)
+      ).json();
+      expect(bare.remoteControl.subagentControls).toBe(false);
+
+      const err = await (await fetch(`${dead.base}/rc/capabilities`)).json();
+      expect(err.remoteControl.subagentControls).toBe(false);
+    } finally {
+      await withControls.close();
+      await withoutControls.close();
+      await unwired.close();
+      await dead.close();
+    }
+  });
+});

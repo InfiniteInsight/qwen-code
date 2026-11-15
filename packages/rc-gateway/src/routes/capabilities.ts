@@ -291,6 +291,9 @@ export function createCapabilityRoute(deps: {
       // advertises `session_agents`, so an old gateway shows nothing new and
       // an old daemon is never asked.
       sessionAgents: true,
+      // #267: true when the connected daemon advertises session_subagent_controls
+      // (/pause, /resume, /abandon, and structured resume_failed details).
+      subagentControls: false,
       // #132: POST /rc/sessions/catalog is mounted: one merged order and one
       // cursor across the workspaces, with groups. The page is served from
       // disk and can meet an older gateway, so it reads the catalog only when
@@ -385,13 +388,15 @@ export function createCapabilityRoute(deps: {
       remoteControl.nativeShells = deps.nativeShells();
     }
     if (deps.daemonStatus) {
-      remoteControl.daemon = scopeDaemonBlock(
-        await readDaemonStatus(
-          deps.daemonStatus,
-          deps.daemonBudgetMs ?? DEFAULT_DAEMON_BUDGET_MS,
-        ),
-        audience,
+      const rawDaemon = await readDaemonStatus(
+        deps.daemonStatus,
+        deps.daemonBudgetMs ?? DEFAULT_DAEMON_BUDGET_MS,
       );
+      remoteControl.daemon = scopeDaemonBlock(rawDaemon, audience);
+      remoteControl.subagentControls =
+        rawDaemon.available === true &&
+        Array.isArray(rawDaemon.features) &&
+        rawDaemon.features.includes('session_subagent_controls');
     }
     res.status(200).json({ remoteControl });
   };
