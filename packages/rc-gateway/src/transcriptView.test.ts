@@ -36,8 +36,14 @@ type Model = {
   appendThought: (t: string, time?: number) => void;
   finishThought: () => void;
   upsertTool: (u: Record<string, unknown>, time?: number) => void;
+  prependItems: (list: Item[]) => number;
   touch: (item: Item) => void;
   search: (q: string) => Array<{ id: number; item: Item }>;
+};
+
+type ModelApi = {
+  createTranscriptModel: (opts?: { now?: () => number }) => Model;
+  replayStoredPage: (events: unknown[]) => Item[];
 };
 
 type View = {
@@ -52,6 +58,7 @@ let clockMs = 0;
 let dom: JSDOM;
 let scroller: HTMLElement;
 let view: View | null = null;
+let modelApi: ModelApi;
 let model: Model;
 let registry: Map<string, { ranges: Range[] }>;
 
@@ -107,15 +114,13 @@ beforeEach(async () => {
   w.document.body.appendChild(scroller);
   await import(pathToFileURL(pub('transcript-model.js')).href);
   await import(pathToFileURL(pub('transcript-view.js')).href);
-  const TranscriptModel = (globalThis as { TranscriptModel: never })
-    .TranscriptModel as unknown as {
-    createTranscriptModel: (opts?: { now?: () => number }) => Model;
-  };
+  modelApi = (globalThis as { TranscriptModel: never })
+    .TranscriptModel as unknown as ModelApi;
   const TranscriptView = (globalThis as { TranscriptView: never })
     .TranscriptView as unknown as {
     createTranscriptView: (o: Record<string, unknown>) => View;
   };
-  model = TranscriptModel.createTranscriptModel({ now: () => clockMs });
+  model = modelApi.createTranscriptModel({ now: () => clockMs });
   view = TranscriptView.createTranscriptView({
     model,
     scroller,
@@ -372,5 +377,49 @@ describe('thought and tool header timestamps (#268)', () => {
       const parent = r.startContainer.parentElement;
       expect(parent?.closest('.stamp')).toBeNull();
     }
+  });
+
+  it('repaints a mounted result-only tool row in place when an older page brings its tool_call start timestamp', () => {
+    model.prependItems(
+      modelApi.replayStoredPage([
+        {
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'tc-split',
+            status: 'completed',
+            rawOutput: 'done',
+            _meta: { timestamp: STAMP_END },
+          },
+        },
+      ]),
+    );
+    tick();
+    expect(scroller.querySelector('.bubble.tool .tool-head')?.textContent).toBe(
+      '🔧 tc-split  [completed] \u00b7 Nov 15, 11:29 AM ▸',
+    );
+
+    model.prependItems(
+      modelApi.replayStoredPage([
+        {
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'tc-split',
+            title: 'Read split.ts',
+            status: 'in_progress',
+            rawInput: { path: 'split.ts' },
+            _meta: { timestamp: STAMP_START },
+          },
+        },
+      ]),
+    );
+    tick();
+    expect(scroller.querySelectorAll('.bubble.tool')).toHaveLength(1);
+    expect(scroller.querySelector('.bubble.tool .tool-head')?.textContent).toBe(
+      '🔧 Read split.ts  [completed] \u00b7 Nov 15, 11:26 AM ▸',
+    );
   });
 });

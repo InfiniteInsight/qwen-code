@@ -1157,6 +1157,9 @@
       // reassigned array would leave it rendering a list the model no longer
       // holds.
       items.splice(0, 0, ...list);
+      for (var a = 0; a < adopted.length; a++) {
+        emitUpdate(adopted[a]);
+      }
       emit({ type: 'reset' });
       return list.length;
     }

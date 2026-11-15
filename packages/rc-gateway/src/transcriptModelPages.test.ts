@@ -53,6 +53,7 @@ interface Model {
   userTurns(): Item[];
   cutAtUserTurn(keep: number): boolean;
   prependItems(list: Item[], beforeSplice?: () => void): number;
+  subscribe(fn: (ev: { type: string; item?: Item }) => void): () => void;
 }
 interface Api {
   createTranscriptModel(opts?: { now?: () => number }): Model;
@@ -537,6 +538,7 @@ describe('thought and tool timestamps across stored pages (#268)', () => {
 
   it('fillTool adopts the older tool_call start timestamp over a newer tool_call_update timestamp across pages', () => {
     const m = api.createTranscriptModel();
+    const updates: Item[] = [];
     m.prependItems(
       api.replayStoredPage([
         flat(
@@ -547,6 +549,9 @@ describe('thought and tool timestamps across stored pages (#268)', () => {
       ]),
     );
     expect(m.items[0].time).toBe(20_000);
+    m.subscribe((ev: { type: string; item?: Item }) => {
+      if (ev.type === 'update' && ev.item) updates.push(ev.item);
+    });
 
     m.prependItems(
       api.replayStoredPage([
@@ -554,6 +559,7 @@ describe('thought and tool timestamps across stored pages (#268)', () => {
       ]),
     );
     expect(m.items).toHaveLength(1);
+    expect(updates).toEqual([m.items[0]]);
     expect(m.items[0]).toMatchObject({
       kind: 'tool',
       label: 'read_file',
