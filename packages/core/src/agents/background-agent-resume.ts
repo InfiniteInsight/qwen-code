@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Content, Part } from '@google/genai';
@@ -111,11 +112,11 @@ const TRANSCRIPT_IDENTITY_BLOCKED_REASON =
   'Background task transcript does not match its retained identity.';
 const WORKING_DIRECTORY_BLOCKED_REASON =
   'Background task working directory does not match the restored session.';
-const WORKTREE_ISOLATION_BLOCKED_REASON =
+export const WORKTREE_ISOLATION_BLOCKED_REASON =
   'Background task worktree isolation cannot be reconstructed after session restore.';
 const INCOMPATIBLE_ISOLATION_BLOCKED_REASON =
   'Background task isolation metadata is incompatible.';
-const CONTAINER_EXECUTION_BLOCKED_REASON =
+export const CONTAINER_EXECUTION_BLOCKED_REASON =
   'Container background tasks cannot be resumed. Start a new container agent to continue.';
 
 /**
@@ -230,6 +231,23 @@ export type BackgroundAgentResumeOutcome =
       task?: AgentTask;
     };
 
+export type PauseBackgroundAgentRefusalCode =
+  | 'agent_not_found'
+  | 'not_backgrounded'
+  | 'not_running'
+  | 'metadata_missing'
+  | 'metadata_unreadable'
+  | 'pause_blocked';
+
+export type PauseBackgroundAgentOutcome =
+  | { outcome: 'paused'; agentId: string }
+  | {
+      outcome: 'refused';
+      agentId: string;
+      code: PauseBackgroundAgentRefusalCode;
+      reason: string;
+    };
+
 interface ResumeOperation {
   continuationInputs: AgentExternalInput[];
   promise: Promise<BackgroundAgentResumeOutcome>;
@@ -287,7 +305,7 @@ function reconcileResumedApprovalMode(
 
 function persistBackgroundCancellation(
   metaPath: string,
-  persistedStatus: 'running' | 'cancelled',
+  persistedStatus: 'running' | 'paused' | 'cancelled',
   sessionWorkflow: boolean,
   stats?: AgentCompletionStats,
   recentActivities?: AgentTask['recentActivities'],
@@ -548,7 +566,10 @@ export class BackgroundAgentResumeService {
           path.basename(
             getAgentMetaPath(projectDir, sessionId, meta.agentId),
           ) !== fileName ||
-          (meta.status !== 'running' && meta.status !== 'completed') ||
+          meta.abandonedAt !== undefined ||
+          (meta.status !== 'running' &&
+            meta.status !== 'paused' &&
+            meta.status !== 'completed') ||
           (meta.isBackgrounded !== undefined &&
             typeof meta.isBackgrounded !== 'boolean') ||
           meta.isBackgrounded === false ||
@@ -566,8 +587,12 @@ export class BackgroundAgentResumeService {
     }
 
     sidecars.sort((a, b) => {
-      if (a.meta.status !== b.meta.status) {
-        return a.meta.status === 'running' ? -1 : 1;
+      const aPausedLike =
+        a.meta.status === 'running' || a.meta.status === 'paused';
+      const bPausedLike =
+        b.meta.status === 'running' || b.meta.status === 'paused';
+      if (aPausedLike !== bPausedLike) {
+        return aPausedLike ? -1 : 1;
       }
       if (a.meta.status === 'completed') {
         return recoveryTimestamp(b.meta) - recoveryTimestamp(a.meta);
@@ -672,7 +697,7 @@ export class BackgroundAgentResumeService {
           description: meta.description,
           subagentType: target.agentName,
           isBackgrounded: true,
-          status: meta.status === 'running' ? 'paused' : 'completed',
+          status: meta.status === 'completed' ? 'completed' : 'paused',
           startTime: Number.isFinite(parsedStartTime)
             ? parsedStartTime
             : Date.now(),
@@ -688,6 +713,9 @@ export class BackgroundAgentResumeService {
           toolUseId: meta.toolUseId,
           outputFile,
           metaPath,
+          isolation: meta.isolation,
+          executionBackend: meta.executionBackend,
+          executor: meta.executor,
           error:
             meta.lastError === resumeBlockedReason ? undefined : meta.lastError,
           resumeBlockedReason,
@@ -726,6 +754,131 @@ export class BackgroundAgentResumeService {
     }
 
     return recovered;
+  }
+
+  /**
+   * Pause a running, resumable background agent cleanly without emitting a
+   * terminal task-notification, or refuse with a concrete code and reason.
+   */
+  pauseBackgroundAgentWithOutcome(
+    agentId: string,
+  ): PauseBackgroundAgentOutcome {
+    const registry = this.config.getBackgroundTaskRegistry();
+    const entry = registry.get(agentId);
+    if (!entry || entry.kind !== 'agent') {
+      return {
+        outcome: 'refused',
+        agentId,
+        code: 'agent_not_found',
+        reason: `Background agent "${agentId}" is not registered in this session.`,
+      };
+    }
+    if (!entry.isBackgrounded) {
+      return {
+        outcome: 'refused',
+        agentId: entry.id,
+        code: 'not_backgrounded',
+        reason: `Foreground agent "${entry.id}" blocks the current turn and cannot be paused; use Stop instead.`,
+      };
+    }
+    if (entry.status !== 'running') {
+      return {
+        outcome: 'refused',
+        agentId: entry.id,
+        code: 'not_running',
+        reason: `Background agent "${entry.id}" is ${entry.status}, not running.`,
+      };
+    }
+    if (entry.resumeBlockedReason) {
+      return {
+        outcome: 'refused',
+        agentId: entry.id,
+        code: 'pause_blocked',
+        reason: entry.resumeBlockedReason,
+      };
+    }
+    if (!entry.metaPath) {
+      return {
+        outcome: 'refused',
+        agentId: entry.id,
+        code: 'metadata_missing',
+        reason: `Background agent "${entry.id}" has no metadata sidecar path and cannot be paused safely.`,
+      };
+    }
+    if (!fsSync.existsSync(entry.metaPath)) {
+      return {
+        outcome: 'refused',
+        agentId: entry.id,
+        code: 'metadata_missing',
+        reason: `Background agent "${entry.id}" metadata sidecar is missing and cannot be paused safely.`,
+      };
+    }
+    const meta = readAgentMeta(entry.metaPath);
+    if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
+      const stillExists = fsSync.existsSync(entry.metaPath);
+      return {
+        outcome: 'refused',
+        agentId: entry.id,
+        code: stillExists ? 'metadata_unreadable' : 'metadata_missing',
+        reason: stillExists
+          ? `The saved metadata of background agent "${entry.id}" could not be read.`
+          : `Background agent "${entry.id}" metadata sidecar is missing and cannot be paused safely.`,
+      };
+    }
+    if (meta.isolation === 'worktree' || entry.isolation === 'worktree') {
+      return {
+        outcome: 'refused',
+        agentId: entry.id,
+        code: 'pause_blocked',
+        reason: WORKTREE_ISOLATION_BLOCKED_REASON,
+      };
+    }
+    if (
+      meta.isolation === 'container' ||
+      entry.isolation === 'container' ||
+      meta.executionBackend !== undefined ||
+      entry.executionBackend !== undefined
+    ) {
+      return {
+        outcome: 'refused',
+        agentId: entry.id,
+        code: 'pause_blocked',
+        reason: CONTAINER_EXECUTION_BLOCKED_REASON,
+      };
+    }
+    if (meta.isolation !== undefined) {
+      return {
+        outcome: 'refused',
+        agentId: entry.id,
+        code: 'pause_blocked',
+        reason: INCOMPATIBLE_ISOLATION_BLOCKED_REASON,
+      };
+    }
+    if (meta.executor !== undefined) {
+      return {
+        outcome: 'refused',
+        agentId: entry.id,
+        code: 'pause_blocked',
+        reason: `External executor "${meta.executor}" background runs cannot be paused and resumed.`,
+      };
+    }
+
+    if (!registry.pause(entry.id)) {
+      const latestStatus = registry.get(entry.id)?.status ?? 'unknown';
+      return {
+        outcome: 'refused',
+        agentId: entry.id,
+        code: 'not_running',
+        reason: `Background agent "${entry.id}" is ${latestStatus}, not running.`,
+      };
+    }
+
+    patchAgentMeta(entry.metaPath, {
+      status: 'paused',
+      lastUpdatedAt: new Date().toISOString(),
+      lastError: undefined,
+    });
+    return { outcome: 'paused', agentId: entry.id };
   }
 
   /**
@@ -1172,8 +1325,14 @@ export class BackgroundAgentResumeService {
         existing,
       );
     }
+    if (meta.isolation === 'worktree' && meta.status !== 'completed') {
+      return this.refuseBlocked(agentId, WORKTREE_ISOLATION_BLOCKED_REASON);
+    }
     if (meta.isolation === 'container' || meta.executionBackend !== undefined) {
       return this.refuseBlocked(agentId, CONTAINER_EXECUTION_BLOCKED_REASON);
+    }
+    if (meta.isolation !== undefined && meta.isolation !== 'worktree') {
+      return this.refuseBlocked(agentId, INCOMPATIBLE_ISOLATION_BLOCKED_REASON);
     }
 
     const bgAbortController = new AbortController();
@@ -1312,6 +1471,11 @@ export class BackgroundAgentResumeService {
           this.config.isInteractive(),
       );
       stampBackgroundPromptPolicy(activeAgentConfig, shouldBubble);
+
+      // Wait for any just-paused turn on this agentId to finish unwinding
+      // (flushing JSONL and detaching runtime bindings) before reading the
+      // sidecar transcript or opening a new JSONL writer.
+      await registry.waitForAgentTurnUnwind?.(agentId);
 
       const records = await jsonl.read<ChatRecord>(outputFile);
       const recovery = recoverTranscript(records);
@@ -1698,7 +1862,17 @@ export class BackgroundAgentResumeService {
               stopHookWarning,
             );
             const stats = getCompletionStats(subagent, liveToolCallCount);
+            const ownsActiveTurn = () => {
+              const cur = registry.get(meta.agentId);
+              return (
+                cur?.abortController === turnAbortController &&
+                cur.status !== 'paused'
+              );
+            };
             if (terminateMode === AgentTerminateMode.GOAL) {
+              if (!ownsActiveTurn()) {
+                break;
+              }
               const pending = registry.drainMessages(meta.agentId);
               if (pending.length > 0) {
                 finishingInputs = pending;
@@ -1727,30 +1901,34 @@ export class BackgroundAgentResumeService {
               });
               registry.complete(meta.agentId, finalText, stats);
             } else if (terminateMode === AgentTerminateMode.CANCELLED) {
-              registry.finalizeCancelled(meta.agentId, finalText, stats);
-              persistBackgroundCancellation(
-                metaPath,
-                registry.get(meta.agentId)?.persistedCancellationStatus ??
-                  'cancelled',
-                meta.sessionWorkflow === true,
-                stats,
-                registry.get(meta.agentId)?.recentActivities,
-              );
+              if (ownsActiveTurn()) {
+                registry.finalizeCancelled(meta.agentId, finalText, stats);
+                persistBackgroundCancellation(
+                  metaPath,
+                  registry.get(meta.agentId)?.persistedCancellationStatus ??
+                    'cancelled',
+                  meta.sessionWorkflow === true,
+                  stats,
+                  registry.get(meta.agentId)?.recentActivities,
+                );
+              }
             } else {
-              const failureText =
-                finalText || `Agent terminated with mode: ${terminateMode}`;
-              registry.fail(meta.agentId, failureText, stats);
-              patchAgentMeta(metaPath, {
-                status: 'failed',
-                lastUpdatedAt: new Date().toISOString(),
-                lastError: failureText,
-                ...(meta.sessionWorkflow
-                  ? getAgentMetaTerminalSummary(
-                      stats,
-                      registry.get(meta.agentId)?.recentActivities,
-                    )
-                  : {}),
-              });
+              if (ownsActiveTurn()) {
+                const failureText =
+                  finalText || `Agent terminated with mode: ${terminateMode}`;
+                registry.fail(meta.agentId, failureText, stats);
+                patchAgentMeta(metaPath, {
+                  status: 'failed',
+                  lastUpdatedAt: new Date().toISOString(),
+                  lastError: failureText,
+                  ...(meta.sessionWorkflow
+                    ? getAgentMetaTerminalSummary(
+                        stats,
+                        registry.get(meta.agentId)?.recentActivities,
+                      )
+                    : {}),
+                });
+              }
             }
             break;
           }
@@ -1761,31 +1939,37 @@ export class BackgroundAgentResumeService {
           debugLogger.error(
             `[BackgroundAgentResume] Background agent failed: ${errorMessage}`,
           );
-          if (turnAbortController.signal.aborted) {
-            const stats = getCompletionStats(subagent, liveToolCallCount);
-            registry.finalizeCancelled(meta.agentId, errorMessage, stats);
-            persistBackgroundCancellation(
-              metaPath,
-              registry.get(meta.agentId)?.persistedCancellationStatus ??
-                'cancelled',
-              meta.sessionWorkflow === true,
-              stats,
-              registry.get(meta.agentId)?.recentActivities,
-            );
-          } else {
-            const stats = getCompletionStats(subagent, liveToolCallCount);
-            registry.fail(meta.agentId, errorMessage, stats);
-            patchAgentMeta(metaPath, {
-              status: 'failed',
-              lastUpdatedAt: new Date().toISOString(),
-              lastError: errorMessage,
-              ...(meta.sessionWorkflow
-                ? getAgentMetaTerminalSummary(
-                    stats,
-                    registry.get(meta.agentId)?.recentActivities,
-                  )
-                : {}),
-            });
+          const cur = registry.get(meta.agentId);
+          const ownsTurn =
+            cur?.abortController === turnAbortController &&
+            cur.status !== 'paused';
+          if (ownsTurn) {
+            if (turnAbortController.signal.aborted) {
+              const stats = getCompletionStats(subagent, liveToolCallCount);
+              registry.finalizeCancelled(meta.agentId, errorMessage, stats);
+              persistBackgroundCancellation(
+                metaPath,
+                registry.get(meta.agentId)?.persistedCancellationStatus ??
+                  'cancelled',
+                meta.sessionWorkflow === true,
+                stats,
+                registry.get(meta.agentId)?.recentActivities,
+              );
+            } else {
+              const stats = getCompletionStats(subagent, liveToolCallCount);
+              registry.fail(meta.agentId, errorMessage, stats);
+              patchAgentMeta(metaPath, {
+                status: 'failed',
+                lastUpdatedAt: new Date().toISOString(),
+                lastError: errorMessage,
+                ...(meta.sessionWorkflow
+                  ? getAgentMetaTerminalSummary(
+                      stats,
+                      registry.get(meta.agentId)?.recentActivities,
+                    )
+                  : {}),
+              });
+            }
           }
         } finally {
           turnRunning = false;
@@ -1900,6 +2084,11 @@ export class BackgroundAgentResumeService {
                 true,
               );
             });
+          registry.trackAgentTurn?.(
+            meta.agentId,
+            nextAbortController,
+            currentTurnPromise,
+          );
           currentTurnPromise.catch(reportUnexpectedBackgroundError);
           return 'continued';
         },
@@ -1914,6 +2103,11 @@ export class BackgroundAgentResumeService {
         contextState,
         bgAbortController,
         false,
+      );
+      registry.trackAgentTurn?.(
+        meta.agentId,
+        bgAbortController,
+        currentTurnPromise,
       );
       runtimeLifecycleOwned = true;
       currentTurnPromise.catch(reportUnexpectedBackgroundError);

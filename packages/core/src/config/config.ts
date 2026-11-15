@@ -12194,6 +12194,14 @@ export class Config {
     );
   }
 
+  pauseBackgroundAgentWithOutcome(
+    agentId: string,
+  ): import('../agents/background-agent-resume.js').PauseBackgroundAgentOutcome {
+    return this.getBackgroundAgentResumeService().pauseBackgroundAgentWithOutcome(
+      agentId,
+    );
+  }
+
   abandonBackgroundAgent(agentId: string): boolean {
     return this.getBackgroundAgentResumeService().abandonBackgroundAgent(
       agentId,

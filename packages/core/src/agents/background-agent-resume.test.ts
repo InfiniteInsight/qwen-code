@@ -3220,6 +3220,375 @@ describe('BackgroundAgentResumeService', () => {
       expect(registry.get('agent-abandon-running')?.status).toBe('running');
     });
   });
+
+  describe('pauseBackgroundAgentWithOutcome and paused sidecar restore (#267)', () => {
+    it('pauses a running background agent, patches meta sidecar to paused, and clears lastError', () => {
+      const sessionId = 'session-pause-happy';
+      const agentId = 'agent-pause-happy';
+      const { metaPath, outputFile } = seedSidecar(
+        sessionId,
+        agentId,
+        'Long research run',
+        { status: 'running', isBackgrounded: true, lastError: 'transient err' },
+      );
+      const ac = new AbortController();
+      register(agentId, 'Long research run', {
+        status: 'running',
+        isBackgrounded: true,
+        abortController: ac,
+        metaPath,
+        outputFile,
+      });
+      const notifySpy = vi.fn();
+      registry.setNotificationCallback(notifySpy);
+      const { service } = createService();
+
+      const outcome = service.pauseBackgroundAgentWithOutcome(agentId);
+
+      expect(outcome).toEqual({ outcome: 'paused', agentId });
+      expect(ac.signal.aborted).toBe(true);
+      expect(registry.get(agentId)?.status).toBe('paused');
+      const meta = readAgentMeta(metaPath);
+      expect(meta?.status).toBe('paused');
+      expect(meta?.lastError).toBeUndefined();
+      expect(meta?.lastUpdatedAt).not.toBe(T0);
+      expect(notifySpy).not.toHaveBeenCalled();
+    });
+
+    it('refuses unknown, foreground, non-running, missing/corrupt metadata, and non-resumable agents with concrete causes (#211)', () => {
+      const sessionId = 'session-pause-refusals';
+      const { service } = createService();
+
+      // 1. Unknown ID -> agent_not_found
+      const notFound = service.pauseBackgroundAgentWithOutcome('missing-agent');
+      expect(notFound).toMatchObject({
+        outcome: 'refused',
+        agentId: 'missing-agent',
+        code: 'agent_not_found',
+      });
+      if (notFound.outcome === 'refused') {
+        expect(notFound.reason).toContain('missing-agent');
+      }
+
+      // 2. Foreground agent -> not_backgrounded (not aborted)
+      const fgAc = new AbortController();
+      register('fg-agent', 'Foreground run', {
+        status: 'running',
+        isBackgrounded: false,
+        abortController: fgAc,
+        outputFile: path.join(tempDir, 'fg.jsonl'),
+      });
+      const fgRefused = service.pauseBackgroundAgentWithOutcome('fg-agent');
+      expect(fgRefused).toMatchObject({
+        outcome: 'refused',
+        agentId: 'fg-agent',
+        code: 'not_backgrounded',
+      });
+      expect(fgAc.signal.aborted).toBe(false);
+
+      // 3. Already paused or completed -> not_running
+      seedPaused(sessionId, 'already-paused', 'Paused agent');
+      expect(
+        service.pauseBackgroundAgentWithOutcome('already-paused'),
+      ).toMatchObject({
+        outcome: 'refused',
+        agentId: 'already-paused',
+        code: 'not_running',
+      });
+
+      register('already-completed', 'Completed agent', {
+        status: 'completed',
+        isBackgrounded: true,
+        outputFile: path.join(tempDir, 'completed.jsonl'),
+      });
+      expect(
+        service.pauseBackgroundAgentWithOutcome('already-completed'),
+      ).toMatchObject({
+        outcome: 'refused',
+        agentId: 'already-completed',
+        code: 'not_running',
+      });
+
+      // 4. Missing metaPath and missing .meta.json -> metadata_missing
+      const noMetaPathAc = new AbortController();
+      register('no-metapath', 'No metaPath', {
+        status: 'running',
+        isBackgrounded: true,
+        abortController: noMetaPathAc,
+        outputFile: path.join(tempDir, 'no-metapath.jsonl'),
+      });
+      expect(
+        service.pauseBackgroundAgentWithOutcome('no-metapath'),
+      ).toMatchObject({
+        outcome: 'refused',
+        agentId: 'no-metapath',
+        code: 'metadata_missing',
+      });
+      expect(noMetaPathAc.signal.aborted).toBe(false);
+
+      const missingFileAc = new AbortController();
+      register('missing-meta-file', 'Missing meta file', {
+        status: 'running',
+        isBackgrounded: true,
+        abortController: missingFileAc,
+        metaPath: path.join(tempDir, 'does-not-exist.meta.json'),
+        outputFile: path.join(tempDir, 'missing-meta-file.jsonl'),
+      });
+      expect(
+        service.pauseBackgroundAgentWithOutcome('missing-meta-file'),
+      ).toMatchObject({
+        outcome: 'refused',
+        agentId: 'missing-meta-file',
+        code: 'metadata_missing',
+      });
+      expect(missingFileAc.signal.aborted).toBe(false);
+
+      // 5. Corrupt .meta.json -> metadata_unreadable
+      const corruptMetaPath = path.join(tempDir, 'corrupt.meta.json');
+      fs.writeFileSync(corruptMetaPath, '{corrupt json', 'utf8');
+      const corruptAc = new AbortController();
+      register('corrupt-meta', 'Corrupt meta file', {
+        status: 'running',
+        isBackgrounded: true,
+        abortController: corruptAc,
+        metaPath: corruptMetaPath,
+        outputFile: path.join(tempDir, 'corrupt-meta.jsonl'),
+      });
+      expect(
+        service.pauseBackgroundAgentWithOutcome('corrupt-meta'),
+      ).toMatchObject({
+        outcome: 'refused',
+        agentId: 'corrupt-meta',
+        code: 'metadata_unreadable',
+      });
+      expect(corruptAc.signal.aborted).toBe(false);
+
+      // 6. Blocked cases (worktree, container, executionBackend, executor, entry.resumeBlockedReason)
+      const blockedCases: Array<{
+        id: string;
+        meta?: Partial<AgentMeta>;
+        resumeBlockedReason?: string;
+        expectedSubstring: string;
+      }> = [
+        {
+          id: 'blocked-worktree',
+          meta: { isolation: 'worktree' },
+          expectedSubstring: 'worktree',
+        },
+        {
+          id: 'blocked-container',
+          meta: { isolation: 'container' },
+          expectedSubstring: 'Container',
+        },
+        {
+          id: 'blocked-backend',
+          meta: { executionBackend: 'container' },
+          expectedSubstring: 'Container',
+        },
+        {
+          id: 'blocked-executor',
+          meta: { executor: 'acp' as AgentMeta['executor'] },
+          expectedSubstring: 'acp',
+        },
+        {
+          id: 'blocked-entry-reason',
+          resumeBlockedReason: 'Codex agents are one-shot.',
+          expectedSubstring: 'one-shot',
+        },
+      ];
+
+      for (const item of blockedCases) {
+        const paths = seedSidecar(sessionId, item.id, item.id, {
+          status: 'running',
+          isBackgrounded: true,
+          ...item.meta,
+        });
+        const ac = new AbortController();
+        register(item.id, item.id, {
+          status: 'running',
+          isBackgrounded: true,
+          abortController: ac,
+          resumeBlockedReason: item.resumeBlockedReason,
+          ...paths,
+        });
+
+        const refused = service.pauseBackgroundAgentWithOutcome(item.id);
+        expect(refused).toMatchObject({
+          outcome: 'refused',
+          agentId: item.id,
+          code: 'pause_blocked',
+        });
+        if (refused.outcome === 'refused') {
+          expect(refused.reason).toContain(item.expectedSubstring);
+        }
+        expect(ac.signal.aborted).toBe(false);
+        expect(registry.get(item.id)?.status).toBe('running');
+      }
+    });
+
+    it('restores sidecars persisted with status=paused across restarts and refuses worktree cold resume', async () => {
+      const sessionId = 'session-paused-reload';
+      seedSidecar(sessionId, 'agent-persisted-paused', 'Explicitly paused', {
+        status: 'paused',
+        isBackgrounded: true,
+      });
+      seedSidecar(sessionId, 'agent-completed', 'Completed earlier', {
+        status: 'completed',
+        isBackgrounded: true,
+      });
+
+      const { service } = createService();
+      const restored = await service.loadPausedBackgroundAgents(sessionId);
+
+      expect(restored.map((entry) => [entry.agentId, entry.status])).toEqual([
+        ['agent-persisted-paused', 'paused'],
+        ['agent-completed', 'completed'],
+      ]);
+
+      // Also verify resumeBackgroundAgentWithOutcome refuses meta.isolation === 'worktree'
+      // even if an in-memory paused entry has no pre-populated resumeBlockedReason.
+      seedPaused(sessionId, 'agent-worktree-resume', 'Worktree task', {
+        status: 'paused',
+        isBackgrounded: true,
+        isolation: 'worktree',
+      });
+      const resumeOutcome = await service.resumeBackgroundAgentWithOutcome(
+        'agent-worktree-resume',
+      );
+      expect(resumeOutcome).toMatchObject({
+        resumed: false,
+        code: 'resume_blocked',
+      });
+      if (!resumeOutcome.resumed) {
+        expect(resumeOutcome.reason).toContain('worktree');
+      }
+    });
+
+    it('awaits turn unwind on immediate Pause -> Resume without clobbering paused/running state', async () => {
+      const sessionId = 'session-pause-resume-race';
+      const agentId = 'agent-pause-resume-race';
+      const { metaPath, outputFile } = seedPaused(
+        sessionId,
+        agentId,
+        'Step 1 task',
+        { status: 'paused', isBackgrounded: true },
+      );
+
+      let turn1Started!: () => void;
+      const turn1StartedPromise = new Promise<void>((resolve) => {
+        turn1Started = resolve;
+      });
+      let releaseTurn1Unwind!: () => void;
+      const turn1UnwindGate = new Promise<void>((resolve) => {
+        releaseTurn1Unwind = resolve;
+      });
+
+      const firstSubagent = stubSubagent({
+        execute: vi.fn(async (_ctx: ExecuteContext, signal?: AbortSignal) => {
+          turn1Started();
+          await new Promise<void>((resolve) => {
+            if (signal?.aborted) {
+              resolve();
+              return;
+            }
+            signal?.addEventListener('abort', () => resolve(), { once: true });
+          });
+          // Simulate async tool/stream unwind after abort before runBody settles.
+          await turn1UnwindGate;
+          const existingLines = fs
+            .readFileSync(outputFile, 'utf8')
+            .trim()
+            .split('\n')
+            .filter(Boolean);
+          const lastUuid = existingLines.length
+            ? (JSON.parse(existingLines[existingLines.length - 1]!) as { uuid: string }).uuid
+            : 'u1';
+          fs.appendFileSync(
+            outputFile,
+            JSON.stringify(
+              rec('a1', lastUuid, sessionId, at('02.000'), 'assistant', {
+                message: modelText('flushed during turn 1 unwind'),
+              }),
+            ) + '\n',
+            'utf8',
+          );
+        }),
+        getTerminateMode: () => AgentTerminateMode.CANCELLED,
+        getFinalText: () => 'partial step 1',
+      });
+      const secondSubagent = stubSubagent({
+        execute: vi.fn(async () => undefined),
+        getTerminateMode: () => AgentTerminateMode.GOAL,
+        getFinalText: () => 'completed step 2',
+      });
+
+      const { service, subagentManager } = createService();
+      let turnIndex = 0;
+      subagentManager.createAgentHeadless.mockImplementation(async () => {
+        turnIndex += 1;
+        if (turnIndex === 1) {
+          return {
+            subagent: firstSubagent,
+            dispose: vi.fn(async () => undefined),
+          };
+        }
+        return {
+          subagent: secondSubagent,
+          dispose: vi.fn(async () => undefined),
+        };
+      });
+
+      const notifySpy = vi.fn();
+      registry.setNotificationCallback(notifySpy);
+
+      // Start Turn 1 via resume so runBody + trackAgentTurn own the turn.
+      const firstResume = await service.resumeBackgroundAgentWithOutcome(
+        agentId,
+        'start step 1',
+      );
+      expect(firstResume.resumed).toBe(true);
+      await turn1StartedPromise;
+
+      // Pause Turn 1 and immediately kick off Resume for Turn 2 before Turn 1 unwinds.
+      const pauseRes = service.pauseBackgroundAgentWithOutcome(agentId);
+      expect(pauseRes).toEqual({ outcome: 'paused', agentId });
+      expect(readMetaStatus(metaPath)).toBe('paused');
+
+      const secondResumePromise = service.resumeBackgroundAgentWithOutcome(
+        agentId,
+        'continue from step 2',
+      );
+
+      // Allow Turn 1's catch/CANCELLED block to run while unwind gate is still held.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(readMetaStatus(metaPath)).not.toBe('cancelled');
+      expect(registry.get(agentId)?.status).not.toBe('cancelled');
+
+      // Release Turn 1's finally block (which flushes 'flushed during turn 1 unwind').
+      releaseTurn1Unwind();
+      const secondResume = await secondResumePromise;
+      expect(secondResume.resumed).toBe(true);
+
+      // Wait for Turn 2 to finish cleanly.
+      await vi.waitFor(() => {
+        expect(registry.get(agentId)?.status).toBe('completed');
+      });
+
+      // Verify Turn 2 reconstructed history AFTER Turn 1's unwind flush!
+      const secondHeadlessCall =
+        subagentManager.createAgentHeadless.mock.calls[1];
+      const secondInitialMessages = JSON.stringify(
+        secondHeadlessCall?.[2]?.promptConfigOverrides?.initialMessages ?? [],
+      );
+      expect(secondInitialMessages).toContain('flushed during turn 1 unwind');
+
+      // Only Turn 2's completion notification fired (no spurious cancelled notification).
+      expect(notifySpy).toHaveBeenCalledTimes(1);
+      expect(notifySpy.mock.calls[0]?.[1]).toContain(
+        '<status>completed</status>',
+      );
+    });
+  });
 });
 
 function readMetaStatus(metaPath: string): string | undefined {
