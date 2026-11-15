@@ -1101,3 +1101,80 @@ describe('buildSessionTasksStatus workflow graph', () => {
     expect(workflows[0]).not.toHaveProperty('isHistorical');
   });
 });
+
+describe('buildSessionTasksStatus agent canPause and pauseBlockedReason (#267)', () => {
+  const serializeOne = (overrides: Partial<AgentTask>) =>
+    buildSessionTasksStatus(
+      'session-1',
+      configWith([agentTask(overrides)]),
+      2_000,
+    ).tasks[0] as ServeSessionAgentTaskStatus;
+
+  it('sets canPause true for a running background agent with metaPath and no blockers', () => {
+    const task = serializeOne({
+      status: 'running',
+      isBackgrounded: true,
+      metaPath: '/tmp/agent-1.meta.json',
+    });
+
+    expect(task.canPause).toBe(true);
+    expect(task.pauseBlockedReason).toBeUndefined();
+  });
+
+  it('sets canPause false without pauseBlockedReason for a running foreground agent', () => {
+    const task = serializeOne({
+      status: 'running',
+      isBackgrounded: false,
+      metaPath: '/tmp/agent-1.meta.json',
+    });
+
+    expect(task.canPause).toBe(false);
+    expect(task.pauseBlockedReason).toBeUndefined();
+  });
+
+  it.each([
+    [
+      'worktree isolation',
+      { isolation: 'worktree' as const },
+      'Background task worktree isolation cannot be reconstructed after session restore.',
+    ],
+    [
+      'container isolation',
+      { isolation: 'container' as const },
+      'Container background tasks cannot be resumed. Start a new container agent to continue.',
+    ],
+    [
+      'container executionBackend',
+      { executionBackend: 'container' as const },
+      'Container background tasks cannot be resumed. Start a new container agent to continue.',
+    ],
+    [
+      'external executor',
+      { executor: 'codex' },
+      'External executor "codex" background runs cannot be paused and resumed.',
+    ],
+    [
+      'missing metaPath',
+      { metaPath: undefined },
+      'no metadata sidecar path',
+    ],
+    [
+      'explicit resumeBlockedReason',
+      { resumeBlockedReason: 'Fork context is unavailable.' },
+      'Fork context is unavailable.',
+    ],
+  ])(
+    'sets canPause false with concrete pauseBlockedReason for %s',
+    (_label, extra, expectedSubstring) => {
+      const task = serializeOne({
+        status: 'running',
+        isBackgrounded: true,
+        metaPath: '/tmp/agent-1.meta.json',
+        ...extra,
+      });
+
+      expect(task.canPause).toBe(false);
+      expect(task.pauseBlockedReason).toContain(expectedSubstring);
+    },
+  );
+});

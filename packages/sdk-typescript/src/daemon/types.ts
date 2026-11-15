@@ -1846,6 +1846,25 @@ export type DaemonSubagentControlRefusalCode =
   | 'resume_failed'
   | 'unsupported';
 
+export type DaemonSubagentPauseRefusalCode =
+  | 'agent_not_found'
+  | 'not_backgrounded'
+  | 'not_running'
+  | 'metadata_missing'
+  | 'metadata_unreadable'
+  | 'pause_blocked'
+  | 'unsupported';
+
+/** The child's answer to a pause, as `ServeSubagentPauseResult`. */
+export type DaemonSubagentPauseOutcome =
+  | { outcome: 'paused'; status: 'paused'; agentId?: string }
+  | {
+      outcome: 'refused';
+      code: DaemonSubagentPauseRefusalCode;
+      reason: string;
+      status?: string;
+    };
+
 /** The child's answer to a resume, as `ServeSubagentResumeResult`. */
 export type DaemonSubagentResumeOutcome =
   | { outcome: 'resumed'; status: 'running' }
@@ -1867,12 +1886,16 @@ export type DaemonSubagentAbandonOutcome =
       status?: string;
     };
 
-/** Which subagent a resume or abandon answer is about. */
+/** Which subagent a pause, resume, or abandon answer is about. */
 export interface DaemonSubagentControlTarget {
   sessionId: string;
   subagentRef: string;
   taskId: string;
 }
+
+/** Response of `POST /session/:id/subagents/:subagentRef/pause`. */
+export type DaemonSubagentPauseResult = DaemonSubagentControlTarget &
+  DaemonSubagentPauseOutcome;
 
 /** Response of `POST /session/:id/subagents/:subagentRef/resume`. */
 export type DaemonSubagentResumeResult = DaemonSubagentControlTarget &
@@ -3381,6 +3404,8 @@ export interface DaemonSessionAgentTaskStatus {
    */
   model?: string;
   isBackgrounded: boolean;
+  canPause?: boolean;
+  pauseBlockedReason?: string;
   error?: string;
   resumeBlockedReason?: string;
   /** Live for running agents; the persisted final stats for finished ones. */

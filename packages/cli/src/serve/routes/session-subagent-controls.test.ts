@@ -18,6 +18,7 @@ import {
 } from '../workspace-registry.js';
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import { registerSessionRoutes } from './session.js';
+import { getServeFeatures } from '../capabilities.js';
 import {
   createVirtualSubagentSessionId,
   type VirtualSubagentSessions,
@@ -441,5 +442,117 @@ describe('POST /session/:id/subagents/:subagentRef/abandon', () => {
     expect(res.status).toBe(500);
     expect(res.body.code).toBe('bridge_error');
     expect(subagents.updateTargetStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /session/:id/subagents/:subagentRef/pause (#267)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('advertises session_subagent_controls in daemon capabilities', () => {
+    expect(getServeFeatures()).toContain('session_subagent_controls');
+  });
+
+  it('pauses the running background subagent and refreshes its virtual target', async () => {
+    const pauseSessionTask = vi.fn().mockResolvedValue({
+      outcome: 'paused',
+      status: 'paused',
+      agentId: AGENT,
+    });
+    const subagents = makeSubagents();
+    const app = makeApp(makeRuntime({ pauseSessionTask }), subagents.sessions);
+
+    const res = await request(app)
+      .post(`/session/${ROOT}/subagents/call-1/pause`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      sessionId: ROOT,
+      subagentRef: 'call-1',
+      taskId: AGENT,
+      outcome: 'paused',
+      status: 'paused',
+      agentId: AGENT,
+    });
+    expect(pauseSessionTask).toHaveBeenCalledWith(ROOT, AGENT);
+    expect(subagents.resolve).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    [
+      'not_backgrounded',
+      'Foreground agent "x" blocks the current turn and cannot be paused; use Stop instead.',
+    ],
+    [
+      'pause_blocked',
+      'Worktree-isolated background runs cannot be resumed after restart.',
+    ],
+    ['not_running', 'Background agent "x" is completed, not running.'],
+  ] as const)(
+    'answers the %s refusal with its code and reason',
+    async (code, reason) => {
+      const pauseSessionTask = vi.fn().mockResolvedValue({
+        outcome: 'refused',
+        code,
+        reason,
+        status: 'running',
+      });
+      const subagents = makeSubagents();
+      const app = makeApp(makeRuntime({ pauseSessionTask }), subagents.sessions);
+
+      const res = await request(app)
+        .post(`/session/${ROOT}/subagents/call-1/pause`)
+        .send({});
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        sessionId: ROOT,
+        subagentRef: 'call-1',
+        taskId: AGENT,
+        outcome: 'refused',
+        code,
+        reason,
+        status: 'running',
+      });
+      expect(subagents.resolve).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('answers 404 when subagentRef does not resolve', async () => {
+    const pauseSessionTask = vi.fn();
+    const app = makeApp(
+      makeRuntime({ pauseSessionTask }),
+      makeSubagents(false).sessions,
+    );
+
+    const res = await request(app)
+      .post(`/session/${ROOT}/subagents/nobody/pause`)
+      .send({});
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({
+      error: 'Subagent session not found',
+      code: 'session_not_found',
+      sessionId: ROOT,
+      subagentRef: 'nobody',
+    });
+    expect(pauseSessionTask).not.toHaveBeenCalled();
+  });
+
+  it('refuses with unsupported when the bridge cannot pause', async () => {
+    const app = makeApp(makeRuntime({}), makeSubagents().sessions);
+
+    const res = await request(app)
+      .post(`/session/${ROOT}/subagents/call-1/pause`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      outcome: 'refused',
+      code: 'unsupported',
+      reason: 'This daemon cannot pause subagents.',
+    });
   });
 });

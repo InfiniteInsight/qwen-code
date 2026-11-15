@@ -81,6 +81,7 @@ import {
 import {
   readServeWorkflowActionInput,
   type ServeSubagentAbandonResult,
+  type ServeSubagentPauseResult,
   type ServeSubagentResumeResult,
 } from '@qwen-code/acp-bridge/status';
 import {
@@ -5749,6 +5750,58 @@ export function registerSessionRoutes(
       subagents: virtualSubagentSessions,
     };
   };
+
+  app.post(
+    '/session/:id/subagents/:subagentRef/pause',
+    mutate(),
+    async (req, res) => {
+      const route = 'POST /session/:id/subagents/:subagentRef/pause';
+      const target = subagentControlTarget(req, res, route);
+      if (!target) return;
+      const { sessionId, subagentRef, rootSessionId, runtime, subagents } =
+        target;
+      try {
+        await runOwnerRuntimeActivity(runtime, async () => {
+          const resolved = await subagents.resolve(
+            runtime,
+            sessionId,
+            subagentRef,
+          );
+          if (!resolved) {
+            res.status(404).json({
+              error: 'Subagent session not found',
+              code: 'session_not_found',
+              sessionId,
+              subagentRef,
+            });
+            return;
+          }
+          const result: ServeSubagentPauseResult = runtime.bridge
+            .pauseSessionTask
+            ? await runtime.bridge.pauseSessionTask(
+                rootSessionId,
+                resolved.taskId,
+              )
+            : {
+                outcome: 'refused',
+                code: 'unsupported',
+                reason: 'This daemon cannot pause subagents.',
+              };
+          if (result.outcome === 'paused') {
+            await subagents.resolve(runtime, sessionId, subagentRef);
+          }
+          res.status(200).json({
+            sessionId,
+            subagentRef,
+            taskId: resolved.taskId,
+            ...result,
+          });
+        });
+      } catch (err) {
+        sendBridgeError(res, err, { route, sessionId });
+      }
+    },
+  );
 
   app.post(
     '/session/:id/subagents/:subagentRef/resume',

@@ -11,9 +11,11 @@ import {
   BridgeChannelClosedError,
   SERVE_CONTROL_EXT_METHODS,
   type ServeSubagentAbandonResult,
+  type ServeSubagentPauseResult,
   type ServeSubagentResumeResult,
 } from './status.js';
 
+const PAUSE = SERVE_CONTROL_EXT_METHODS.sessionTaskPause;
 const RESUME = SERVE_CONTROL_EXT_METHODS.sessionTaskResume;
 const ABANDON = SERVE_CONTROL_EXT_METHODS.sessionTaskAbandon;
 
@@ -86,6 +88,29 @@ describe('subagent resume and abandon through the bridge', () => {
         bridge.resumeSessionTask!(session.sessionId, 'agent-1'),
       ).resolves.toEqual(refused);
       expect(callsTo(RESUME)).toEqual([
+        { sessionId: session.sessionId, taskId: 'agent-1' },
+      ]);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('forwards a pause and returns the child answer', async () => {
+    const paused: ServeSubagentPauseResult = {
+      outcome: 'paused',
+      status: 'paused',
+      agentId: 'agent-1',
+    };
+    const { bridge, session, callsTo } = await setup((method) =>
+      method === PAUSE ? paused : {},
+    );
+    try {
+      await expect(
+        bridge.pauseSessionTask!(session.sessionId, 'agent-1', {
+          clientId: session.clientId,
+        }),
+      ).resolves.toEqual(paused);
+      expect(callsTo(PAUSE)).toEqual([
         { sessionId: session.sessionId, taskId: 'agent-1' },
       ]);
     } finally {

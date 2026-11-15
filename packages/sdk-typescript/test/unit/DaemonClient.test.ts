@@ -3500,7 +3500,30 @@ describe('DaemonClient', () => {
       ).rejects.toBeInstanceOf(DaemonHttpError);
     });
 
-    it('exposes resume and abandon on a workspace client', async () => {
+    it('pauses a subagent and forwards clientId', async () => {
+      const body = {
+        sessionId: 'with/slash',
+        subagentRef: 'agent/1',
+        taskId: 'researcher-1',
+        outcome: 'paused',
+        status: 'paused',
+        agentId: 'researcher-1',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.pauseSubagentSession('with/slash', 'agent/1', 'client-1'),
+      ).resolves.toEqual(body);
+
+      expect(calls[0]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/session/with%2Fslash/subagents/agent%2F1/pause',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('exposes pause, resume, and abandon on a workspace client', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, { outcome: 'resumed', status: 'running' }),
       );
@@ -3509,14 +3532,16 @@ describe('DaemonClient', () => {
         fetch,
       }).workspaceById('ws-1');
 
+      await workspace.pauseSubagentSession('s-1', 'agent-1');
       await workspace.resumeSubagentSession('s-1', 'agent-1', 'go on');
       await workspace.abandonSubagentSession('s-1', 'agent-1');
 
       expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+        'POST http://daemon/session/s-1/subagents/agent-1/pause',
         'POST http://daemon/session/s-1/subagents/agent-1/resume',
         'POST http://daemon/session/s-1/subagents/agent-1/abandon',
       ]);
-      expect(JSON.parse(calls[0]!.body!)).toEqual({ message: 'go on' });
+      expect(JSON.parse(calls[1]!.body!)).toEqual({ message: 'go on' });
     });
   });
 

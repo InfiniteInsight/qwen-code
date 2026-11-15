@@ -96,6 +96,7 @@ import {
   type ServeSessionTasksStatus,
   type ServeSessionWorkflowTaskStatus,
   type ServeSubagentAbandonResult,
+  type ServeSubagentPauseResult,
   type ServeSubagentResumeResult,
   type ServeWorkspaceMcpResourcesStatus,
   type ServeWorkspaceMcpStatus,
@@ -14212,6 +14213,17 @@ export function createSessionControlPlane(
     // discards a paused agent, so it goes like a cancel. Both reach the child
     // through `requestSessionStatus`, which races the transport through
     // `raceTransportClosed` (#258).
+    async pauseSessionTask(sessionId, taskId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      return requestSessionStatus<ServeSubagentPauseResult>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionTaskPause,
+        { taskId },
+      );
+    },
+
     async resumeSessionTask(sessionId, taskId, message, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);

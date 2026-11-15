@@ -74,6 +74,7 @@ import type {
   ServeSessionContextUsageStatus,
   ServeSessionStatsStatus,
   ServeSubagentAbandonResult,
+  ServeSubagentPauseResult,
   ServeSubagentResumeResult,
 } from './status.js';
 
@@ -2631,6 +2632,16 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     /** On `resume_failed`: a sentence naming the cause. */
     detail?: string;
   }>;
+
+  /**
+   * Pause a running background subagent task in a live session cleanly without
+   * emitting a terminal task-notification. A refusal names its code and reason.
+   */
+  pauseSessionTask?(
+    sessionId: string,
+    taskId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<ServeSubagentPauseResult>;
 
   /**
    * Resume a paused subagent task in a live session through the child's own

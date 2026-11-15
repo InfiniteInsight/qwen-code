@@ -18047,6 +18047,74 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
       await stop();
     });
+
+    it('pauses a running background agent found by its tool call (#267)', async () => {
+      const running = {
+        id: 'agent-running-1',
+        kind: 'agent',
+        status: 'running',
+        toolUseId: 'call-running-1',
+      };
+      const registry = registryWith([running]);
+      const pauseBackgroundAgentWithOutcome = vi.fn((id: string) => {
+        running.status = 'paused';
+        return { outcome: 'paused' as const, agentId: id };
+      });
+      const { agent, stop } = await startAgent({
+        getBackgroundTaskRegistry: vi.fn().mockReturnValue(registry),
+        pauseBackgroundAgentWithOutcome,
+      });
+
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskPause, {
+          sessionId,
+          taskId: 'call-running-1',
+        }),
+      ).resolves.toEqual({
+        outcome: 'paused',
+        status: 'paused',
+        agentId: 'agent-running-1',
+      });
+      expect(pauseBackgroundAgentWithOutcome).toHaveBeenCalledWith(
+        'agent-running-1',
+      );
+
+      await stop();
+    });
+
+    it('answers a refused pause with its code, reason, and current status (#267)', async () => {
+      const fg = {
+        id: 'agent-fg-1',
+        kind: 'agent',
+        status: 'running',
+      };
+      const pauseBackgroundAgentWithOutcome = vi.fn(() => ({
+        outcome: 'refused' as const,
+        agentId: 'agent-fg-1',
+        code: 'not_backgrounded' as const,
+        reason:
+          'Foreground agent "agent-fg-1" blocks the current turn and cannot be paused; use Stop instead.',
+      }));
+      const { agent, stop } = await startAgent({
+        getBackgroundTaskRegistry: vi.fn().mockReturnValue(registryWith([fg])),
+        pauseBackgroundAgentWithOutcome,
+      });
+
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskPause, {
+          sessionId,
+          taskId: 'agent-fg-1',
+        }),
+      ).resolves.toEqual({
+        outcome: 'refused',
+        code: 'not_backgrounded',
+        reason:
+          'Foreground agent "agent-fg-1" blocks the current turn and cannot be paused; use Stop instead.',
+        status: 'running',
+      });
+
+      await stop();
+    });
   });
 
   it('rejects sessionTaskCancel with invalid params', async () => {

@@ -670,6 +670,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_supported_commands',
   'session_tasks',
   'session_agents',
+  'session_subagent_controls',
   'session_agent_trace',
   'session_monitor_tool_correlation',
   'session_stats',
