@@ -31,6 +31,10 @@
     return typeof v === 'string' && v ? clean(v) : d;
   }
 
+  function validStamp(t) {
+    return typeof t === 'number' && Number.isFinite(t) ? t : undefined;
+  }
+
   var TERMINAL_TOOL_STATUSES = {
     completed: true,
     failed: true,
@@ -440,13 +444,15 @@
       curAsst.text += t;
       emitUpdate(curAsst);
     }
-    function appendThought(text) {
+    function appendThought(text, time) {
       curAsst = null;
+      var stamp = validStamp(time);
       if (!curThought) {
         curThought = push(
           newItem('thought', {
             text: clean(text),
             startedAt: now(),
+            time: stamp,
             live: true,
             durLabel: null,
             expanded: false,
@@ -455,6 +461,9 @@
         return;
       }
       curThought.text += clean(text);
+      if (curThought.time === undefined && stamp !== undefined) {
+        curThought.time = stamp;
+      }
       emitUpdate(curThought);
     }
     function addSystem(text, err) {
@@ -690,13 +699,14 @@
       return u.rawOutput === undefined ? undefined : u.rawOutput;
     }
 
-    function upsertTool(u) {
+    function upsertTool(u, time) {
       resetTurn();
       var id = strOr(u.toolCallId, '');
       var tool = id ? toolIndex.get(id) : null;
       var status = toolStatusOf(u, tool ? tool.status : '');
       var input = u.rawInput;
       var result = toolResult(u);
+      var stamp = validStamp(time);
       if (tool) {
         tool.label = toolLabel(u, id, tool.label);
         // #171: every Agent tool gets a status-less update
@@ -705,11 +715,18 @@
         if (status) tool.status = status;
         if (input !== undefined) tool.input = input;
         if (result !== undefined) tool.result = result;
+        if (
+          stamp !== undefined &&
+          (typeof tool.time !== 'number' || stamp < tool.time)
+        ) {
+          tool.time = stamp;
+        }
       } else {
         tool = newItem('tool', {
           toolCallId: id,
           label: toolLabel(u, id, ''),
           status: status,
+          time: stamp,
           sub: null,
           expanded: false,
         });
@@ -949,6 +966,12 @@
       if (into.result === undefined && from.result !== undefined)
         into.result = from.result;
       if (!into.status && from.status) into.status = from.status;
+      if (
+        typeof from.time === 'number' &&
+        (typeof into.time !== 'number' || from.time < into.time)
+      ) {
+        into.time = from.time;
+      }
       if (!into.sub && from.sub) into.sub = from.sub;
       else if (into.sub && from.sub) mergeSub(into.sub, from.sub);
       settleSubIfTerminal(into);
@@ -1019,6 +1042,9 @@
     function sameRow(a, b) {
       var k = rowKey(a);
       if (k === null || k !== rowKey(b)) return false;
+      // A tool row is already uniquely keyed by its toolCallId; its call and
+      // update frames carry different timestamps when they straddle pages (#268).
+      if (a.kind === 'tool') return true;
       return !(
         typeof a.time === 'number' &&
         typeof b.time === 'number' &&
@@ -1451,8 +1477,10 @@
       if (text) m.appendAssistant(text, sentAt);
       return;
     }
-    if (su === 'agent_thought_chunk' && text) return m.appendThought(text);
-    if (su === 'tool_call' || su === 'tool_call_update') return m.upsertTool(u);
+    if (su === 'agent_thought_chunk' && text)
+      return m.appendThought(text, sentAt);
+    if (su === 'tool_call' || su === 'tool_call_update')
+      return m.upsertTool(u, sentAt);
     if (su === 'plan') return m.setPlan(u.entries);
   }
 
