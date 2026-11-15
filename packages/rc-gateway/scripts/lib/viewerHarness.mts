@@ -270,6 +270,11 @@ export interface BootViewerOptions {
   sessionAgentsResult?: unknown | ((sessionId: string) => unknown);
   /** #110: the whole lineage GET /session/:id/agent-trace narrows. */
   agentTraceResult?: unknown;
+  /** #267: answers for subagent pause, resume, abandon, and message routes. */
+  subagentPauseResult?: StubDaemonOptions['subagentPauseResult'];
+  subagentResumeResult?: StubDaemonOptions['subagentResumeResult'];
+  subagentAbandonResult?: StubDaemonOptions['subagentAbandonResult'];
+  subagentMessageResult?: StubDaemonOptions['subagentMessageResult'];
   /** #132: what the boot stub's POST /sessions/catalog serves (unset: no route). */
   catalog?: StubDaemonOptions['catalog'];
   /** #123 (directories): the tree the stub's list and stat answer from. */
@@ -752,6 +757,10 @@ export async function bootViewer(
     artifactContentStatus: opts.artifactContentStatus,
     sessionAgentsResult: opts.sessionAgentsResult,
     agentTraceResult: opts.agentTraceResult,
+    subagentPauseResult: opts.subagentPauseResult,
+    subagentResumeResult: opts.subagentResumeResult,
+    subagentAbandonResult: opts.subagentAbandonResult,
+    subagentMessageResult: opts.subagentMessageResult,
     catalog: opts.catalog,
     workspaceTree: opts.workspaceTree,
     directoryCreateStatus: opts.directoryCreateStatus,

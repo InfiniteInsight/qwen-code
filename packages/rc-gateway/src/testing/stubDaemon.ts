@@ -940,7 +940,13 @@ export interface StubDaemonOptions {
   workflowActionChanged?: boolean;
   /** Status for POST /session/:id/subagents/:subagentRef/message (default 200). */
   subagentMessageStatus?: number;
-  subagentMessageResult?: unknown;
+  subagentMessageResult?:
+    | unknown
+    | ((args: {
+        sessionId: string;
+        subagentRef: string;
+        message: string;
+      }) => unknown);
   /** #267: status and body for POST /session/:id/subagents/:subagentRef/pause. */
   subagentPauseStatus?: number;
   subagentPauseResult?:
@@ -2635,14 +2641,22 @@ export async function startStubDaemon(
     const message = typeof body.message === 'string' ? body.message.trim() : '';
     state.subagentMessages.push({ sessionId, subagentRef, message });
     const status = opts.subagentMessageStatus ?? 200;
+    const given =
+      typeof opts.subagentMessageResult === 'function'
+        ? (
+            opts.subagentMessageResult as (a: {
+              sessionId: string;
+              subagentRef: string;
+              message: string;
+            }) => unknown
+          )({ sessionId, subagentRef, message })
+        : opts.subagentMessageResult;
     if (status !== 200) {
-      res
-        .status(status)
-        .json(opts.subagentMessageResult ?? { error: 'stub error' });
+      res.status(status).json(given ?? { error: 'stub error' });
       return;
     }
     res.status(200).json(
-      opts.subagentMessageResult ?? {
+      given ?? {
         sessionId,
         subagentRef,
         delivered: true,

@@ -3026,6 +3026,11 @@ type PageScenario =
         sessionAgentsResult?: unknown | ((sessionId: string) => unknown);
         /** #110. The whole lineage the stub's agent-trace narrows. */
         agentTraceResult?: unknown;
+        /** #267. Answers for subagent pause, resume, abandon, and message routes. */
+        subagentPauseResult?: StubDaemonOptions['subagentPauseResult'];
+        subagentResumeResult?: StubDaemonOptions['subagentResumeResult'];
+        subagentAbandonResult?: StubDaemonOptions['subagentAbandonResult'];
+        subagentMessageResult?: StubDaemonOptions['subagentMessageResult'];
         /** #132: what the boot daemon's POST /sessions/catalog serves. */
         catalog?: StubDaemonOptions['catalog'];
         /** #123 (directories): the tree the stub's list and stat answer from. */
@@ -23020,6 +23025,10 @@ async function runPageScenario(
     pool: s.stub?.pool,
     sessionAgentsResult: s.stub?.sessionAgentsResult,
     agentTraceResult: s.stub?.agentTraceResult,
+    subagentPauseResult: s.stub?.subagentPauseResult,
+    subagentResumeResult: s.stub?.subagentResumeResult,
+    subagentAbandonResult: s.stub?.subagentAbandonResult,
+    subagentMessageResult: s.stub?.subagentMessageResult,
     catalog: s.stub?.catalog,
     workspaceTree: s.stub?.workspaceTree,
     directoryCreateStatus: s.stub?.directoryCreateStatus,
@@ -34270,6 +34279,720 @@ PAGE_SCENARIOS.push({
       await page.waitForSelector('#dir-picker', { state: 'visible' });
       expect((await page.evaluate(`document.getElementById('gh-clone-entry').hidden`)) === true && !(await page.isVisible('#gh-clone-open')), 'a gateway without githubClone shows Clone from GitHub');
       return `a moved-repo failure gave the rename hint and a plain one did not; a gateway without githubClone hides Clone from GitHub; a running clone showed its last progress line and said it keeps running on the host; a failed one said "The clone failed", git's exit code 128 and its last line (fatal: harness clone failed), started nothing, offered a 44px Try again that kept the repo and folder, and no fake token was anywhere in the page; a 404 job_not_found said the gateway restarted, the outcome is unknown and named the folder; one loop followed a running clone at about one check a second, and leaving the screen mid-clone stopped it and said the clone keeps running on the host; with no home reported the page asked the folder browser for it`;
+    },
+  });
+}
+
+// #267, #260: Subagent Pause, Resume, and Abandon controls in #agents-sheet.
+{
+  const SUBAGENT_CTRL_FEATURES = [...AGENT_FEATURES, 'session_subagent_controls'];
+
+  const SHEET_TEXT_COLLECTOR = String.raw`((roots) => {
+    const out = [];
+    const seen = new Set();
+    const skip = ['checkbox', 'radio', 'file', 'hidden', 'range', 'color'];
+    for (const sel of roots) {
+      const root = document.querySelector(sel);
+      if (!root || root.getClientRects().length === 0) continue;
+      for (const e of [root, ...root.querySelectorAll('*')]) {
+        if (seen.has(e)) continue;
+        const tag = e.tagName.toLowerCase();
+        if (tag === 'option' || tag === 'script' || tag === 'style') continue;
+        const ctl = tag === 'select' || tag === 'textarea' || (tag === 'input' && !skip.includes(e.type));
+        const own = Array.from(e.childNodes).some((x) => x.nodeType === 3 && (x.textContent || '').trim() !== '');
+        const val = ctl && ((e.value || '') !== '' || (e.placeholder || '') !== '');
+        if (!own && !val) continue;
+        if (e.getClientRects().length === 0) continue;
+        const cs = getComputedStyle(e);
+        if (cs.visibility === 'hidden') continue;
+        seen.add(e);
+        const chain = [];
+        for (let up = e; up; up = up.parentElement) {
+          const s = getComputedStyle(up);
+          chain.push([s.backgroundColor, s.opacity]);
+        }
+        const cls = typeof e.className === 'string' && e.className ? '.' + e.className.split(' ')[0] : '';
+        out.push({
+          root: sel,
+          kind: tag + (e.id ? '#' + e.id : '') + cls,
+          color: ctl && !own && (e.value || '') === '' ? getComputedStyle(e, '::placeholder').color : cs.color,
+          size: parseFloat(cs.fontSize),
+          disabled: !!e.closest(':disabled'),
+          chain,
+        });
+      }
+    }
+    return out;
+  })`;
+
+  async function verifyAgentsSheetErgonomics(page: Page, at: string): Promise<void> {
+    const m = (await page.evaluate(String.raw`(() => {
+      const vw = window.innerWidth;
+      const body = document.getElementById('agents-body');
+      const foot = document.getElementById('agents-foot');
+      const card = document.querySelector('#agents-sheet .ag-card');
+      const sideways =
+        (body ? body.scrollWidth > body.clientWidth + 1 : false) ||
+        (foot && !foot.hidden ? foot.scrollWidth > foot.clientWidth + 1 : false) ||
+        (card ? card.getBoundingClientRect().right > vw + 0.5 || card.getBoundingClientRect().left < -0.5 : false);
+      const rowOverflow = Array.from(document.querySelectorAll('#agents-body .ag-row')).some((r) => {
+        const rc = r.getBoundingClientRect();
+        return rc.right > vw + 0.5 || rc.left < -0.5 || r.scrollWidth > r.clientWidth + 1;
+      });
+      const btnSels = [
+        '#agents-body .ag-pause',
+        '#agents-body .ag-resume',
+        '#agents-body .ag-abandon',
+        '#agents-body .ag-stop',
+        '#agent-pause',
+        '#agent-resume',
+        '#agent-abandon',
+        '#agent-stop',
+        '#agent-send',
+      ];
+      const undersized = [];
+      for (const sel of btnSels) {
+        for (const el of document.querySelectorAll(sel)) {
+          if (el.hidden || el.getClientRects().length === 0) continue;
+          const rc = el.getBoundingClientRect();
+          if (rc.height < 44 || rc.width < 44 || rc.right > vw + 0.5) {
+            undersized.push({ sel, w: Math.round(rc.width), h: Math.round(rc.height), right: Math.round(rc.right) });
+          }
+        }
+      }
+      const msg = document.getElementById('agent-msg');
+      let msgInfo = null;
+      if (msg && !msg.hidden && msg.getClientRects().length > 0) {
+        const rc = msg.getBoundingClientRect();
+        msgInfo = {
+          fontPx: parseFloat(getComputedStyle(msg).fontSize),
+          h: Math.round(rc.height),
+          right: Math.round(rc.right),
+        };
+      }
+      return { vw, sideways, rowOverflow, undersized, msgInfo };
+    })()`)) as {
+      vw: number;
+      sideways: boolean;
+      rowOverflow: boolean;
+      undersized: Array<{ sel: string; w: number; h: number; right: number }>;
+      msgInfo: { fontPx: number; h: number; right: number } | null;
+    };
+    expect(!m.sideways && !m.rowOverflow, `horizontal overflow at ${at}: ${JSON.stringify(m)}`);
+    expect(m.undersized.length === 0, `controls under 44px or overflowing ${m.vw}px at ${at}: ${JSON.stringify(m.undersized)}`);
+    if (m.msgInfo) {
+      expect(
+        m.msgInfo.fontPx >= 16 && m.msgInfo.h >= 44 && m.msgInfo.right <= m.vw + 1,
+        `#agent-msg ergonomics failed at ${at}: ${JSON.stringify(m.msgInfo)}`,
+      );
+    }
+    const textRows = (await page.evaluate(`${SHEET_TEXT_COLLECTOR}(["#agents-sheet"])`)) as Array<{
+      kind: string;
+      color: string;
+      size: number;
+      disabled: boolean;
+      chain: [string, string][];
+    }>;
+    for (const row of textRows) {
+      pgShellCheck(row, at);
+    }
+  }
+
+  async function openAgentsFromMore(page: Page): Promise<void> {
+    await page.click('#h1-more');
+    await page.waitForSelector('#more-agents', { state: 'visible' });
+    await page.click('#more-agents');
+    await page.waitForSelector('#agents-sheet:not([hidden])', { timeout: 5_000 });
+  }
+
+  const P580_STATE = { status: 'running' as 'running' | 'paused' };
+  PAGE_SCENARIOS.push({
+    name: 'P580 a running background agent with canPause shows Pause and Stop in the roster, and tapping Pause posts /pause and transitions the row to paused with Resume and Abandon',
+    stub: {
+      capabilitiesFeatures: SUBAGENT_CTRL_FEATURES,
+      sessionAgentsResult: (sid: string) =>
+        agentRoster(sid, [
+          agentTask({
+            id: 'agent-bg-1',
+            subagentType: 'general-purpose',
+            description: 'audit auth flow',
+            status: P580_STATE.status,
+            isBackgrounded: true,
+            canPause: P580_STATE.status === 'running',
+            startTime: AG_T0,
+            ...(P580_STATE.status === 'paused' ? { endTime: AG_T0 + 15_000 } : {}),
+          }),
+        ]),
+      subagentPauseResult: ({ sessionId, subagentRef }) => {
+        P580_STATE.status = 'paused';
+        return {
+          sessionId,
+          subagentRef,
+          agentId: 'agent-bg-1',
+          outcome: 'paused',
+          status: 'paused',
+        };
+      },
+    },
+    run: async ({ page, viewer }) => {
+      P580_STATE.status = 'running';
+      await watch(page, viewer.sessionId);
+      await waitChip(page, '1 agent');
+      await openAgentsFromChip(page);
+      await waitSheetRows(page, 1);
+      await verifyAgentsSheetErgonomics(page, 'P580 running roster');
+
+      const initialBtns = await page.evaluate(String.raw`(() => {
+        const row = document.querySelector('#agents-body .ag-row[data-key="agent-bg-1"]');
+        return {
+          pause: !!row && !!row.querySelector('.ag-pause:not([hidden])'),
+          stop: !!row && !!row.querySelector('.ag-stop:not([hidden])'),
+          resume: !!row && !!row.querySelector('.ag-resume:not([hidden])'),
+          abandon: !!row && !!row.querySelector('.ag-abandon:not([hidden])'),
+        };
+      })()`);
+      expect(
+        initialBtns.pause && initialBtns.stop && !initialBtns.resume && !initialBtns.abandon,
+        `unexpected buttons on running background row: ${JSON.stringify(initialBtns)}`,
+      );
+
+      await page.click('#agents-body .ag-pause[data-ref="agent-bg-1"]');
+      await page.waitForFunction(
+        () =>
+          document.querySelector('#agents-body .ag-row[data-key="agent-bg-1"]')?.getAttribute('data-state') ===
+          'paused',
+        null,
+        { timeout: 10_000 },
+      );
+      await verifyAgentsSheetErgonomics(page, 'P580 paused roster');
+
+      const pausedBtns = await page.evaluate(String.raw`(() => {
+        const row = document.querySelector('#agents-body .ag-row[data-key="agent-bg-1"]');
+        return {
+          pause: !!row && !!row.querySelector('.ag-pause:not([hidden])'),
+          stop: !!row && !!row.querySelector('.ag-stop:not([hidden])'),
+          resume: !!row && !!row.querySelector('.ag-resume:not([hidden])'),
+          abandon: !!row && !!row.querySelector('.ag-abandon:not([hidden])'),
+        };
+      })()`);
+      expect(
+        !pausedBtns.pause && !pausedBtns.stop && pausedBtns.resume && pausedBtns.abandon,
+        `unexpected buttons on paused row: ${JSON.stringify(pausedBtns)}`,
+      );
+
+      const pauseReq = viewer.stub.subagentPauses.find(
+        (r) => r.subagentRef === 'agent-bg-1',
+      );
+      expect(
+        pauseReq !== undefined,
+        `missing POST /pause in ${JSON.stringify(viewer.stub.subagentPauses)}`,
+      );
+      return 'running background row showed 44px Pause + Stop; tapping Pause posted /pause and transitioned to paused with 44px Resume + Abandon at 390px';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P581 foreground agents and worktree-blocked background agents hide Pause in the roster and show pauseBlockedReason in trace',
+    stub: {
+      capabilitiesFeatures: SUBAGENT_CTRL_FEATURES,
+      sessionAgentsResult: (sid: string) =>
+        agentRoster(sid, [
+          agentTask({
+            id: 'agent-fg',
+            toolUseId: 'tc-fg',
+            subagentType: 'Explore',
+            description: 'foreground scan',
+            isBackgrounded: false,
+            canPause: false,
+            startTime: AG_T0,
+          }),
+          agentTask({
+            id: 'agent-wt',
+            subagentType: 'general-purpose',
+            description: 'worktree edit',
+            isBackgrounded: true,
+            canPause: false,
+            pauseBlockedReason:
+              'Subagents using isolated git worktrees cannot be paused safely; wait for completion or cancel instead.',
+            startTime: AG_T0 + 5_000,
+          }),
+        ]),
+    },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await waitChip(page, '2 agents');
+      await openAgentsFromChip(page);
+      await waitSheetRows(page, 2);
+
+      const rosterPauseCount = await page.evaluate(
+        () => document.querySelectorAll('#agents-body .ag-pause:not([hidden])').length,
+      );
+      expect(rosterPauseCount === 0, `Pause shown on ineligible running rows (${rosterPauseCount})`);
+
+      await page.click('#agents-body .ag-open[data-key="agent-wt"]');
+      await page.waitForFunction(() => agentSheet.view === 'trace' && agentSheet.key === 'agent-wt', null, {
+        timeout: 5_000,
+      });
+      await verifyAgentsSheetErgonomics(page, 'P581 blocked trace');
+
+      const traceFoot = await page.evaluate(String.raw`(() => {
+        const pause = document.getElementById('agent-pause');
+        const stop = document.getElementById('agent-stop');
+        const note = document.getElementById('agent-stop-note');
+        return {
+          pauseVisible: !!pause && !pause.hidden && pause.getClientRects().length > 0,
+          stopVisible: !!stop && !stop.hidden && stop.getClientRects().length > 0,
+          note: note ? (note.textContent || '').trim() : '',
+        };
+      })()`);
+      expect(!traceFoot.pauseVisible, `trace footer showed Pause on worktree-blocked agent: ${JSON.stringify(traceFoot)}`);
+      expect(traceFoot.stopVisible, 'trace footer hid Stop on running worktree-blocked agent');
+      expect(
+        traceFoot.note.includes('isolated git worktrees cannot be paused safely'),
+        `trace footer missed pauseBlockedReason: ${JSON.stringify(traceFoot.note)}`,
+      );
+      return `0 Pause buttons on foreground and worktree-blocked rows; trace footer showed Stop and concrete pauseBlockedReason (${JSON.stringify(traceFoot.note)})`;
+    },
+  });
+
+  const P582_STATE = { status: 'paused' as 'paused' | 'running' };
+  PAGE_SCENARIOS.push({
+    name: 'P582 tapping Resume on a paused agent in the roster posts /resume with empty body and transitions back to running',
+    stub: {
+      capabilitiesFeatures: SUBAGENT_CTRL_FEATURES,
+      sessionAgentsResult: (sid: string) =>
+        agentRoster(sid, [
+          agentTask({
+            id: 'agent-paused-1',
+            subagentType: 'Explore',
+            description: 'check token store',
+            status: P582_STATE.status,
+            isBackgrounded: true,
+            canPause: P582_STATE.status === 'running',
+            startTime: AG_T0 - 20_000,
+            ...(P582_STATE.status === 'paused' ? { endTime: AG_T0 - 5_000 } : {}),
+          }),
+        ]),
+      subagentResumeResult: ({ sessionId, subagentRef }) => {
+        P582_STATE.status = 'running';
+        return {
+          sessionId,
+          subagentRef,
+          agentId: 'agent-paused-1',
+          outcome: 'resumed',
+          status: 'running',
+        };
+      },
+    },
+    run: async ({ page, viewer }) => {
+      P582_STATE.status = 'paused';
+      await watch(page, viewer.sessionId);
+      await waitAgentsRead(page);
+      await openAgentsFromMore(page);
+      await waitSheetRows(page, 1);
+      await verifyAgentsSheetErgonomics(page, 'P582 paused roster');
+
+      await page.click('#agents-body .ag-resume[data-ref="agent-paused-1"]');
+      await page.waitForFunction(
+        () =>
+          document.querySelector('#agents-body .ag-row[data-key="agent-paused-1"]')?.getAttribute('data-state') ===
+          'running',
+        null,
+        { timeout: 10_000 },
+      );
+      await verifyAgentsSheetErgonomics(page, 'P582 resumed roster');
+
+      const resumeReq = viewer.stub.subagentResumes.find(
+        (r) => r.subagentRef === 'agent-paused-1',
+      );
+      expect(
+        resumeReq !== undefined,
+        `missing POST /resume in ${JSON.stringify(viewer.stub.subagentResumes)}`,
+      );
+      expect(
+        resumeReq!.message === undefined,
+        `roster Resume sent non-empty message: ${JSON.stringify(resumeReq)}`,
+      );
+      return 'roster Resume posted {} to /resume and transitioned paused row back to running';
+    },
+  });
+
+  const P583_STATE = { status: 'paused' as 'paused' | 'running' };
+  PAGE_SCENARIOS.push({
+    name: 'P583 typing an instruction in paused trace view and tapping Resume posts the message to /resume and clears the input',
+    stub: {
+      capabilitiesFeatures: SUBAGENT_CTRL_FEATURES,
+      sessionAgentsResult: (sid: string) =>
+        agentRoster(sid, [
+          agentTask({
+            id: 'agent-paused-msg',
+            subagentType: 'general-purpose',
+            description: 'verify migrations',
+            status: P583_STATE.status,
+            isBackgrounded: true,
+            canPause: P583_STATE.status === 'running',
+            startTime: AG_T0 - 30_000,
+            ...(P583_STATE.status === 'paused' ? { endTime: AG_T0 - 10_000 } : {}),
+          }),
+        ]),
+      subagentResumeResult: ({ sessionId, subagentRef }) => {
+        P583_STATE.status = 'running';
+        return {
+          sessionId,
+          subagentRef,
+          agentId: 'agent-paused-msg',
+          outcome: 'resumed',
+          status: 'running',
+        };
+      },
+    },
+    run: async ({ page, viewer }) => {
+      P583_STATE.status = 'paused';
+      await watch(page, viewer.sessionId);
+      await waitAgentsRead(page);
+      await openAgentsFromMore(page);
+      await waitSheetRows(page, 1);
+      await page.click('#agents-body .ag-open[data-key="agent-paused-msg"]');
+      await page.waitForFunction(
+        () => agentSheet.view === 'trace' && agentSheet.key === 'agent-paused-msg',
+        null,
+        { timeout: 5_000 },
+      );
+      await verifyAgentsSheetErgonomics(page, 'P583 paused trace');
+
+      const ph = await page.getAttribute('#agent-msg', 'placeholder');
+      expect(
+        ph === 'Optional message to resume with...',
+        `paused trace input placeholder was ${JSON.stringify(ph)}`,
+      );
+
+      await page.fill('#agent-msg', 'Focus on schema rollback safety first');
+      await page.click('#agent-resume');
+      await page.waitForFunction(
+        () => (document.getElementById('agent-msg') as HTMLInputElement | null)?.value === '',
+        null,
+        { timeout: 10_000 },
+      );
+      await verifyAgentsSheetErgonomics(page, 'P583 resumed trace');
+
+      const resumeReq = viewer.stub.subagentResumes.find(
+        (r) => r.subagentRef === 'agent-paused-msg',
+      );
+      expect(
+        resumeReq !== undefined,
+        `missing POST /resume in ${JSON.stringify(viewer.stub.subagentResumes)}`,
+      );
+      expect(
+        resumeReq!.message === 'Focus on schema rollback safety first',
+        `trace Resume sent unexpected message: ${JSON.stringify(resumeReq)}`,
+      );
+      return 'paused trace input (16px, 44px+) posted { message } to /resume, cleared input, and resumed agent';
+    },
+  });
+
+  const P584_STATE = { abandoned: false };
+  PAGE_SCENARIOS.push({
+    name: 'P584 a paused agent with resumeBlockedReason disables Resume, shows the concrete blocked cause, and Abandon removes it',
+    stub: {
+      capabilitiesFeatures: SUBAGENT_CTRL_FEATURES,
+      sessionAgentsResult: (sid: string) =>
+        agentRoster(
+          sid,
+          P584_STATE.abandoned
+            ? []
+            : [
+                agentTask({
+                  id: 'agent-blocked',
+                  subagentType: 'general-purpose',
+                  description: 'isolated container check',
+                  status: 'paused',
+                  isBackgrounded: true,
+                  resumeBlockedReason:
+                    'Container sandbox image was pruned; this paused subagent can only be abandoned.',
+                  startTime: AG_T0 - 40_000,
+                  endTime: AG_T0 - 10_000,
+                }),
+              ],
+        ),
+      subagentAbandonResult: ({ sessionId, subagentRef }) => {
+        P584_STATE.abandoned = true;
+        return {
+          sessionId,
+          subagentRef,
+          agentId: 'agent-blocked',
+          outcome: 'abandoned',
+          status: 'cancelled',
+        };
+      },
+    },
+    run: async ({ page, viewer }) => {
+      P584_STATE.abandoned = false;
+      await watch(page, viewer.sessionId);
+      await waitAgentsRead(page);
+      await openAgentsFromMore(page);
+      await waitSheetRows(page, 1);
+      await verifyAgentsSheetErgonomics(page, 'P584 blocked paused roster');
+
+      const rosterState = await page.evaluate(String.raw`(() => {
+        const row = document.querySelector('#agents-body .ag-row[data-key="agent-blocked"]');
+        const resume = row ? row.querySelector('.ag-resume') : null;
+        const abandon = row ? row.querySelector('.ag-abandon') : null;
+        return {
+          text: row ? row.textContent || '' : '',
+          resumeDisabled: !!resume && resume.disabled === true,
+          abandonActive: !!abandon && abandon.disabled === false,
+        };
+      })()`);
+      expect(
+        rosterState.resumeDisabled && rosterState.abandonActive,
+        `expected disabled Resume and active Abandon in roster: ${JSON.stringify(rosterState)}`,
+      );
+      expect(
+        rosterState.text.includes('Container sandbox image was pruned'),
+        `roster row missed resumeBlockedReason: ${JSON.stringify(rosterState.text)}`,
+      );
+
+      await page.click('#agents-body .ag-open[data-key="agent-blocked"]');
+      await page.waitForFunction(() => agentSheet.view === 'trace' && agentSheet.key === 'agent-blocked', null, {
+        timeout: 5_000,
+      });
+      await verifyAgentsSheetErgonomics(page, 'P584 blocked paused trace');
+
+      const traceState = await page.evaluate(String.raw`(() => {
+        const resume = document.getElementById('agent-resume');
+        const abandon = document.getElementById('agent-abandon');
+        const note = document.getElementById('agent-stop-note');
+        const msgRow = document.getElementById('agent-msg-row');
+        return {
+          msgHidden: !msgRow || msgRow.hidden,
+          resumeDisabled: !!resume && !resume.hidden && resume.disabled === true,
+          abandonActive: !!abandon && !abandon.hidden && abandon.disabled === false,
+          note: note ? (note.textContent || '').trim() : '',
+        };
+      })()`);
+      expect(
+        traceState.msgHidden && traceState.resumeDisabled && traceState.abandonActive,
+        `unexpected trace footer state for blocked paused agent: ${JSON.stringify(traceState)}`,
+      );
+      expect(
+        traceState.note.includes('Container sandbox image was pruned'),
+        `trace footer note missed resumeBlockedReason: ${JSON.stringify(traceState.note)}`,
+      );
+
+      await page.click('#agent-abandon');
+      await page.waitForFunction(
+        () =>
+          agentSheet.view === 'list' &&
+          document.querySelectorAll('#agents-body .ag-row[data-state]').length === 0,
+        null,
+        { timeout: 10_000 },
+      );
+
+      const abandonReq = viewer.stub.subagentAbandons.find(
+        (r) => r.subagentRef === 'agent-blocked',
+      );
+      expect(
+        abandonReq !== undefined,
+        `missing POST /abandon in ${JSON.stringify(viewer.stub.subagentAbandons)}`,
+      );
+      return 'resumeBlockedReason disabled Resume and printed concrete cause in roster + trace; Abandon posted /abandon and cleared the agent';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P585 refused /pause, refused /resume, and failed /message render the daemon reason or detail verbatim in the sheet (#211, #260)',
+    stub: {
+      capabilitiesFeatures: SUBAGENT_CTRL_FEATURES,
+      sessionAgentsResult: (sid: string) =>
+        agentRoster(sid, [
+          agentTask({
+            id: 'agent-refuse-pause',
+            subagentType: 'Explore',
+            description: 'running agent',
+            status: 'running',
+            isBackgrounded: true,
+            canPause: true,
+            startTime: AG_T0,
+          }),
+          agentTask({
+            id: 'agent-refuse-resume',
+            subagentType: 'Explore',
+            description: 'paused agent',
+            status: 'paused',
+            isBackgrounded: true,
+            startTime: AG_T0 - 20_000,
+            endTime: AG_T0 - 5_000,
+          }),
+          agentTask({
+            id: 'agent-done-bg',
+            subagentType: 'general-purpose',
+            description: 'completed background agent',
+            status: 'completed',
+            isBackgrounded: true,
+            startTime: AG_T0 - 60_000,
+            endTime: AG_T0 - 30_000,
+          }),
+        ]),
+      subagentPauseResult: ({ sessionId, subagentRef }) => ({
+        sessionId,
+        subagentRef,
+        agentId: subagentRef,
+        outcome: 'refused',
+        code: 'worktree_isolation_unsupported',
+        reason: 'Agent switched into an isolated worktree mid-turn and cannot pause.',
+      }),
+      subagentResumeResult: ({ sessionId, subagentRef }) => ({
+        sessionId,
+        subagentRef,
+        agentId: subagentRef,
+        outcome: 'refused',
+        code: 'resume_blocked',
+        reason: 'Parent workspace credentials expired; re-authenticate before resuming.',
+      }),
+      subagentMessageResult: ({ sessionId, subagentRef }) => ({
+        sessionId,
+        subagentRef,
+        delivered: false,
+        reason: 'resume_failed',
+        code: 'sidecar_not_found',
+        detail: 'Transcript sidecar agent-done-bg.jsonl is missing on disk and cannot be continued.',
+      }),
+    },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await waitChip(page, '1 agent');
+      await openAgentsFromChip(page);
+      await waitSheetRows(page, 3);
+
+      await page.click('#agents-body .ag-pause[data-ref="agent-refuse-pause"]');
+      await page.waitForFunction(
+        () =>
+          (
+            document.querySelector('#agents-body .ag-row[data-key="agent-refuse-pause"]')?.textContent ?? ''
+          ).includes('Agent switched into an isolated worktree mid-turn and cannot pause.'),
+        null,
+        { timeout: 10_000 },
+      );
+
+      await page.click('#agents-body .ag-resume[data-ref="agent-refuse-resume"]');
+      await page.waitForFunction(
+        () =>
+          (
+            document.querySelector('#agents-body .ag-row[data-key="agent-refuse-resume"]')?.textContent ?? ''
+          ).includes('Parent workspace credentials expired; re-authenticate before resuming.'),
+        null,
+        { timeout: 10_000 },
+      );
+
+      await page.click('#agents-body .ag-open[data-key="agent-done-bg"]');
+      await page.waitForFunction(() => agentSheet.view === 'trace' && agentSheet.key === 'agent-done-bg', null, {
+        timeout: 5_000,
+      });
+      await page.fill('#agent-msg', 'Continue checking logs');
+      await page.click('#agent-send');
+      await page.waitForFunction(
+        () =>
+          (document.getElementById('agent-stop-note')?.textContent ?? '').includes(
+            'Transcript sidecar agent-done-bg.jsonl is missing on disk and cannot be continued.',
+          ),
+        null,
+        { timeout: 10_000 },
+      );
+      await verifyAgentsSheetErgonomics(page, 'P585 refusal notes');
+
+      const noteText = await page.textContent('#agent-stop-note');
+      expect(
+        noteText !== null && !noteText.includes('(resume_failed)'),
+        `#agent-stop-note printed bare reason instead of detail: ${JSON.stringify(noteText)}`,
+      );
+      return 'refused /pause, refused /resume, and failed /message each rendered the concrete reason/detail verbatim';
+    },
+  });
+
+  PAGE_SCENARIOS.push({
+    name: 'P586 when subagentControls capability is false, Pause, Resume, and Abandon are hidden so older daemons never show dead buttons',
+    stub: {
+      capabilitiesFeatures: AGENT_FEATURES,
+      sessionAgentsResult: (sid: string) =>
+        agentRoster(sid, [
+          agentTask({
+            id: 'agent-bg-old',
+            subagentType: 'general-purpose',
+            description: 'running on older daemon',
+            status: 'running',
+            isBackgrounded: true,
+            canPause: true,
+            startTime: AG_T0,
+          }),
+          agentTask({
+            id: 'agent-paused-old',
+            subagentType: 'Explore',
+            description: 'paused on older daemon',
+            status: 'paused',
+            isBackgrounded: true,
+            startTime: AG_T0 - 20_000,
+            endTime: AG_T0 - 5_000,
+          }),
+        ]),
+    },
+    run: async ({ page, viewer }) => {
+      await watch(page, viewer.sessionId);
+      await waitChip(page, '1 agent');
+      await openAgentsFromChip(page);
+      await waitSheetRows(page, 2);
+
+      const rosterNewBtns = await page.evaluate(
+        () =>
+          document.querySelectorAll(
+            '#agents-body .ag-pause:not([hidden]), #agents-body .ag-resume:not([hidden]), #agents-body .ag-abandon:not([hidden])',
+          ).length,
+      );
+      expect(rosterNewBtns === 0, `older daemon showed ${rosterNewBtns} pause/resume/abandon roster buttons`);
+
+      await page.click('#agents-body .ag-open[data-key="agent-bg-old"]');
+      await page.waitForFunction(() => agentSheet.view === 'trace' && agentSheet.key === 'agent-bg-old', null, {
+        timeout: 5_000,
+      });
+      const runningTraceBtns = await page.evaluate(String.raw`(() => {
+        const vis = (id) => {
+          const el = document.getElementById(id);
+          return !!el && !el.hidden && el.getClientRects().length > 0;
+        };
+        return {
+          pause: vis('agent-pause'),
+          resume: vis('agent-resume'),
+          abandon: vis('agent-abandon'),
+          stop: vis('agent-stop'),
+        };
+      })()`);
+      expect(
+        !runningTraceBtns.pause && !runningTraceBtns.resume && !runningTraceBtns.abandon && runningTraceBtns.stop,
+        `older daemon running trace buttons wrong: ${JSON.stringify(runningTraceBtns)}`,
+      );
+
+      await page.click('#agents-back');
+      await waitSheetRows(page, 2);
+      await page.click('#agents-body .ag-open[data-key="agent-paused-old"]');
+      await page.waitForFunction(() => agentSheet.view === 'trace' && agentSheet.key === 'agent-paused-old', null, {
+        timeout: 5_000,
+      });
+      const pausedTraceBtns = await page.evaluate(String.raw`(() => {
+        const vis = (id) => {
+          const el = document.getElementById(id);
+          return !!el && !el.hidden && el.getClientRects().length > 0;
+        };
+        return {
+          pause: vis('agent-pause'),
+          resume: vis('agent-resume'),
+          abandon: vis('agent-abandon'),
+          send: vis('agent-send'),
+        };
+      })()`);
+      expect(
+        !pausedTraceBtns.pause && !pausedTraceBtns.resume && !pausedTraceBtns.abandon && pausedTraceBtns.send,
+        `older daemon paused trace buttons wrong: ${JSON.stringify(pausedTraceBtns)}`,
+      );
+      return 'with subagentControls false, Pause/Resume/Abandon stayed hidden across roster and trace while Stop and legacy Send remained intact';
     },
   });
 }
