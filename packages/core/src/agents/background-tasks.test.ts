@@ -768,6 +768,178 @@ describe('BackgroundTaskRegistry', () => {
     expect(registry.hasUnfinalizedTasks()).toBe(false);
   });
 
+  describe('pause and turn-unwind tracking (#267)', () => {
+    it('pauses a running background agent cleanly without emitting a task notification', async () => {
+      vi.useFakeTimers();
+      try {
+        const notifySpy = onNotify();
+        const statusSpy = vi.fn();
+        registry.setStatusChangeCallback(statusSpy);
+        const abortController = new AbortController();
+        const respondApproval = vi.fn(async () => {});
+        const resident = addResident('bg-pause-1', {
+          abortController,
+          description: 'pause target',
+        });
+        const entry = registry.get('bg-pause-1')!;
+        entry.liveText = 'streaming answer';
+        entry.liveThought = 'streaming thought';
+        entry.activeTool = {
+          name: 'Shell',
+          description: 'running tests',
+          callId: 'c1',
+        };
+        entry.activityPhase = 'tool';
+        entry.error = 'stale error';
+        entry.endTime = 12345;
+        registry.addPendingApproval(
+          'bg-pause-1',
+          makeApproval('c1', respondApproval),
+        );
+        const messageWait = registry.waitForMessages(
+          'bg-pause-1',
+          new AbortController().signal,
+        );
+        statusSpy.mockClear();
+
+        const paused = registry.pause('bg-pause-1');
+
+        expect(paused).toBe(true);
+        expect(abortController.signal.aborted).toBe(true);
+        expect(entry.status).toBe('paused');
+        expect(entry.endTime).toBeUndefined();
+        expect(entry.error).toBeUndefined();
+        expect(entry.liveText).toBeUndefined();
+        expect(entry.liveThought).toBeUndefined();
+        expect(entry.activeTool).toBeUndefined();
+        expect(entry.activityPhase).toBe('idle');
+        expect(entry.persistedCancellationStatus).toBe('paused');
+        expect(entry.notified).toBe(false);
+        expect(respondApproval).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.Cancel,
+        );
+        expect(registry.getPendingApprovals('bg-pause-1')).toEqual([]);
+        expect(resident.dispose).toHaveBeenCalledOnce();
+        await expect(messageWait).resolves.toEqual([]);
+        expect(statusSpy).toHaveBeenCalledWith(entry);
+
+        vi.runAllTimers();
+        expect(notifySpy).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('returns false for foreground, non-running, non-agent, or unknown tasks', () => {
+      const fgAbort = new AbortController();
+      reg('fg-1', { isBackgrounded: false, abortController: fgAbort });
+      add('paused-1', 'already paused', { status: 'paused' });
+      add('completed-1', 'already completed');
+      registry.complete('completed-1', 'done');
+      add('cancelled-1', 'already cancelled');
+      registry.cancel('cancelled-1');
+
+      const shellLike = add('shell-like', 'fake kind');
+      (shellLike as unknown as { kind: string }).kind = 'shell';
+
+      expect(registry.pause('unknown-id')).toBe(false);
+      expect(registry.pause('fg-1')).toBe(false);
+      expect(fgAbort.signal.aborted).toBe(false);
+      expect(registry.pause('paused-1')).toBe(false);
+      expect(registry.pause('completed-1')).toBe(false);
+      expect(registry.pause('cancelled-1')).toBe(false);
+      expect(registry.pause('shell-like')).toBe(false);
+    });
+
+    it('frees global and per-model concurrency slots immediately and clears running/unfinalized predicates', async () => {
+      capped(1, { 'model-a': 1 });
+      add('bg-slot-1', 'first agent', { model: 'model-a' });
+      expect(registry.hasRunningTasks()).toBe(true);
+      expect(registry.hasUnfinalizedTasks()).toBe(true);
+
+      let queuedResolved = false;
+      const queuedSlotPromise = waitSlot('model-a').then((slot) => {
+        queuedResolved = true;
+        return slot;
+      });
+      await Promise.resolve();
+      expect(queuedResolved).toBe(false);
+      expect(registry.getQueuedCount()).toBe(1);
+
+      expect(registry.pause('bg-slot-1')).toBe(true);
+      const slot = await queuedSlotPromise;
+      expect(queuedResolved).toBe(true);
+      registry.releaseBackgroundSlot(slot);
+
+      expect(registry.canStartBackgroundAgent('model-a')).toBe(true);
+      expect(registry.hasRunningTasks()).toBe(false);
+      expect(registry.hasUnfinalizedTasks()).toBe(false);
+    });
+
+    it('tracks active turn promises and resolves waitForAgentTurnUnwind after settlement or rejection', async () => {
+      await expect(
+        registry.waitForAgentTurnUnwind('untracked'),
+      ).resolves.toBeUndefined();
+
+      let rejectFirst!: (reason?: unknown) => void;
+      const firstPromise = new Promise<void>((_resolve, reject) => {
+        rejectFirst = reject;
+      });
+      const firstAc = new AbortController();
+      registry.trackAgentTurn('bg-turn-1', firstAc, firstPromise);
+
+      let unwound = false;
+      const waiting = registry
+        .waitForAgentTurnUnwind('bg-turn-1')
+        .then(() => {
+          unwound = true;
+        });
+
+      await Promise.resolve();
+      expect(unwound).toBe(false);
+
+      rejectFirst(new Error('aborted turn'));
+      await waiting;
+      expect(unwound).toBe(true);
+
+      // Subsequent wait resolves immediately once cleaned up.
+      await expect(
+        registry.waitForAgentTurnUnwind('bg-turn-1'),
+      ).resolves.toBeUndefined();
+    });
+
+    it('does not evict a newer turn promise when an older aborted turn settles late', async () => {
+      let resolveFirst!: () => void;
+      const firstPromise = new Promise<void>((resolve) => {
+        resolveFirst = resolve;
+      });
+      let resolveSecond!: () => void;
+      const secondPromise = new Promise<void>((resolve) => {
+        resolveSecond = resolve;
+      });
+
+      registry.trackAgentTurn('bg-turn-race', new AbortController(), firstPromise);
+      registry.trackAgentTurn('bg-turn-race', new AbortController(), secondPromise);
+
+      resolveFirst();
+      await firstPromise;
+      await Promise.resolve();
+
+      let secondUnwound = false;
+      const waitSecond = registry
+        .waitForAgentTurnUnwind('bg-turn-race')
+        .then(() => {
+          secondUnwound = true;
+        });
+      await Promise.resolve();
+      expect(secondUnwound).toBe(false);
+
+      resolveSecond();
+      await waitSecond;
+      expect(secondUnwound).toBe(true);
+    });
+  });
+
   it('lists running agents', () => {
     add('a', 'agent a');
     add('b', 'agent b');

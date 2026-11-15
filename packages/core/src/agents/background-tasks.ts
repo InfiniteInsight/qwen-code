@@ -434,6 +434,12 @@ export interface AgentTask extends TaskBase {
   pendingApprovals?: readonly BackgroundApproval[];
   /** Absolute path to the agent's sidecar metadata file. */
   metaPath?: string;
+  /** Workspace or container isolation configured when the agent launched. */
+  isolation?: 'worktree' | 'container';
+  /** Managed execution backend configured when the agent launched. */
+  executionBackend?: 'container';
+  /** External executor kind when backed by a non-Qwen runtime. */
+  executor?: string;
   /**
    * Inputs queued for delivery between tool rounds.
    * Strings are parent `send_message` payloads; notification objects are
@@ -442,10 +448,13 @@ export interface AgentTask extends TaskBase {
   pendingMessages?: AgentExternalInput[];
   /**
    * Persisted sidecar status to write when the current cancellation settles.
-   * Explicit user cancellation uses `cancelled`; shutdown interruption keeps
-   * `running` so `/resume` can recover the work later.
+   * Explicit user cancellation uses `cancelled`; explicit pause uses `paused`;
+   * shutdown interruption keeps `running` so `/resume` can recover the work later.
    */
-  persistedCancellationStatus?: Extract<TaskStatus, 'running' | 'cancelled'>;
+  persistedCancellationStatus?: Extract<
+    TaskStatus,
+    'running' | 'paused' | 'cancelled'
+  >;
   /** Current live execution phase while the sub-agent is running. */
   activityPhase?: BackgroundAgentActivityPhase;
   /** In-flight assistant text streaming in the current round. */
@@ -649,6 +658,10 @@ export const FOREGROUND_MODEL_SLOT_WAIT_CANCELLED =
 export class BackgroundTaskRegistry {
   private readonly agents = new Map<string, AgentTask>();
   private readonly residentAgents = new Map<string, ResidentBackgroundAgent>();
+  private readonly activeTurnPromises = new Map<
+    string,
+    { abortController: AbortController; done: Promise<void> }
+  >();
   private readonly messageWaiters = new Map<string, Set<MessageWaiter>>();
   private readonly finishingAgents = new Set<string>();
   private readonly finishingWaiters = new Map<
@@ -1278,6 +1291,74 @@ export class BackgroundTaskRegistry {
       this.finalizeCancellationIfPending(agentId);
     }, CANCEL_GRACE_MS);
     timer.unref?.();
+  }
+
+  /**
+   * Track an active background turn promise so an immediate pause-then-resume
+   * can wait for the aborted turn's finally block (runtime + JSONL writer
+   * cleanup) before reading the sidecar transcript.
+   */
+  trackAgentTurn(
+    id: string,
+    abortController: AbortController,
+    done: Promise<unknown>,
+  ): void {
+    const settled = done.then(
+      () => undefined,
+      () => undefined,
+    );
+    const tracked = settled.finally(() => {
+      if (
+        this.activeTurnPromises.get(id)?.abortController === abortController
+      ) {
+        this.activeTurnPromises.delete(id);
+      }
+    });
+    this.activeTurnPromises.set(id, { abortController, done: tracked });
+  }
+
+  /**
+   * Wait for any tracked in-flight turn on `id` to finish unwinding.
+   */
+  async waitForAgentTurnUnwind(id: string): Promise<void> {
+    await this.activeTurnPromises.get(id)?.done;
+  }
+
+  /**
+   * Pause a running background agent cleanly without emitting a terminal
+   * task-notification. Frees global and per-model concurrency slots
+   * immediately while keeping the entry listed as `paused` for later resume
+   * or abandon.
+   */
+  pause(agentId: string): boolean {
+    const entry = this.agents.get(agentId);
+    if (
+      !entry ||
+      entry.kind !== 'agent' ||
+      !entry.isBackgrounded ||
+      entry.status !== 'running'
+    ) {
+      return false;
+    }
+
+    this.rejectPendingApprovals(entry);
+    entry.abortController.abort();
+    entry.status = 'paused';
+    entry.endTime = undefined;
+    entry.error = undefined;
+    entry.liveText = undefined;
+    entry.liveThought = undefined;
+    entry.activeTool = undefined;
+    entry.activityPhase = 'idle';
+    entry.persistedCancellationStatus = 'paused';
+    entry.notified = false;
+    this.releaseFinishingWaiters(agentId, false);
+    this.disposeResidentAgent(agentId);
+    this.wakeMessageWaiters(agentId);
+    debugLogger.info(`Background agent paused: ${agentId}`);
+    this.drainQueues();
+    this.emitStatusChange(entry);
+    return true;
   }
 
   /**
