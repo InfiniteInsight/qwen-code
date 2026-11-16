@@ -7,6 +7,7 @@
 import type { Request, RequestHandler, Response } from 'express';
 import type { SessionDaemon } from '../daemonPool.js';
 import { WorkspacePoolFullError } from '../daemonPool.js';
+import { workspacePoolFullBodyFromRes } from '../daemonHttpError.js';
 import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 /**
@@ -113,10 +114,7 @@ function sendLiveStateError(res: Response, err: unknown): void {
   // Targeting a non-default workspace spawns on demand; at the pool cap with
   // no idle victim that is a 503, not a daemon failure.
   if (err instanceof WorkspacePoolFullError) {
-    res.status(503).json({
-      error: `Workspace daemon pool is full (max ${err.maxDaemons})`,
-      code: 'workspace_pool_full',
-    });
+    res.status(503).json(workspacePoolFullBodyFromRes(res, err));
     return;
   }
   if (relayDaemonAuthFailure(res, err, 'live_state')) return;

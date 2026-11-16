@@ -7,6 +7,7 @@
 import type { RequestHandler } from 'express';
 import type { DaemonClient } from '@qwen-code/sdk';
 import { UnknownSessionError, WorkspacePoolFullError } from '../daemonPool.js';
+import { workspacePoolFullBody } from '../daemonHttpError.js';
 import type { AuditRecorder } from '../auditLog.js';
 import {
   resolveChatsDir,
@@ -374,10 +375,7 @@ export function createRewindRoute(
               await daemon.resumeSession(sessionId, { workspaceCwd });
             } catch (err) {
               if (err instanceof WorkspacePoolFullError) {
-                res.status(503).json({
-                  error: 'Workspace pool full',
-                  code: 'workspace_pool_full',
-                });
+                res.status(503).json(workspacePoolFullBody(req, err));
                 return;
               }
               if (isSessionNotFoundError(err)) {

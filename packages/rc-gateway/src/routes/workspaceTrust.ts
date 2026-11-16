@@ -11,6 +11,7 @@ import type {
 } from '@qwen-code/sdk';
 import type { SessionDaemon } from '../daemonPool.js';
 import { WorkspacePoolFullError } from '../daemonPool.js';
+import { workspacePoolFullBodyFromRes } from '../daemonHttpError.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { relayDaemonAuthFailure } from './daemonAuth.js';
 
@@ -59,10 +60,7 @@ function daemonError(err: unknown, res: Parameters<RequestHandler>[1]): void {
   // on demand; at the pool cap with no idle victim this is a 503, not a
   // daemon failure.
   if (err instanceof WorkspacePoolFullError) {
-    res.status(503).json({
-      error: `Workspace daemon pool is full (max ${err.maxDaemons})`,
-      code: 'workspace_pool_full',
-    });
+    res.status(503).json(workspacePoolFullBodyFromRes(res, err));
     return;
   }
   if (relayDaemonAuthFailure(res, err, 'workspace_trust')) return;

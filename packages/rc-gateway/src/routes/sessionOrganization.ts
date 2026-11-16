@@ -15,7 +15,11 @@ import {
   type SessionDaemon,
 } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
-import { asDaemonHttpError, daemonErrorBody } from '../daemonHttpError.js';
+import {
+  asDaemonHttpError,
+  daemonErrorBody,
+  workspacePoolFullBodyFromRes,
+} from '../daemonHttpError.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
 import { relayDaemonAuthFailure } from './daemonAuth.js';
 
@@ -78,10 +82,7 @@ function sendOrganizationError(
     return 'not_found';
   }
   if (err instanceof WorkspacePoolFullError) {
-    res.status(503).json({
-      error: 'Workspace pool is full',
-      code: 'workspace_pool_full',
-    });
+    res.status(503).json(workspacePoolFullBodyFromRes(res, err));
     return 'daemon_unavailable';
   }
   const http = asDaemonHttpError(err);

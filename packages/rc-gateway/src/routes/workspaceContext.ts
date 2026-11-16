@@ -7,6 +7,7 @@
 import type { RequestHandler } from 'express';
 import type { SessionDaemon } from '../daemonPool.js';
 import { WorkspacePoolFullError } from '../daemonPool.js';
+import { workspacePoolFullBody } from '../daemonHttpError.js';
 import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 /** The daemon surface these two routes need. */
@@ -84,10 +85,7 @@ function contextRead(
       // on demand; at the pool cap with no idle victim this is a 503, not a
       // daemon failure.
       if (err instanceof WorkspacePoolFullError) {
-        res.status(503).json({
-          error: `Workspace daemon pool is full (max ${err.maxDaemons})`,
-          code: 'workspace_pool_full',
-        });
+        res.status(503).json(workspacePoolFullBody(req, err));
         return;
       }
       if (relayDaemonAuthFailure(res, err, `workspace_${which}`)) return;

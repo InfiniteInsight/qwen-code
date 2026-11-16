@@ -144,15 +144,36 @@ describe('POST /session (create)', () => {
     expect(stub.createdSessionCount).toBe(0);
   });
 
-  it('returns 503 workspace_pool_full when the pool is full (not the generic 502)', async () => {
+  it('returns 503 workspace_pool_full with slot holders and idleReapMs next step when the pool is full (#219)', async () => {
     const dir = makeTmpDir('qwen-session-create-full-');
     // A fake pool whose createOrAttachSession throws the pool's own
-    // WorkspacePoolFullError (max concurrent workspace daemons, all busy) —
-    // the route must map this to a distinct, retryable 503, not the generic
-    // 502 daemon_unavailable used for every other daemon failure.
+    // WorkspacePoolFullError (max concurrent workspace daemons, all busy):
+    // the route must map this to a distinct, retryable 503 with slot holders
+    // and how to free one (#219), not the generic 502 daemon_unavailable.
     const fullPool = {
       async createOrAttachSession() {
-        throw new WorkspacePoolFullError(3);
+        throw new WorkspacePoolFullError(2, {
+          requestedWorkspaceCwd: dir,
+          idleReapMs: 15 * 60_000,
+          slots: [
+            {
+              workspaceCwd: '/srv/work/alpha',
+              idle: false,
+              state: 'busy',
+              sessionCount: 1,
+              inFlightCount: 0,
+              idleForMs: 60_000,
+            },
+            {
+              workspaceCwd: '/srv/work/beta',
+              idle: false,
+              state: 'busy',
+              sessionCount: 2,
+              inFlightCount: 0,
+              idleForMs: 300_000,
+            },
+          ],
+        });
       },
     } as unknown as SessionDaemon;
     const url = await mountGateway(fullPool);
@@ -163,8 +184,25 @@ describe('POST /session (create)', () => {
       body: JSON.stringify({ cwd: dir }),
     });
     expect(res.status).toBe(503);
-    const body = (await res.json()) as { code: string };
+    const body = (await res.json()) as {
+      code: string;
+      error: string;
+      maxDaemons: number;
+      idleReapMs: number;
+      requestedWorkspaceCwd: string;
+      slots: Array<{ workspaceCwd: string; idle: boolean; state: string }>;
+      next: string;
+    };
     expect(body.code).toBe('workspace_pool_full');
+    expect(body.maxDaemons).toBe(2);
+    expect(body.idleReapMs).toBe(900_000);
+    expect(body.requestedWorkspaceCwd).toBe(dir);
+    expect(body.slots).toHaveLength(2);
+    expect(body.slots[0]?.workspaceCwd).toBe('/srv/work/alpha');
+    expect(body.slots[0]?.idle).toBe(false);
+    expect(body.error).toContain('/srv/work/alpha');
+    expect(body.error).toContain('/srv/work/beta');
+    expect(body.next).toContain('idleReapMs: 900000 ms / 15 min');
   });
 
   it("defaults scope to 'single'; passes 'thread' through; omits empty cwd", async () => {

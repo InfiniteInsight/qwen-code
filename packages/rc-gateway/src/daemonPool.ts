@@ -1147,15 +1147,97 @@ export class DefaultDaemonUnavailableError extends Error {
   }
 }
 
+/** Snapshot of one pooled workspace daemon slot at pool-full refusal (#219). */
+export interface WorkspacePoolSlotInfo {
+  /** Normalized workspace path holding or spawning this slot. */
+  workspaceCwd: string;
+  /** True only when the slot has no registered sessions and no in-flight hold. */
+  idle: boolean;
+  /** Slot state at refusal time (`spawning` while child startup is in flight). */
+  state: 'busy' | 'idle' | 'spawning';
+  /** Active sessions registered on this pooled daemon (0 while spawning). */
+  sessionCount: number;
+  /** In-flight holds (`pendingUses`) protecting this slot (0 when none). */
+  inFlightCount: number;
+  /** Milliseconds since the slot was last touched (`now - lastUsed`; 0 while spawning). */
+  idleForMs: number;
+}
+
+export interface WorkspacePoolFullOptions {
+  /** Normalized workspace path that requested a new slot, when known. */
+  requestedWorkspaceCwd?: string;
+  /** Configured idle-reap threshold in ms (`idleReapMs`, default 15 min). */
+  idleReapMs?: number;
+  /** Snapshot of every occupied slot at refusal time. */
+  slots?: readonly WorkspacePoolSlotInfo[];
+}
+
+export function formatPoolDuration(ms: number): string {
+  const safe = Math.max(0, Math.floor(ms));
+  if (safe >= 60_000 && safe % 60_000 === 0) {
+    return `${safe / 60_000} min`;
+  }
+  if (safe >= 60_000) {
+    const mins = Math.floor(safe / 60_000);
+    const secs = Math.floor((safe % 60_000) / 1_000);
+    return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+  }
+  if (safe >= 1_000) {
+    return `${Math.floor(safe / 1_000)}s`;
+  }
+  return `${safe}ms`;
+}
+
+function formatSlotSummary(slot: WorkspacePoolSlotInfo): string {
+  if (slot.state === 'spawning') {
+    return `${slot.workspaceCwd} (spawning)`;
+  }
+  if (slot.idle) {
+    return `${slot.workspaceCwd} (idle ${formatPoolDuration(slot.idleForMs)})`;
+  }
+  const parts: string[] = [];
+  if (slot.sessionCount > 0) {
+    parts.push(
+      `${slot.sessionCount} ${slot.sessionCount === 1 ? 'session' : 'sessions'}`,
+    );
+  }
+  if (slot.inFlightCount > 0) {
+    parts.push(`${slot.inFlightCount} in-flight`);
+  }
+  parts.push(`last used ${formatPoolDuration(slot.idleForMs)} ago`);
+  return `${slot.workspaceCwd} (busy: ${parts.join(', ')})`;
+}
+
 /** Thrown when `getOrSpawn` needs to spawn a daemon for a new workspace but
  * the pool is at `maxDaemons` and every entry is busy (no idle victim to
- * evict). Routes map this to a `503 workspace_pool_full`. */
+ * evict). Routes map this to a `503 workspace_pool_full` (#219). */
 export class WorkspacePoolFullError extends Error {
   readonly activeWorkspaces: number;
-  constructor(readonly maxDaemons: number) {
-    super(`Workspace daemon pool is full (max ${maxDaemons})`);
+  readonly requestedWorkspaceCwd?: string;
+  readonly idleReapMs: number;
+  readonly slots: readonly WorkspacePoolSlotInfo[];
+  readonly nextStep: string;
+
+  constructor(
+    readonly maxDaemons: number,
+    opts?: WorkspacePoolFullOptions,
+  ) {
+    const idleReapMs = opts?.idleReapMs ?? DEFAULT_IDLE_REAP_MS;
+    const slots = opts?.slots ? [...opts.slots] : [];
+    const message =
+      slots.length > 0
+        ? `Workspace daemon pool is full (${slots.length}/${maxDaemons} slots occupied: ${slots.map(formatSlotSummary).join('; ')})`
+        : `Workspace daemon pool is full (max ${maxDaemons})`;
+    super(message);
     this.name = 'WorkspacePoolFullError';
-    this.activeWorkspaces = maxDaemons;
+    this.activeWorkspaces = slots.length > 0 ? slots.length : maxDaemons;
+    this.requestedWorkspaceCwd = opts?.requestedWorkspaceCwd;
+    this.idleReapMs = idleReapMs;
+    this.slots = slots;
+    this.nextStep =
+      `End sessions in an occupied workspace so idle reap ` +
+      `(idleReapMs: ${idleReapMs} ms / ${formatPoolDuration(idleReapMs)}) ` +
+      `frees its slot, or raise the cap with --max-daemons / QWEN_RC_MAX_DAEMONS`;
   }
 }
 
@@ -1504,7 +1586,7 @@ export class DaemonPool implements SessionDaemon {
         if (raced) return raced;
       }
       if (pooledCount() >= this.maxDaemons) {
-        this.evictLruIdle();
+        this.evictLruIdle(key);
       }
     }
 
@@ -1601,8 +1683,8 @@ export class DaemonPool implements SessionDaemon {
 
   /** Evict the least-recently-used IDLE workspace entry to make room under
    * the cap. Throws `WorkspacePoolFullError` if every entry currently has
-   * live sessions or an in-flight registration. */
-  private evictLruIdle(): void {
+   * live sessions or an in-flight registration (#219). */
+  private evictLruIdle(requestedWorkspaceCwd?: string): void {
     let lruKey: string | undefined;
     let lruEntry: Entry | undefined;
     for (const [key, entry] of this.byWorkspace) {
@@ -1614,9 +1696,42 @@ export class DaemonPool implements SessionDaemon {
       }
     }
     if (!lruKey || !lruEntry) {
-      throw new WorkspacePoolFullError(this.maxDaemons);
+      throw new WorkspacePoolFullError(this.maxDaemons, {
+        requestedWorkspaceCwd,
+        idleReapMs: this.idleReapMs,
+        slots: this.snapshotOccupiedSlots(),
+      });
     }
     this.discardEntry(lruKey, lruEntry);
+  }
+
+  /** Snapshot every live and in-flight pooled slot at refusal time (#219). */
+  private snapshotOccupiedSlots(): WorkspacePoolSlotInfo[] {
+    const now = this.now();
+    const slots: WorkspacePoolSlotInfo[] = [];
+    for (const [slotKey, entry] of this.byWorkspace) {
+      const idle = this.isIdle(slotKey, entry);
+      slots.push({
+        workspaceCwd: slotKey,
+        idle,
+        state: idle ? 'idle' : 'busy',
+        sessionCount: entry.sessions.size,
+        inFlightCount: this.pendingUses.get(slotKey) ?? 0,
+        idleForMs: Math.max(0, now - entry.lastUsed),
+      });
+    }
+    for (const spawnKey of this.spawning.keys()) {
+      if (this.byWorkspace.has(spawnKey)) continue;
+      slots.push({
+        workspaceCwd: spawnKey,
+        idle: false,
+        state: 'spawning',
+        sessionCount: 0,
+        inFlightCount: this.pendingUses.get(spawnKey) ?? 0,
+        idleForMs: 0,
+      });
+    }
+    return slots;
   }
 
   private hasIdleEntry(): boolean {

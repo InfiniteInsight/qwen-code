@@ -15,7 +15,11 @@ import {
   WorkspacePoolFullError,
   type SessionDaemon,
 } from '../daemonPool.js';
-import { asDaemonHttpError, daemonErrorBody } from '../daemonHttpError.js';
+import {
+  asDaemonHttpError,
+  daemonErrorBody,
+  workspacePoolFullBodyFromRes,
+} from '../daemonHttpError.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
 import { relayDaemonAuthFailure } from './daemonAuth.js';
 
@@ -242,9 +246,7 @@ function sendHooksError(res: Response, err: unknown): void {
     return;
   }
   if (err instanceof WorkspacePoolFullError) {
-    res
-      .status(503)
-      .json({ error: 'Workspace pool is full', code: 'workspace_pool_full' });
+    res.status(503).json(workspacePoolFullBodyFromRes(res, err));
     return;
   }
   const http = asDaemonHttpError(err);

@@ -8,7 +8,10 @@ import type { RequestHandler } from 'express';
 import { stat } from 'node:fs/promises';
 import { WorkspacePoolFullError, type SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
-import { daemonUnavailableBody } from '../daemonHttpError.js';
+import {
+  daemonUnavailableBody,
+  workspacePoolFullBody,
+} from '../daemonHttpError.js';
 import type { RepoSettingsFindings } from '../github/repoSettings.js';
 
 export interface CloneStartGateHit {
@@ -125,10 +128,7 @@ export function createSessionCreateRoute(
       // condition, not a daemon failure — surface it as its own 503 rather
       // than collapsing it into the generic 502 below.
       if (err instanceof WorkspacePoolFullError) {
-        res.status(503).json({
-          error: 'Workspace pool full',
-          code: 'workspace_pool_full',
-        });
+        res.status(503).json(workspacePoolFullBody(req, err));
         return;
       }
       // #211: the daemon's own answer rides along for a write or owner caller.

@@ -22,7 +22,10 @@ import {
   type TerminalPlanOptions,
 } from '../terminals.js';
 import { isSessionNotFoundError } from './sessionResume.js';
-import { isSessionLevelGone } from '../daemonHttpError.js';
+import {
+  isSessionLevelGone,
+  workspacePoolFullDetailBody,
+} from '../daemonHttpError.js';
 import { isValidTabId } from '../hostTabs.js';
 
 /** The slice of the pool these routes call. */
@@ -216,6 +219,7 @@ export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
     code: string,
     error: string,
     sessionId?: string,
+    extra?: Record<string, unknown>,
   ): void => {
     void audit?.record({
       action: 'host_attached',
@@ -223,7 +227,7 @@ export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
       outcome: 'failed',
       detail: { via: step, code },
     });
-    res.status(status).json({ error, code });
+    res.status(status).json({ ...(extra ?? {}), error, code });
   };
 
   /**
@@ -358,7 +362,16 @@ export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
       }));
     } catch (err) {
       if (err instanceof WorkspacePoolFullError) {
-        fail(res, 'create', 503, 'workspace_pool_full', 'Workspace pool full');
+        const detail = workspacePoolFullDetailBody(err);
+        fail(
+          res,
+          'create',
+          503,
+          'workspace_pool_full',
+          detail.error,
+          undefined,
+          { ...detail },
+        );
         return;
       }
       fail(res, 'create', 502, 'daemon_unavailable', 'Daemon unavailable');
@@ -464,13 +477,15 @@ export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
       await daemon.resumeSession(sessionId, { workspaceCwd: cwd });
     } catch (err) {
       if (err instanceof WorkspacePoolFullError) {
+        const detail = workspacePoolFullDetailBody(err);
         fail(
           res,
           'resume',
           503,
           'workspace_pool_full',
-          'Workspace pool full',
+          detail.error,
           sessionId,
+          { ...detail },
         );
         return;
       }

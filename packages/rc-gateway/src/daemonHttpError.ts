@@ -5,6 +5,10 @@
  */
 
 import { hasScope, WRITE } from './scopes.js';
+import type {
+  WorkspacePoolFullError,
+  WorkspacePoolSlotInfo,
+} from './daemonPool.js';
 
 /**
  * Read a daemon HTTP failure without asking which copy of the class threw it.
@@ -178,4 +182,74 @@ export function daemonUnavailableBody(
   if (!canSeeDaemonDetail(req)) return base;
   const detail = daemonFailureDetail(err);
   return Object.keys(detail).length === 0 ? base : { ...base, daemon: detail };
+}
+
+/**
+ * The 503 `workspace_pool_full` response body (#219, following #211).
+ *
+ * A caller who {@link canSeeDaemonDetail} (write or owner, never a share guest)
+ * receives the occupied slots (`workspaceCwd`, `idle`, `state`, `sessionCount`,
+ * `inFlightCount`, `idleForMs`), the configured `idleReapMs` and `maxDaemons`,
+ * the `requestedWorkspaceCwd` when known, and `next` naming both `idleReapMs`
+ * and `--max-daemons` / `QWEN_RC_MAX_DAEMONS`.
+ *
+ * Readers, share links, and unauthenticated callers receive only the reduced
+ * `{ error, code, activeWorkspaces }` summary so host workspace paths of other
+ * pooled daemons are never leaked.
+ */
+export interface WorkspacePoolFullResponseBody {
+  error: string;
+  code: 'workspace_pool_full';
+  activeWorkspaces: number;
+  maxDaemons?: number;
+  idleReapMs?: number;
+  requestedWorkspaceCwd?: string;
+  slots?: readonly WorkspacePoolSlotInfo[];
+  next?: string;
+}
+
+export function workspacePoolFullDetailBody(
+  err: WorkspacePoolFullError,
+): WorkspacePoolFullResponseBody {
+  return {
+    error: err.message,
+    code: 'workspace_pool_full',
+    activeWorkspaces: err.activeWorkspaces,
+    maxDaemons: err.maxDaemons,
+    idleReapMs: err.idleReapMs,
+    slots: err.slots,
+    next: err.nextStep,
+    ...(err.requestedWorkspaceCwd !== undefined
+      ? { requestedWorkspaceCwd: err.requestedWorkspaceCwd }
+      : {}),
+  };
+}
+
+export function workspacePoolFullBody(
+  req:
+    | { rcClient?: { scopes?: readonly string[]; shareId?: string } }
+    | undefined,
+  err: WorkspacePoolFullError,
+): WorkspacePoolFullResponseBody {
+  if (!req || !canSeeDaemonDetail(req)) {
+    return {
+      error: `Workspace daemon pool is full (max ${err.maxDaemons})`,
+      code: 'workspace_pool_full',
+      activeWorkspaces: err.activeWorkspaces,
+    };
+  }
+  return workspacePoolFullDetailBody(err);
+}
+
+/**
+ * Convenience helper for error mappers that only receive an Express `Response`:
+ * reads `res.req` (attached by Express) and delegates to {@link workspacePoolFullBody}.
+ */
+export function workspacePoolFullBodyFromRes(
+  res: {
+    req?: { rcClient?: { scopes?: readonly string[]; shareId?: string } };
+  },
+  err: WorkspacePoolFullError,
+): WorkspacePoolFullResponseBody {
+  return workspacePoolFullBody(res.req, err);
 }
