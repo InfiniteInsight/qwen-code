@@ -5537,6 +5537,9 @@
                 (the watched session's event feed; the chat screen's status line
                 shows its live state)
               </div>
+              <div id="stream-state-readout" class="ops-note" style="font-family: ui-monospace, monospace; margin: 6px 0">
+                session: (none)  cursor: (none)
+              </div>
               <div>
                 <button
                   id="watch"
@@ -5551,7 +5554,16 @@
                 >
                   Unwatch
                 </button>
+                <button
+                  id="copy-stream-state"
+                  type="button"
+                  style="min-height: 44px; min-width: 44px"
+                  title="Copy watchedSessionId, lastSeenEventId, and live status for cross-device or stream diagnostics."
+                >
+                  Copy stream state
+                </button>
               </div>
+              <div id="copy-stream-state-note" class="ops-note" role="status"></div>
             </section>
             <section id="owner-events" class="ops-card">
               <h2>Owner event stream</h2>
@@ -7080,7 +7092,15 @@
           "
         >
           <span id="joined-note-text"></span>
-          <button id="joined-note-new" style="margin-left: 8px">
+          <button
+            id="joined-note-join"
+            type="button"
+            hidden
+            style="margin-left: 8px; min-height: 44px; padding: 0 12px"
+          >
+            Join live conversation
+          </button>
+          <button id="joined-note-new" style="margin-left: 8px; min-height: 44px">
             Start a new conversation here
           </button>
         </div>
@@ -7600,21 +7620,53 @@
       // button cannot drift from it and cannot start a session in a folder the
       // page never resolved.
       let joinedNoteCwd = null;
+      let joinedNoteTarget = null;
       let joinedNoteShown = false;
-      function showJoinedNote(title, cwd) {
+      function showJoinedNote(title, cwd, originWords) {
         if (joinedNoteShown) return;
         joinedNoteShown = true;
         joinedNoteCwd = strOr(cwd, '');
+        joinedNoteTarget = null;
+        const joinBtn = $('joined-note-join');
+        if (joinBtn) joinBtn.hidden = true;
+        const newBtn = $('joined-note-new');
+        if (newBtn) newBtn.hidden = false;
         $('joined-note-text').textContent =
           'this window joined ' +
           (strOr(title, '') || 'the last conversation') +
-          ' from another window on this browser';
+          ' ' +
+          (strOr(originWords, '') || 'from another window on this browser');
+        $('joined-note').hidden = false;
+      }
+      function showLiveElsewhereNote(sessionId, cwd, source) {
+        if (joinedNoteShown || !sessionId) return;
+        joinedNoteShown = true;
+        joinedNoteTarget = { sessionId: String(sessionId), cwd: strOr(cwd, '') };
+        const joinBtn = $('joined-note-join');
+        if (joinBtn) joinBtn.hidden = false;
+        const newBtn = $('joined-note-new');
+        if (newBtn) newBtn.hidden = true;
+        $('joined-note-text').textContent =
+          source === 'host_tab'
+            ? 'another conversation is live in a terminal on the host'
+            : 'another conversation is live on another device';
         $('joined-note').hidden = false;
       }
       function hideJoinedNote() {
         const box = $('joined-note');
         if (box) box.hidden = true;
+        joinedNoteTarget = null;
       }
+      $('joined-note-join').onclick = () => {
+        const target = joinedNoteTarget;
+        hideJoinedNote();
+        if (!target || !target.sessionId) return;
+        if (target.cwd) {
+          void resumeConversation(target.sessionId, target.cwd, null);
+        } else {
+          void openConversationById(target.sessionId);
+        }
+      };
       $('joined-note-new').onclick = () => {
         hideJoinedNote();
         $('new-session-cwd').value = joinedNoteCwd;
@@ -20310,8 +20362,9 @@
           void autoEnableNotifications();
           // A fresh device may arrive via a push deep link (#40) and pair
           // from the auth gate: authGate() won't re-run after pairing, so
-          // handle any surviving ?session= param here (no-op if absent).
-          handleSessionDeepLink();
+          // handle any surviving ?session= param here (no-op if absent), and
+          // otherwise check for a persisted or live cross-device session (#113).
+          if (!handleSessionDeepLink()) restoreWatchedSession();
           pairFeedback(
             '✓ paired - scopes: ' + (data.scopes || []).join(', '),
             true,
@@ -21351,7 +21404,39 @@
         renderQueueControl();
       }
 
+      function renderStreamStateReadout() {
+        const el = $('stream-state-readout');
+        if (!el) return;
+        const sid = watchedSessionId || '(none)';
+        const cur = lastSeenEventId !== null && lastSeenEventId !== undefined
+          ? String(lastSeenEventId)
+          : '(none)';
+        el.textContent = 'session: ' + sid + '  cursor: ' + cur;
+      }
+      $('copy-stream-state').onclick = async () => {
+        const statusWord = (($('h1-status') && $('h1-status').textContent) || '').trim();
+        const line =
+          (watchedSessionId || '(none)') +
+          ' ' +
+          (lastSeenEventId !== null && lastSeenEventId !== undefined
+            ? String(lastSeenEventId)
+            : '(none)') +
+          (statusWord ? ' [' + statusWord + ']' : '');
+        const note = $('copy-stream-state-note');
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(line);
+            if (note) note.textContent = 'copied: ' + line;
+            return;
+          }
+        } catch {
+          /* fall through to showing the text directly so it is selectable */
+        }
+        if (note) note.textContent = line;
+      };
+
       function persistWatch() {
+        renderStreamStateReadout();
         if (watchedSessionId) {
           const pointer = JSON.stringify({
             sessionId: watchedSessionId,
@@ -21421,6 +21506,7 @@
         }
         lastSeenEventId = null;
         watchedSessionCwd = null;
+        renderStreamStateReadout();
       }
 
       // ---- #182: what the reader had open, and where they were ------------
@@ -30799,7 +30885,14 @@
           }
         }
         const raw = own || localStorage.getItem(WATCHED_KEY);
-        if (!raw) return;
+        if (!raw) {
+          // #113: a phone or browser profile with no local pointer checks
+          // whether a conversation is already live on a host terminal tab or
+          // watched on another device, and joins it instead of stranding the
+          // user on a blank screen that would mint a second session id.
+          void restoreCrossDeviceActiveSession();
+          return;
+        }
         try {
           const { sessionId, lastEventId, title, cwd } = JSON.parse(raw);
           if (sessionId) {
@@ -30822,13 +30915,61 @@
               void askWhoIsWatching().then((busyId) => {
                 if (busyId && busyId === String(sessionId)) {
                   showJoinedNote(title, watchedSessionCwd);
+                  return;
                 }
+                void checkCrossDeviceActiveOnRestore(String(sessionId), title);
               });
             }
           }
         } catch {
           /* corrupt entry - ignore */
         }
+      }
+
+      async function fetchActiveServerSession() {
+        if (!token()) return null;
+        const rc = caps && caps.remoteControl;
+        if (!rc || rc.activeSession !== true) return null;
+        const r = await rcCall('/rc/sessions/active');
+        if (!r.ok || !r.body || !r.body.active || !r.body.active.sessionId) {
+          return null;
+        }
+        return r.body.active;
+      }
+
+      async function restoreCrossDeviceActiveSession() {
+        const gen = switchGen;
+        if (watchedSessionId !== null) return;
+        const act = await fetchActiveServerSession();
+        if (!act || gen !== switchGen || watchedSessionId !== null) return;
+        watchedSessionCwd =
+          typeof act.cwd === 'string' && act.cwd ? act.cwd : null;
+        startWatch(act.sessionId, 0, null);
+        showJoinedNote(
+          null,
+          watchedSessionCwd,
+          act.source === 'host_tab'
+            ? 'from a terminal on the host'
+            : 'from another device',
+        );
+      }
+
+      async function checkCrossDeviceActiveOnRestore(restoredId, title) {
+        const act = await fetchActiveServerSession();
+        if (!act || watchedSessionId !== restoredId) return;
+        if (act.sessionId === restoredId) {
+          if (act.source === 'host_tab' || (act.watcherCount && act.watcherCount >= 2)) {
+            showJoinedNote(
+              title,
+              watchedSessionCwd || act.cwd,
+              act.source === 'host_tab'
+                ? 'from a terminal on the host'
+                : 'from another device',
+            );
+          }
+          return;
+        }
+        showLiveElsewhereNote(act.sessionId, act.cwd || null, act.source);
       }
 
       // Send test push (cycle 73): POST /rc/push/test (OWNER) fans a synthetic

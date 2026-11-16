@@ -23072,6 +23072,8 @@ async function runPageScenario(
     hostTabs: s.stub?.hostTabs,
     github: s.stub?.github,
     workspaceConfigApprovals: s.stub?.workspaceConfigApprovals,
+    promptBroadcastsEvents: s.stub?.promptBroadcastsEvents,
+    promptReplyText: s.stub?.promptReplyText,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];
@@ -37173,6 +37175,127 @@ PAGE_SCENARIOS.push({
     },
   });
 }
+
+// #113: cross-device live conversation join, bidirectional live fanout without
+// refresh, reload durability, and stream state readout in Diagnostics > Stream.
+PAGE_SCENARIOS.push({
+  name: 'P605 a fresh phone context joins the laptop live conversation automatically, a phone-sent prompt and reply appear live on the laptop without refresh, survive reload, and Diagnostics > Stream exposes sessionId + cursor',
+  holdOpenMs: 25_000,
+  stub: {
+    promptBroadcastsEvents: true,
+    promptReplyText: 'ack from daemon',
+  },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 1, 15_000);
+
+    const ownerTok = await page.evaluate(() =>
+      localStorage.getItem('qwen-rc-token'),
+    );
+    expect(Boolean(ownerTok), 'laptop context holds no owner token');
+
+    // Separate browser context (separate device: zero shared localStorage or BroadcastChannel).
+    const phoneCtx = await page.context().browser()!.newContext({
+      viewport: PHONE,
+    });
+    try {
+      const phone = await phoneCtx.newPage();
+      await phone.addInitScript(
+        ({ tok }) => {
+          localStorage.setItem('qwen-rc-token', tok);
+        },
+        { tok: ownerTok! },
+      );
+      await phone.addInitScript({ content: PAGE_HELPERS_JS });
+      await phone.goto(`${viewer.url}/ui/`, { waitUntil: 'domcontentloaded' });
+      await phone.waitForFunction(
+        () => typeof watchedSessionId !== 'undefined' && watchedSessionId !== null,
+        null,
+        { timeout: 15_000 },
+      );
+      const phoneSid = await phone.evaluate(() => watchedSessionId);
+      expect(
+        phoneSid === viewer.sessionId,
+        `phone joined ${JSON.stringify(phoneSid)}, wanted laptop session ${viewer.sessionId}`,
+      );
+      await phone.waitForFunction(
+        () => !document.getElementById('joined-note')!.hidden,
+        null,
+        { timeout: 5_000 },
+      );
+      const joinedText =
+        (await phone.locator('#joined-note-text').textContent()) ?? '';
+      expect(
+        joinedText.includes('from another device'),
+        `expected cross-device join note, got ${JSON.stringify(joinedText)}`,
+      );
+
+      // Send a prompt from the phone; laptop must render both prompt and reply live without refresh.
+      await phone.fill('#prompt', 'hello from mobile');
+      await phone.click('#send');
+
+      await page.waitForFunction(
+        () => {
+          const allText = transcriptModel.items
+            .map((i) => i.text ?? '')
+            .join('\n');
+          return (
+            allText.includes('hello from mobile') &&
+            allText.includes('ack from daemon')
+          );
+        },
+        null,
+        { timeout: 10_000 },
+      );
+
+      // Verify Diagnostics > Stream readout + >=44px Copy stream state control.
+      await openPanel(phone, 'diag');
+      const readout =
+        (await phone.locator('#stream-state-readout').textContent()) ?? '';
+      expect(
+        readout.includes(`session: ${viewer.sessionId}`) &&
+          !/cursor: \(none\)/.test(readout),
+        `expected session + numeric cursor in #stream-state-readout, got ${JSON.stringify(readout)}`,
+      );
+      const copyBtn = phone.locator('#copy-stream-state');
+      const copyBox = await copyBtn.boundingBox();
+      expect(
+        Boolean(copyBox && copyBox.height >= 44 && copyBox.width >= 44),
+        `expected #copy-stream-state >= 44x44px, got ${JSON.stringify(copyBox)}`,
+      );
+      await copyBtn.click();
+      await phone.waitForFunction(
+        (sid) =>
+          (
+            document.getElementById('copy-stream-state-note')?.textContent ?? ''
+          ).includes(sid),
+        viewer.sessionId,
+        { timeout: 5_000 },
+      );
+
+      // Reload the laptop page and verify the mobile turn + reply persist across restart/reload.
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await page.waitForFunction(
+        () => {
+          if (typeof transcriptModel === 'undefined') return false;
+          const allText = transcriptModel.items
+            .map((i) => i.text ?? '')
+            .join('\n');
+          return (
+            allText.includes('hello from mobile') &&
+            allText.includes('ack from daemon')
+          );
+        },
+        null,
+        { timeout: 15_000 },
+      );
+
+      return `phone context auto-joined ${viewer.sessionId}, live prompt+reply appeared on laptop without refresh, survived reload, and Diagnostics > Stream exposed "${readout.trim()}"`;
+    } finally {
+      await phoneCtx.close();
+    }
+  },
+});
 
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));

@@ -362,6 +362,9 @@ export interface BootViewerOptions {
     files?: Record<string, string>;
     cloneExit?: number;
   };
+  /** #113: push live SSE frames onto open /events streams when POST /prompt lands. */
+  promptBroadcastsEvents?: boolean;
+  promptReplyText?: string;
 }
 
 /** #257: the fake device code GitHub hands the harness gateway. */
@@ -798,6 +801,8 @@ export async function bootViewer(
     taskCancelVerdict: opts.runs?.cancelVerdict,
     workflowActionChanged: opts.runs?.actionChanged,
     savedWorkflowResult: opts.runs?.savedWorkflow,
+    promptBroadcastsEvents: opts.promptBroadcastsEvents,
+    promptReplyText: opts.promptReplyText,
     hooks: opts.hooks,
   });
   const dir = mkdtempSync(join(tmpdir(), 'rc-viewer-'));
