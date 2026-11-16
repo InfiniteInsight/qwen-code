@@ -17,9 +17,16 @@ files:
   - 'assets/**'
   - 'package.json'
 
+extraResources:
+  - from: 'dist/build-stamp.json'
+    to: 'build-stamp.json'
+
 win:
   target:
     - 'dir'
+  # Skip electron-builder's wine+rcedit step on WSL (#210): apply-exe-metadata.mjs
+  # writes both the RT_VERSION strings and assets/icon.ico in pure JS via resedit.
+  signAndEditExecutable: false
   # Tray icon (issue #49 follow-up) — the app must be visible without a window,
   # and this is also the exe icon. Native .ico, so no conversion step.
   icon: 'assets/icon.ico'

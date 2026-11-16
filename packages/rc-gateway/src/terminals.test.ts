@@ -312,4 +312,19 @@ describe('launcher liveness (#69)', () => {
     await TerminalRequestLog.open(file).recordPoll(1);
     expect(((await stat(marker())).mode & 0o777).toString(8)).toBe('600');
   });
+
+  it('persists and reads back sanitized launcherCommit and launcherBuiltAt on the heartbeat (#210)', async () => {
+    const t = { at: 100_000 };
+    const log = clock(t);
+    await log.recordPoll(5, {
+      commit: 'CFF0C1D61F',
+      builtAt: '2026-11-16T14:00:00.000Z',
+    });
+    expect(await log.launcherLiveness(STALE)).toEqual({
+      state: 'live',
+      seenMsAgo: 0,
+      launcherCommit: 'cff0c1d61f',
+      launcherBuiltAt: '2026-11-16T14:00:00.000Z',
+    });
+  });
 });

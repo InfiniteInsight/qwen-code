@@ -67,6 +67,12 @@ import {
   validateQwenBinPath,
 } from './daemonBin.js';
 import {
+  detectLauncherBuildDrift,
+  formatLauncherBuildLine,
+  formatLauncherDriftWarning,
+  readGatewayBuildStamp,
+} from './buildStamp.js';
+import {
   DaemonPool,
   type DaemonPoolOptions,
   type PooledDaemonSpawn,
@@ -807,6 +813,25 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     if (buildDrift) {
       // eslint-disable-next-line no-console
       console.warn(formatDriftWarning(buildDrift));
+    }
+    // #210: print the gateway and Windows launcher build stamps side by side
+    // and warn when a polling launcher predates or differs from this build.
+    {
+      const gatewayStamp = readGatewayBuildStamp();
+      const launcherLog = TerminalRequestLog.open(
+        defaultTerminalLogPath(homedir()),
+      );
+      const launcherState = await launcherLog.launcherLiveness(LAUNCHER_STALE_MS);
+      // eslint-disable-next-line no-console
+      console.log(formatLauncherBuildLine(gatewayStamp, launcherState));
+      const launcherDrift = detectLauncherBuildDrift(
+        gatewayStamp,
+        launcherState,
+      );
+      if (launcherDrift) {
+        // eslint-disable-next-line no-console
+        console.warn(formatLauncherDriftWarning(launcherDrift));
+      }
     }
     // Attach to an existing daemon (handoff Phase 1) when a URL is given, else spawn
     // our own. Attach requires the daemon's token so the gateway can authenticate
@@ -2898,6 +2923,12 @@ if (process.argv[2] === 'serve') {
     }
     const afterFlag = args.find((a) => a.startsWith('--after='));
     const after = afterFlag ? Number(afterFlag.slice('--after='.length)) : 0;
+    const launcherCommitFlag = args.find((a) =>
+      a.startsWith('--launcher-commit='),
+    );
+    const launcherBuiltAtFlag = args.find((a) =>
+      a.startsWith('--launcher-built-at='),
+    );
     const log = TerminalRequestLog.open(defaultTerminalLogPath(homedir()));
     const all = await log.readAll();
     const requests = all.slice(
@@ -2909,7 +2940,10 @@ if (process.argv[2] === 'serve') {
     // able to open its terminals, so liveness reporting degrades instead of the
     // feature failing.
     try {
-      await log.recordPoll(all.length);
+      await log.recordPoll(all.length, {
+        commit: launcherCommitFlag?.slice('--launcher-commit='.length),
+        builtAt: launcherBuiltAtFlag?.slice('--launcher-built-at='.length),
+      });
     } catch {
       // eslint-disable-next-line no-console
       console.error('terminals: could not record the poll heartbeat');

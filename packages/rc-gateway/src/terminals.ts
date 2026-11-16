@@ -61,6 +61,11 @@ export interface TerminalRequestLogOptions {
  * which says nothing about anyone being there to act on it, so this is what
  * turns that 202 into a statement a caller can pass on honestly.
  */
+export interface LauncherBuildInfo {
+  commit?: string;
+  builtAt?: string;
+}
+
 export interface LauncherLiveness {
   /**
    * - `live` a poll landed inside the stale window, so the request will be taken
@@ -74,6 +79,10 @@ export interface LauncherLiveness {
   state: 'live' | 'stale' | 'never' | 'unreadable';
   /** Ms since the last poll, or null when there is nothing to measure from. */
   seenMsAgo: number | null;
+  /** Build commit reported by the launcher's poll command (#210), when stamped. */
+  launcherCommit?: string;
+  /** Build ISO timestamp reported by the launcher's poll command (#210), when stamped. */
+  launcherBuiltAt?: string;
 }
 
 /** Base name of the launcher's liveness marker, kept beside the request log. */
@@ -244,10 +253,20 @@ export class TerminalRequestLog {
    * `writeFile` rather than append, so the file stays one small object instead
    * of growing without limit on a host that polls every few seconds forever.
    */
-  async recordPoll(cursor: number): Promise<void> {
+  async recordPoll(
+    cursor: number,
+    launcherBuild?: LauncherBuildInfo,
+  ): Promise<void> {
+    const commit = sanitizeLauncherCommit(launcherBuild?.commit);
+    const builtAt = sanitizeLauncherBuiltAt(launcherBuild?.builtAt);
     await writeFileAtomic(
       this.heartbeatPath,
-      JSON.stringify({ at: this.now(), cursor }),
+      JSON.stringify({
+        at: this.now(),
+        cursor,
+        ...(commit !== undefined ? { launcherCommit: commit } : {}),
+        ...(builtAt !== undefined ? { launcherBuiltAt: builtAt } : {}),
+      }),
       { mode: 0o600 },
     );
   }
@@ -260,20 +279,53 @@ export class TerminalRequestLog {
     } catch {
       return { state: 'never', seenMsAgo: null };
     }
-    const at = heartbeatAt(raw);
-    if (at === null) return { state: 'unreadable', seenMsAgo: null };
-    const ago = this.now() - at;
-    return { state: ago <= staleMs ? 'live' : 'stale', seenMsAgo: ago };
+    const hb = parseHeartbeat(raw);
+    if (hb === null) return { state: 'unreadable', seenMsAgo: null };
+    const ago = this.now() - hb.at;
+    return {
+      state: ago <= staleMs ? 'live' : 'stale',
+      seenMsAgo: ago,
+      ...(hb.launcherCommit !== undefined
+        ? { launcherCommit: hb.launcherCommit }
+        : {}),
+      ...(hb.launcherBuiltAt !== undefined
+        ? { launcherBuiltAt: hb.launcherBuiltAt }
+        : {}),
+    };
   }
 }
 
-/** Pull the timestamp out of a heartbeat, or null when it carries none. */
-function heartbeatAt(raw: string): number | null {
+function sanitizeLauncherCommit(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const trimmed = v.trim().toLowerCase();
+  return /^[0-9a-f]{7,40}$/.test(trimmed) ? trimmed : undefined;
+}
+
+function sanitizeLauncherBuiltAt(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const trimmed = v.trim();
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(trimmed)
+    ? trimmed
+    : undefined;
+}
+
+/** Pull the timestamp and optional build stamp (#210) out of a heartbeat. */
+function parseHeartbeat(raw: string): {
+  at: number;
+  launcherCommit?: string;
+  launcherBuiltAt?: string;
+} | null {
   try {
     const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object') return null;
-    const at = (parsed as Record<string, unknown>)['at'];
-    return typeof at === 'number' && Number.isFinite(at) ? at : null;
+    const rec = parsed as Record<string, unknown>;
+    const at = rec['at'];
+    if (typeof at !== 'number' || !Number.isFinite(at)) return null;
+    return {
+      at,
+      launcherCommit: sanitizeLauncherCommit(rec['launcherCommit']),
+      launcherBuiltAt: sanitizeLauncherBuiltAt(rec['launcherBuiltAt']),
+    };
   } catch {
     return null;
   }

@@ -96,6 +96,23 @@ describe('pendingCommand', () => {
     expect(pendingCommand(-5)).toContain('--after=0');
     expect(pendingCommand(3.7)).toContain('--after=3');
   });
+
+  it('carries the stamped commit and builtAt on the poll command and drops unsafe values (#210)', () => {
+    expect(
+      pendingCommand(4, {
+        commit: 'CFF0C1D61F',
+        builtAt: '2026-11-16T13:50:00.000Z',
+      }),
+    ).toBe(
+      'qwen-rc terminals pending --after=4 --launcher-commit=cff0c1d61f --launcher-built-at=2026-11-16T13:50:00.000Z --json',
+    );
+    expect(
+      pendingCommand(4, {
+        commit: 'bad; rm -rf /',
+        builtAt: 'not-an-iso-timestamp',
+      }),
+    ).toBe('qwen-rc terminals pending --after=4 --json');
+  });
 });
 
 describe('drainTerminalRequests', () => {

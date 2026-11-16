@@ -6,7 +6,7 @@
 
 import esbuild from 'esbuild';
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdirSync } from 'node:fs';
+import { cpSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -163,6 +163,11 @@ async function main() {
   });
 
   if (watch) {
+    mkdirSync(resolve(__dirname, 'dist'), { recursive: true });
+    writeFileSync(
+      resolve(__dirname, 'dist/build-stamp.json'),
+      `${JSON.stringify(stamp, null, 2)}\n`,
+    );
     await Promise.all([
       mainCtx.watch(),
       preloadCtx.watch(),
@@ -174,6 +179,10 @@ async function main() {
       preloadCtx.rebuild(),
       rendererCtx.rebuild(),
     ]);
+    writeFileSync(
+      resolve(__dirname, 'dist/build-stamp.json'),
+      `${JSON.stringify(stamp, null, 2)}\n`,
+    );
     await Promise.all([
       mainCtx.dispose(),
       preloadCtx.dispose(),

@@ -18,6 +18,7 @@
  * here, so they cannot drift from the gateway's.
  */
 import { execFile } from 'node:child_process';
+import { buildStamp, type BuildStamp } from './buildInfo.js';
 
 /** One queued request, as written by the gateway. */
 export interface TerminalRequest {
@@ -156,9 +157,36 @@ export function buildWtArgs(
   ];
 }
 
-/** Command that fetches the queue, from the launcher's own cursor onward. */
-export function pendingCommand(cursor: number): string {
-  return `qwen-rc terminals pending --after=${Math.max(0, Math.floor(cursor))} --json`;
+function safeCommitArg(commit: string): string | undefined {
+  return /^[0-9a-fA-F]{7,40}$/.test(commit) ? commit.toLowerCase() : undefined;
+}
+
+function safeBuiltAtArg(builtAt: string): string | undefined {
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(builtAt)
+    ? builtAt
+    : undefined;
+}
+
+/**
+ * Command that fetches the queue, from the launcher's own cursor onward, and
+ * reports this bundle's build stamp on the heartbeat when stamped (#210).
+ */
+export function pendingCommand(
+  cursor: number,
+  stamp: BuildStamp = buildStamp(),
+): string {
+  const parts = [
+    'qwen-rc',
+    'terminals',
+    'pending',
+    `--after=${Math.max(0, Math.floor(cursor))}`,
+  ];
+  const commit = safeCommitArg(stamp.commit);
+  const builtAt = safeBuiltAtArg(stamp.builtAt);
+  if (commit) parts.push(`--launcher-commit=${commit}`);
+  if (builtAt) parts.push(`--launcher-built-at=${builtAt}`);
+  parts.push('--json');
+  return parts.join(' ');
 }
 
 /**

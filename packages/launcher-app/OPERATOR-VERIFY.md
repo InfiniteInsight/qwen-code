@@ -10,7 +10,17 @@ human operator after building on Windows.
 
 Run `npm run build && npm start` (or `npm run start`) from
 `packages/launcher-app` on a Windows machine with WSL + a qwen-rc-provisioned
-distro, then confirm:
+distro. To build, stamp exe metadata (via pure-JS `resedit`, no `wine` or
+`rcedit`), back up any prior install, copy `release/win-unpacked` into
+`%LOCALAPPDATA%\Programs\QwenRemoteLauncher`, and relaunch from inside WSL in
+one command (#210):
+
+```bash
+npm --prefix packages/launcher-app run install:win
+npm --prefix packages/launcher-app run check:install:win
+```
+
+Then confirm:
 
 ## Task 3 slice (this task)
 
