@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import express from 'express';
+import { EventEmitter } from 'node:events';
+import express, { type Request, type Response } from 'express';
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
@@ -117,5 +118,87 @@ describe('workspace generation route', () => {
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('invalid_prompt');
     expect(generateWorkspaceContent).not.toHaveBeenCalled();
+  });
+
+  it('aborts generation and cleans up listeners without throwing when res emits error', async () => {
+    let streamSignal: AbortSignal | undefined;
+    let notifyStreamStarted: (() => void) | undefined;
+    const streamStarted = new Promise<void>((resolve) => {
+      notifyStreamStarted = resolve;
+    });
+    const bridge = {
+      async *generateWorkspaceContent(_prompt: string, signal: AbortSignal) {
+        streamSignal = signal;
+        yield {
+          type: 'started',
+          requestId: 'request-err',
+          model: 'qwen-plus',
+          modelSource: 'fast',
+        };
+        notifyStreamStarted?.();
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) {
+            resolve();
+            return;
+          }
+          signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+      },
+    } as unknown as AcpSessionBridge;
+
+    let handler:
+      | ((req: Request, res: Response) => Promise<void> | void)
+      | undefined;
+    const fakeApp = {
+      post(
+        _path: string,
+        _gate: unknown,
+        fn: (req: Request, res: Response) => Promise<void> | void,
+      ) {
+        handler = fn;
+      },
+    } as unknown as express.Express;
+    mountWorkspaceGenerationRoutes(fakeApp, {
+      bridge,
+      mutate: () => (_req, _res, next) => next(),
+      parseClientId: () => undefined,
+      safeBody: (req) => req.body as Record<string, unknown>,
+    });
+
+    const fakeRes = Object.assign(new EventEmitter(), {
+      destroyed: false,
+      status() {
+        return this;
+      },
+      setHeader() {
+        return this;
+      },
+      flushHeaders() {},
+      write() {
+        return true;
+      },
+      end() {
+        this.destroyed = true;
+      },
+    }) as unknown as Response & EventEmitter & { destroyed: boolean };
+
+    const runPromise = Promise.resolve(
+      handler!(
+        { body: { prompt: 'Say hello' } } as unknown as Request,
+        fakeRes,
+      ),
+    );
+    await streamStarted;
+    expect(streamSignal?.aborted).toBe(false);
+
+    expect(() => {
+      fakeRes.destroyed = true;
+      fakeRes.emit('error', new Error('EPIPE'));
+    }).not.toThrow();
+
+    expect(streamSignal?.aborted).toBe(true);
+    await expect(runPromise).resolves.toBeUndefined();
+    expect(fakeRes.listenerCount('error')).toBe(0);
+    expect(fakeRes.listenerCount('close')).toBe(0);
   });
 });

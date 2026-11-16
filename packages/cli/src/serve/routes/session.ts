@@ -5552,7 +5552,13 @@ export function registerSessionRoutes(
             sessionId,
             subagentRef,
           );
-          if (!resolved) {
+          const taskId = resolved?.taskId ?? subagentRef;
+          const result = await runtime.bridge.cancelSessionTask(
+            rootSessionId,
+            taskId,
+            'agent',
+          );
+          if (!resolved && !result.cancelled) {
             res.status(404).json({
               error: 'Subagent session not found',
               code: 'session_not_found',
@@ -5561,12 +5567,7 @@ export function registerSessionRoutes(
             });
             return;
           }
-          const result = await runtime.bridge.cancelSessionTask(
-            rootSessionId,
-            resolved.taskId,
-            'agent',
-          );
-          if (result.cancelled) {
+          if (result.cancelled && resolved) {
             virtualSubagentSessions.updateTargetStatus?.(
               runtime,
               resolved.sessionId,
@@ -7941,8 +7942,17 @@ export function registerSessionRoutes(
     mutate({ strict: true }),
     withOwnerMutableSession(
       'POST /session/:id/goal/clear',
-      async (_req, res, sessionId, runtime) => {
-        res.status(200).json(await runtime.bridge.clearSessionGoal(sessionId));
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.clearSessionGoal(
+              sessionId,
+              clientId !== undefined ? { clientId } : undefined,
+            ),
+          );
       },
     ),
   );
@@ -8606,6 +8616,7 @@ export function registerSessionRoutes(
           if (!completed) abort.abort();
         };
         res.once('close', onClose);
+        res.on('error', onClose);
 
         const stream = runtime.bridge.generateSessionContent(
           sessionId,
@@ -8628,13 +8639,13 @@ export function registerSessionRoutes(
           );
           return writeChain;
         };
-        await write(': connected\n\n');
         const heartbeat = setInterval(() => {
           void write(': heartbeat\n\n').catch(() => abort.abort());
         }, GENERATION_HEARTBEAT_MS);
         heartbeat.unref();
 
         try {
+          await write(': connected\n\n');
           for await (const event of stream) {
             await write(formatGenerationSse(event.type, event));
           }
@@ -8657,6 +8668,7 @@ export function registerSessionRoutes(
           completed = true;
           clearInterval(heartbeat);
           res.off('close', onClose);
+          res.off('error', onClose);
           if (!res.destroyed) res.end();
         }
       },
@@ -10196,6 +10208,8 @@ export function registerSessionRoutes(
           });
           return;
         }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
         const response = await runtime.bridge.setSessionConfigOption(
           sessionId,
           {
@@ -10210,6 +10224,7 @@ export function registerSessionRoutes(
                 }
               : {}),
           },
+          clientId !== undefined ? { clientId } : undefined,
         );
         res.status(200).json({
           configOptions: response.configOptions,

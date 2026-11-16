@@ -55,6 +55,7 @@ export function mountWorkspaceGenerationRoutes(
       if (!completed) abort.abort();
     };
     res.once('close', onClose);
+    res.on('error', onClose);
 
     const stream = deps.bridge.generateWorkspaceContent(
       prompt.trim(),
@@ -73,13 +74,13 @@ export function mountWorkspaceGenerationRoutes(
       writeChain = writeChain.then(() => writeGenerationSseChunk(res, chunk));
       return writeChain;
     };
-    await write(': connected\n\n');
     const heartbeat = setInterval(() => {
       void write(': heartbeat\n\n').catch(() => abort.abort());
     }, GENERATION_HEARTBEAT_MS);
     heartbeat.unref();
 
     try {
+      await write(': connected\n\n');
       for await (const event of stream) {
         await write(formatGenerationSse(event.type, event));
       }
@@ -104,6 +105,7 @@ export function mountWorkspaceGenerationRoutes(
       completed = true;
       clearInterval(heartbeat);
       res.off('close', onClose);
+      res.off('error', onClose);
       if (!res.destroyed) res.end();
     }
   });

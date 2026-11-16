@@ -457,4 +457,84 @@ describe('createQwenAcpAdapter', () => {
     controller.abort();
     await expect(result).resolves.toMatchObject({ status: 'cancelled' });
   });
+
+  it('unblocks permissionChain without redundant withdraw when permission_resolved arrives externally', async () => {
+    const { bridge, feed, turn, permissionEvent } = thinkingBridge();
+    const adapter = createQwenAcpAdapter({
+      bridge: bridge as unknown as QwenAcpAdapterBridge,
+      workspaceCwd: WS,
+      agentId: AGENT_ID,
+      idleCloseMs: 60_000,
+      cancelSettleMs: 50,
+      sessionExists: async () => true,
+    });
+    const controller = new AbortController();
+    const shown: string[] = [];
+    const pending = new Map<
+      string,
+      { resolve: (optionId: string) => void; reject: (err: Error) => void }
+    >();
+    const result = adapter.runTurn({
+      prompt: 'go',
+      nativeSessionId: SESSION_ID,
+      cwd: WS,
+      signal: controller.signal,
+      onEvent: (event) => {
+        if (event.type === 'permission_request') {
+          shown.push(event.prompt.requestId);
+        }
+        if (event.type === 'permission_resolved') {
+          const entry = pending.get(event.requestId);
+          pending.delete(event.requestId);
+          entry?.reject(new Error('permission resolved'));
+        }
+      },
+      awaitPermission: (prompt) =>
+        new Promise<string>((resolve, reject) => {
+          pending.set(prompt.requestId, { resolve, reject });
+        }),
+    });
+
+    await vi.waitFor(() => expect(turn.promptId).toBeDefined());
+    feed.push(permissionEvent('p1'));
+    feed.push(permissionEvent('p2'));
+    await vi.waitFor(() => expect(shown).toEqual(['p1']));
+
+    // External resolution settles p1; p2 must immediately advance without
+    // emitting a cancelled withdraw for p1.
+    feed.push({
+      type: 'permission_resolved',
+      promptId: turn.promptId,
+      data: { requestId: 'p1' },
+    });
+    await vi.waitFor(() => expect(shown).toEqual(['p1', 'p2']));
+    expect(bridge.respondToSessionPermission).not.toHaveBeenCalled();
+
+    // Also verify retry-loop exit when respondToSessionPermission returns false
+    // because p2 was concurrently settled elsewhere.
+    bridge.respondToSessionPermission.mockImplementationOnce(() => {
+      feed.push({
+        type: 'permission_resolved',
+        promptId: turn.promptId,
+        data: { requestId: 'p2' },
+      });
+      return false;
+    });
+    feed.push(permissionEvent('p3'));
+    pending.get('p2')!.resolve('yes');
+
+    await vi.waitFor(() => expect(shown).toEqual(['p1', 'p2', 'p3']));
+    expect(bridge.respondToSessionPermission).toHaveBeenCalledTimes(1);
+    expect(bridge.respondToSessionPermission).toHaveBeenCalledWith(
+      SESSION_ID,
+      'p2',
+      { outcome: { outcome: 'selected', optionId: 'yes' } },
+      undefined,
+    );
+
+    pending.get('p3')!.resolve('yes');
+    turn.state = 'completed';
+    controller.abort();
+    await result;
+  });
 });

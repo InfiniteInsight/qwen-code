@@ -402,7 +402,9 @@ export function createQwenAcpAdapter(
                   try {
                     optionId = await input.awaitPermission(prompt);
                   } catch {
-                    withdrawPermission(prompt.requestId);
+                    if (!settledElsewhere.delete(prompt.requestId)) {
+                      withdrawPermission(prompt.requestId);
+                    }
                     return;
                   }
                   let accepted = false;
@@ -417,6 +419,7 @@ export function createQwenAcpAdapter(
                     accepted = false;
                   }
                   if (accepted) return;
+                  if (settledElsewhere.delete(prompt.requestId)) return;
                   if (input.signal.aborted) {
                     withdrawPermission(prompt.requestId);
                     return;

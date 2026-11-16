@@ -3937,4 +3937,131 @@ describe('turn attribution preservation (DAEMON-007)', () => {
       'reply 1 keep',
     ]);
   });
+
+  it('fully resets replay window and turn state when targetTurnIndex is 0 after eviction', () => {
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 900 });
+    // Turn 0 (evicted by maxReplayBytes)
+    for (const ev of [
+      makeUserMessage(1, 'turn 0 user ' + 'x'.repeat(250)),
+      makeTextChunk(2, 'turn 0 reply ' + 'y'.repeat(250)),
+      makeTurnComplete(3),
+      makeUserMessage(4, 'turn 1 retained'),
+      makeTextChunk(5, 'reply 1 retained'),
+      makeTurnComplete(6),
+    ]) {
+      engine.ingest(ev);
+    }
+
+    expect(engine.snapshot().compactedTurns[0]?.type).toBe('history_truncated');
+
+    engine.ingest({
+      id: 7,
+      v: 1,
+      type: 'session_rewound',
+      data: { targetTurnIndex: 0, removedTurnCount: 2 },
+    });
+
+    expect(engine.snapshot().compactedTurns).toEqual([]);
+    expect(engine.snapshot().liveJournal).toEqual([]);
+
+    // Subsequent turns start cleanly from turn index 0 again.
+    for (const ev of [
+      makeUserMessage(8, 'fresh turn 0'),
+      makeTextChunk(9, 'fresh reply 0'),
+      makeTurnComplete(10),
+      makeUserMessage(11, 'fresh turn 1'),
+      makeTextChunk(12, 'fresh reply 1'),
+      makeTurnComplete(13),
+    ]) {
+      engine.ingest(ev);
+    }
+
+    engine.ingest({
+      id: 14,
+      v: 1,
+      type: 'session_rewound',
+      data: { targetTurnIndex: 1, removedTurnCount: 1 },
+    });
+
+    const afterSecondRewind = engine.snapshot();
+    expect(afterSecondRewind.compactedTurns[0]?.type).not.toBe(
+      'history_truncated',
+    );
+    expect(extractTexts(afterSecondRewind.compactedTurns)).toEqual([
+      'fresh turn 0',
+      'fresh reply 0',
+    ]);
+  });
+
+  it('adjusts evictedUserTurns and truncatedTurns when 0 < targetTurnIndex < evictedUserTurns', () => {
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 900 });
+    // Ingest 4 turns (indices 0..3) where turns 0..2 are evicted and turn 3 is retained.
+    for (const ev of [
+      makeUserMessage(1, 'turn 0 user ' + 'a'.repeat(250)),
+      makeTextChunk(2, 'turn 0 reply ' + 'b'.repeat(250)),
+      makeTurnComplete(3),
+      makeUserMessage(4, 'turn 1 user ' + 'c'.repeat(250)),
+      makeTextChunk(5, 'turn 1 reply ' + 'd'.repeat(250)),
+      makeTurnComplete(6),
+      makeUserMessage(7, 'turn 2 user ' + 'e'.repeat(250)),
+      makeTextChunk(8, 'turn 2 reply ' + 'f'.repeat(250)),
+      makeTurnComplete(9),
+      makeUserMessage(10, 'turn 3 retained'),
+      makeTextChunk(11, 'reply 3 retained'),
+      makeTurnComplete(12),
+    ]) {
+      engine.ingest(ev);
+    }
+
+    const beforeRewind = engine.snapshot();
+    expect(beforeRewind.compactedTurns[0]?.type).toBe('history_truncated');
+    expect(beforeRewind.compactedTurns[0]?.data).toMatchObject({
+      truncatedTurns: 3,
+    });
+
+    // Rewind to turn index 1 (< evictedUserTurns === 3): keeps only turn 0 (evicted).
+    engine.ingest({
+      id: 13,
+      v: 1,
+      type: 'session_rewound',
+      data: { targetTurnIndex: 1, removedTurnCount: 3 },
+    });
+
+    const rewoundSnap = engine.snapshot();
+    expect(rewoundSnap.compactedTurns).toHaveLength(1);
+    expect(rewoundSnap.compactedTurns[0]?.type).toBe('history_truncated');
+    expect(rewoundSnap.compactedTurns[0]?.data).toMatchObject({
+      truncatedTurns: 1,
+    });
+
+    // Subsequent turns take indices 1 and 2, so rewinding to targetTurnIndex=2
+    // preserves the new turn 1 and drops the new turn 2.
+    for (const ev of [
+      makeUserMessage(14, 'new turn 1 keep'),
+      makeTextChunk(15, 'new reply 1 keep'),
+      makeTurnComplete(16),
+      makeUserMessage(17, 'new turn 2 drop'),
+      makeTextChunk(18, 'new reply 2 drop'),
+      makeTurnComplete(19),
+    ]) {
+      engine.ingest(ev);
+    }
+
+    engine.ingest({
+      id: 20,
+      v: 1,
+      type: 'session_rewound',
+      data: { targetTurnIndex: 2, removedTurnCount: 1 },
+    });
+
+    const finalSnap = engine.snapshot();
+    expect(finalSnap.compactedTurns[0]?.type).toBe('history_truncated');
+    expect(finalSnap.compactedTurns[0]?.data).toMatchObject({
+      truncatedTurns: 1,
+    });
+    expect(extractTexts(finalSnap.compactedTurns)).toEqual([
+      'new turn 1 keep',
+      'new reply 1 keep',
+    ]);
+  });
 });

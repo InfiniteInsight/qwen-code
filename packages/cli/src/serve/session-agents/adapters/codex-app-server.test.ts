@@ -723,6 +723,42 @@ describe('codex-app-server adapter', () => {
     expect(spawns[0]!.fake.signalCode).toBe('SIGTERM');
   });
 
+  it('bounds stop() stdout drain when stdout stays open after process exit', async () => {
+    const { spawn, spawns } = harness([
+      codexScript({
+        onTurn: (request, fake) => {
+          fake.kill = (signal?: NodeJS.Signals | number) => {
+            if (fake.exitCode !== null || fake.signalCode !== null) return true;
+            fake.signalCode = (signal as NodeJS.Signals) ?? 'SIGTERM';
+            // Simulate an inherited stdout pipe kept open by a grandchild process.
+            fake.stderr.end();
+            fake.emit('exit', null, fake.signalCode);
+            return true;
+          };
+          fake.reply(request, { turn: { id: 'turn_1' } });
+          finishTurn(fake, 'th_new', 'done');
+          fake.notify('turn/completed', {
+            threadId: 'th_new',
+            turn: { id: 'turn_1', status: 'completed' },
+          });
+        },
+      }),
+    ]);
+    const startedAt = Date.now();
+    const result = await createCodexAppServerAdapter({
+      spawn,
+      env: {},
+      timeouts: { terminateGraceMs: 10 },
+    }).runTurn(turnInput().input);
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(result.status).toBe('completed');
+    expect(result.outputText).toBe('done');
+    expect(spawns[0]!.fake.stdout.destroyed).toBe(true);
+    expect(elapsedMs).toBeGreaterThanOrEqual(200);
+    expect(elapsedMs).toBeLessThan(2_000);
+  });
+
   it('adds the session_send MCP server with -c overrides', () => {
     expect(
       buildCodexArgs({

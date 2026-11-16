@@ -14318,7 +14318,13 @@ export function createSessionControlPlane(
       }
     },
 
-    async clearSessionGoal(sessionId) {
+    async clearSessionGoal(sessionId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.harness.isDying)
+        throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
       return requestSessionStatus<{ cleared: boolean; condition?: string }>(
         sessionId,
         SERVE_CONTROL_EXT_METHODS.sessionGoalClear,
@@ -14732,12 +14738,13 @@ export function createSessionControlPlane(
       return response;
     },
 
-    async setSessionConfigOption(sessionId, req) {
+    async setSessionConfigOption(sessionId, req, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const info = channelInfoForEntry(entry);
       if (!info || info.harness.isDying)
         throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
       const normalized: SetSessionConfigOptionRequest = { ...req, sessionId };
       const work = entry.modelChangeQueue.then(() =>
         raceTransportClosed(

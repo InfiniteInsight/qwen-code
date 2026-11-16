@@ -833,6 +833,16 @@ export function createCodexAppServerAdapter(
       // Never leave codex waiting on a held approval.
       for (const key of [...heldApprovals.keys()]) answer(key, undefined);
       await terminateAgentProcess(child, timeouts.terminateGraceMs);
+      let drainTimer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        reading,
+        new Promise<void>((resolve) => {
+          drainTimer = setTimeout(resolve, 250);
+          drainTimer.unref?.();
+        }),
+      ]);
+      if (drainTimer) clearTimeout(drainTimer);
+      child.stdout?.destroy();
       await reading;
     };
     const stderrSuffix = () => {
