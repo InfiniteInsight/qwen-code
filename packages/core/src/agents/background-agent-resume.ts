@@ -552,6 +552,7 @@ export class BackgroundAgentResumeService {
       throw error;
     }
 
+    const registry = this.config.getBackgroundTaskRegistry();
     const sidecars: RecoverableAgentSidecar[] = [];
     for (const fileName of files) {
       if (!fileName.endsWith(META_FILE_SUFFIX)) continue;
@@ -565,8 +566,16 @@ export class BackgroundAgentResumeService {
           meta.parentSessionId !== sessionId ||
           path.basename(
             getAgentMetaPath(projectDir, sessionId, meta.agentId),
-          ) !== fileName ||
-          meta.abandonedAt !== undefined ||
+          ) !== fileName
+        ) {
+          continue;
+        }
+        if (meta.abandonedAt !== undefined) {
+          registry.recordAbandoned(meta.agentId);
+          if (meta.toolUseId) registry.recordAbandoned(meta.toolUseId);
+          continue;
+        }
+        if (
           (meta.status !== 'running' &&
             meta.status !== 'paused' &&
             meta.status !== 'completed') ||
@@ -600,7 +609,6 @@ export class BackgroundAgentResumeService {
       return a.fileName.localeCompare(b.fileName);
     });
 
-    const registry = this.config.getBackgroundTaskRegistry();
     const recovered: AgentTask[] = [];
     let completedCount = registry
       .getAll()
@@ -1170,6 +1178,14 @@ export class BackgroundAgentResumeService {
       }
     }
 
+    const registry = this.config.getBackgroundTaskRegistry();
+    if (matchedMeta?.abandonedAt !== undefined) {
+      registry.recordAbandoned(matchedMeta.agentId);
+      if (matchedMeta.toolUseId) {
+        registry.recordAbandoned(matchedMeta.toolUseId);
+      }
+      return undefined;
+    }
     if (
       !matchedMetaPath ||
       !matchedMeta ||
@@ -1178,7 +1194,6 @@ export class BackgroundAgentResumeService {
       return undefined;
     }
 
-    const registry = this.config.getBackgroundTaskRegistry();
     const existing = registry.get(matchedMeta.agentId);
     if (existing) {
       return existing;
@@ -2211,6 +2226,9 @@ export class BackgroundAgentResumeService {
       lastError: undefined,
       abandonedAt: now,
     });
+    const registry = this.config.getBackgroundTaskRegistry();
+    registry.recordAbandoned(agentId);
+    if (meta.toolUseId) registry.recordAbandoned(meta.toolUseId);
     return true;
   }
 

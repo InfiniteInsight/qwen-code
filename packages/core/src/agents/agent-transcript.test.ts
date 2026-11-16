@@ -1039,5 +1039,58 @@ describe('agent-transcript', () => {
           .map((node) => node.rootAgentId),
       ).toEqual(['cycle-a', 'cycle-a', 'cycle-a']);
     });
+
+    it('skips abandoned sidecars without warning and warns on malformed abandonedAt (#261)', async () => {
+      const sessionId = 'trace-abandoned-session';
+      writeAgentMeta(getAgentMetaPath(projectDir, sessionId, 'kept-agent'), {
+        agentId: 'kept-agent',
+        agentType: 'coder',
+        description: 'active trace node',
+        parentSessionId: sessionId,
+        parentAgentId: null,
+        createdAt: '2026-01-01T00:00:01.000Z',
+        status: 'paused',
+      });
+      writeAgentMeta(
+        getAgentMetaPath(projectDir, sessionId, 'abandoned-agent'),
+        {
+          agentId: 'abandoned-agent',
+          agentType: 'coder',
+          description: 'discarded node',
+          parentSessionId: sessionId,
+          parentAgentId: null,
+          createdAt: '2026-01-01T00:00:02.000Z',
+          status: 'cancelled',
+          abandonedAt: '2026-01-01T00:05:00.000Z',
+        },
+      );
+      fs.writeFileSync(
+        getAgentMetaPath(projectDir, sessionId, 'bad-abandoned'),
+        JSON.stringify({
+          agentId: 'bad-abandoned',
+          agentType: 'coder',
+          description: 'corrupt abandonedAt',
+          parentSessionId: sessionId,
+          parentAgentId: null,
+          createdAt: '2026-01-01T00:00:03.000Z',
+          status: 'cancelled',
+          abandonedAt: 'not-a-timestamp',
+        }),
+      );
+
+      const trace = await readAgentTrace(projectDir, sessionId);
+      expect(trace.nodes.map((node) => node.agentId)).toEqual(['kept-agent']);
+      expect(trace.rootAgentIds).toEqual(['kept-agent']);
+      expect(trace.warnings).toHaveLength(1);
+      expect(trace.warnings[0]).toContain('bad-abandoned');
+
+      const specificAbandoned = await readAgentTrace(
+        projectDir,
+        sessionId,
+        'abandoned-agent',
+      );
+      expect(specificAbandoned.nodes).toEqual([]);
+      expect(specificAbandoned.warnings).toHaveLength(1);
+    });
   });
 });

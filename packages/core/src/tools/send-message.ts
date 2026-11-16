@@ -235,6 +235,16 @@ class SendMessageInvocation extends BaseToolInvocation<
       const entry = registry.get(this.params.task_id);
 
       if (!entry) {
+        if (registry.isAbandoned(this.params.task_id)) {
+          return {
+            llmContent: `Error: Background task "${this.params.task_id}" was abandoned by the user and can no longer receive messages.`,
+            returnDisplay: 'Task was abandoned by the user.',
+            error: {
+              message: `Task abandoned by the user: ${this.params.task_id}`,
+              type: ToolErrorType.SEND_MESSAGE_NOT_RUNNING,
+            },
+          };
+        }
         const teamFile = this.config.getTeamManager()?.getTeamFile();
         const teammate = teamFile
           ? findMemberByName(teamFile.members, this.params.task_id)

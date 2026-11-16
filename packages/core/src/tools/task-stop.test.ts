@@ -120,6 +120,17 @@ describe('TaskStopTool', () => {
     expect(result.llmContent).toContain('No background task found');
   });
 
+  it('reports abandoned by the user when stopping an abandoned agent id (#261)', async () => {
+    registerAgent({ status: 'paused' });
+    registry.abandon('agent-1');
+
+    const result = await stop('agent-1');
+
+    expect(result.error?.type).toBe(ToolErrorType.TASK_STOP_NOT_RUNNING);
+    expect(result.llmContent).toContain('abandoned by the user');
+    expect(result.llmContent).not.toContain('No background task found');
+  });
+
   it('returns error for non-running task', async () => {
     registerAgent({});
     registry.complete('agent-1', 'done');

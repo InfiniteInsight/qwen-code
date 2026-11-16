@@ -204,6 +204,17 @@ class TaskStopInvocation extends BaseToolInvocation<
       };
     }
 
+    if (agentRegistry.isAbandoned(taskId)) {
+      return {
+        llmContent: `Error: Background task "${taskId}" was abandoned by the user.`,
+        returnDisplay: 'Task was abandoned by the user.',
+        error: {
+          message: `Task abandoned by the user: ${taskId}`,
+          type: ToolErrorType.TASK_STOP_NOT_RUNNING,
+        },
+      };
+    }
+
     return {
       llmContent: `Error: No background task found with ID "${taskId}".`,
       returnDisplay: 'Task not found.',

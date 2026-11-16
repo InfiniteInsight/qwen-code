@@ -658,6 +658,10 @@ export const FOREGROUND_MODEL_SLOT_WAIT_CANCELLED =
 export class BackgroundTaskRegistry {
   private readonly agents = new Map<string, AgentTask>();
   private readonly residentAgents = new Map<string, ResidentBackgroundAgent>();
+  // Bounded set of agent IDs explicitly abandoned by the user (#261), so
+  // send_message and task_stop can say "abandoned by the user" (#211) instead
+  // of "No background task found".
+  private readonly abandonedIds = new Set<string>();
   private readonly activeTurnPromises = new Map<
     string,
     { abortController: AbortController; done: Promise<void> }
@@ -958,6 +962,8 @@ export class BackgroundTaskRegistry {
     // consumers see updates the registry makes without an extra `get()`.
     const entry = registration as AgentTask;
     entry.id = registration.agentId;
+    this.abandonedIds.delete(entry.id);
+    if (entry.toolUseId) this.abandonedIds.delete(entry.toolUseId);
     entry.kind = 'agent';
     entry.outputOffset = options.preserveNotificationState
       ? ((registration as AgentTask).outputOffset ?? 0)
@@ -1382,10 +1388,27 @@ export class BackgroundTaskRegistry {
     // Delete before emitting, as `unregisterForeground` does, so a callback
     // re-pulling `getAll()` no longer sees the row; wake any message waiter
     // so a loop parked on this id sees it gone and exits.
+    this.recordAbandoned(agentId);
+    if (entry.toolUseId) this.recordAbandoned(entry.toolUseId);
     this.deleteAgent(agentId);
     this.wakeMessageWaiters(agentId);
     this.emitStatusChange(entry);
     this.drainQueues();
+  }
+
+  recordAbandoned(agentId: string): void {
+    if (!agentId) return;
+    if (this.abandonedIds.has(agentId)) {
+      this.abandonedIds.delete(agentId);
+    } else if (this.abandonedIds.size >= 512) {
+      const oldest = this.abandonedIds.values().next().value;
+      if (oldest !== undefined) this.abandonedIds.delete(oldest);
+    }
+    this.abandonedIds.add(agentId);
+  }
+
+  isAbandoned(agentId: string): boolean {
+    return this.abandonedIds.has(agentId);
   }
 
   // Emit the terminal cancelled notification once the agent's natural
@@ -2253,6 +2276,7 @@ export class BackgroundTaskRegistry {
     this.rejectWaitQueue();
     this.releaseAllFinishingWaiters(false);
     this.agents.clear();
+    this.abandonedIds.clear();
     this.disposeAllResidentAgents();
     this.emitStatusChange(firstEntry);
   }

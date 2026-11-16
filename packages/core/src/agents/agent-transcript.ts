@@ -289,12 +289,18 @@ export async function readAgentTrace(
                 !Number.isFinite(Date.parse(parsed.lastUpdatedAt)))) ||
             (parsed.lastError !== undefined &&
               typeof parsed.lastError !== 'string') ||
+            (parsed.abandonedAt !== undefined &&
+              (typeof parsed.abandonedAt !== 'string' ||
+                !Number.isFinite(Date.parse(parsed.abandonedAt)))) ||
             parsed.parentSessionId !== sessionId ||
             path.basename(
               getAgentMetaPath(projectDir, sessionId, parsed.agentId),
             ) !== fileName
           ) {
             throw new Error('invalid agent metadata identity');
+          }
+          if (parsed.abandonedAt !== undefined) {
+            return;
           }
           metas.set(parsed.agentId, parsed);
         } catch (error) {

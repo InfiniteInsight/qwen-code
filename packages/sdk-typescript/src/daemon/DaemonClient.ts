@@ -473,6 +473,7 @@ function formatAttachmentLimit(bytes: number): string {
 const DEFAULT_PROVIDER_MUTATION_TIMEOUT_MS = 0;
 const DEFAULT_SESSION_RESTORE_TIMEOUT_MS = 70_000;
 const SESSION_RESTORE_TIMEOUT_HEADROOM_MS = 10_000;
+const SUBAGENT_RESUME_DEFAULT_TIMEOUT_MS = 65_000;
 const VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS = 65_000;
 const GITHUB_SETUP_DEFAULT_TIMEOUT_MS = 90_000;
 const CHANNEL_NOTIFY_DEFAULT_TIMEOUT_MS = 35_000;
@@ -3737,7 +3738,15 @@ export class DaemonClient {
     }>(
       `/session/${urlEncode(sessionId)}/subagents/${urlEncode(subagentRef)}/message`,
       'POST /session/:id/subagents/:subagentRef/message',
-      { clientId, mode: 'rest', method: 'POST', body: { message } },
+      {
+        clientId,
+        mode: 'rest',
+        method: 'POST',
+        body: { message },
+        timeoutMs: this.hasExplicitFetchTimeout
+          ? undefined
+          : SUBAGENT_RESUME_DEFAULT_TIMEOUT_MS,
+      },
     );
   }
 
@@ -3780,6 +3789,9 @@ export class DaemonClient {
         mode: 'rest',
         method: 'POST',
         body: message === undefined ? {} : { message },
+        timeoutMs: this.hasExplicitFetchTimeout
+          ? undefined
+          : SUBAGENT_RESUME_DEFAULT_TIMEOUT_MS,
       },
     );
   }

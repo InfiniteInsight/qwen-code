@@ -334,6 +334,17 @@ describe('SendMessageTool — background-task mode', () => {
     expect(pending()).toEqual(['do more work']);
   });
 
+  it('reports abandoned by the user when messaging an abandoned agent id (#261)', async () => {
+    register({ status: 'paused' });
+    registry.abandon('agent-1');
+
+    const result = await send('are you still there?');
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
+    expect(result.llmContent).toContain('abandoned by the user');
+    expect(result.llmContent).not.toContain('No background task found');
+  });
+
   it('queues multiple messages in order', async () => {
     register();
 
