@@ -34299,6 +34299,126 @@ PAGE_SCENARIOS.push({
       return `a moved-repo failure gave the rename hint and a plain one did not; a gateway without githubClone hides Clone from GitHub; a running clone showed its last progress line and said it keeps running on the host; a failed one said "The clone failed", git's exit code 128 and its last line (fatal: harness clone failed), started nothing, offered a 44px Try again that kept the repo and folder, and no fake token was anywhere in the page; a 404 job_not_found said the gateway restarted, the outcome is unknown and named the folder; one loop followed a running clone at about one check a second, and leaving the screen mid-clone stopped it and said the clone keeps running on the host; with no home reported the page asked the folder browser for it`;
     },
   });
+
+  // #263: cloned repo's .qwen/agents, .qwen/skills, .qwen/commands content + liveVoice/artifact.oss settings
+  PAGE_SCENARIOS.push({
+    name: 'P599 cloned repo findings show parsed .qwen agent modes/MCP/hooks, skill allowedTools/hooks, command injections, liveVoice and artifact.oss (#263)',
+    waitView: false,
+    stub: {
+      github: {
+        ghLogins: ['octo-ext'],
+        repos: { 'gh:octo-ext': [ghcRepo('octo-ext/with-agents')] },
+        settings: JSON.stringify({
+          experimental: {
+            liveVoice: {
+              endpoint: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+              apiKey: '$DASHSCOPE_API_KEY',
+            },
+          },
+          artifact: {
+            oss: {
+              bucket: 'ext-bucket',
+              endpoint: 'oss-cn-hangzhou.aliyuncs.com',
+            },
+          },
+        }),
+        files: {
+          '.qwen/agents/reviewer.md': [
+            '---',
+            'name: fast-reviewer',
+            'approvalMode: yolo',
+            'mcpServers:',
+            '  audit:',
+            '    command: node',
+            '    args: ["./audit-mcp.js"]',
+            'hooks:',
+            '  PreToolUse:',
+            '    - hooks:',
+            '        - type: command',
+            '          command: ./scripts/agent-guard.sh',
+            '---',
+            'PRIVATE_AGENT_BODY',
+          ].join('\n'),
+          '.qwen/skills/deploy/SKILL.md': [
+            '---',
+            'name: auto-deploy',
+            'allowedTools:',
+            '  - Bash(git *)',
+            'hooks:',
+            '  Stop:',
+            '    - hooks:',
+            '        - type: command',
+            '          command: ./scripts/post-skill.sh',
+            '---',
+            'PRIVATE_SKILL_BODY',
+          ].join('\n'),
+          '.qwen/commands/git/ship.toml':
+            'prompt = "Run !{git push origin HEAD} PRIVATE_CMD_BODY"\n',
+        },
+      },
+    },
+    run: async ({ page }) => {
+      const dest = join(ghcProjects(), 'with-agents');
+      rmSync(dest, { recursive: true, force: true });
+      const sessions = ghcSessions(page);
+      await ghcOpen(page);
+      await ghcWaitRows(page, 1);
+      await ghcPick(page, 'octo-ext/with-agents');
+      await page.click('#gh-go');
+      await page.waitForSelector('#gh-ask', { state: 'visible', timeout: 15_000 });
+      await page.waitForTimeout(300);
+      expect(sessions.length === 0, 'started conversation before asking');
+
+      const cats = await ghcFindings(page);
+      const by = new Map(cats.map((c) => [c.heading, c.items]));
+      const creds = by.get('Credentials and model endpoints') ?? [];
+      const sinks = by.get('Data sent elsewhere') ?? [];
+      const exts = by.get('Project agents, skills and commands') ?? [];
+
+      expect(
+        creds.length === 2 &&
+          creds[0]!.name === 'experimental.liveVoice.endpoint' &&
+          creds[1]!.name === 'experimental.liveVoice.apiKey' &&
+          creds[1]!.value.includes('expands $DASHSCOPE_API_KEY'),
+        `unexpected credentials findings: ${JSON.stringify(creds)}`,
+      );
+      expect(
+        sinks.length === 2 &&
+          sinks[0]!.name === 'artifact.oss.bucket' &&
+          sinks[0]!.value === 'ext-bucket' &&
+          sinks[1]!.name === 'artifact.oss.endpoint' &&
+          sinks[1]!.value === 'oss-cn-hangzhou.aliyuncs.com',
+        `unexpected dataSinks findings: ${JSON.stringify(sinks)}`,
+      );
+      expect(
+        exts.length === 3 &&
+          exts[0]!.name === '.qwen/agents/reviewer.md' &&
+          exts[0]!.value.includes('agent fast-reviewer') &&
+          exts[0]!.value.includes('approvalMode: yolo') &&
+          exts[0]!.value.includes('mcpServers: audit (node ./audit-mcp.js)') &&
+          exts[0]!.value.includes('hooks: PreToolUse: ./scripts/agent-guard.sh') &&
+          exts[1]!.name === '.qwen/skills/deploy/SKILL.md' &&
+          exts[1]!.value.includes('skill auto-deploy') &&
+          exts[1]!.value.includes('allowedTools: Bash(git *)') &&
+          exts[1]!.value.includes('hooks: Stop: ./scripts/post-skill.sh') &&
+          exts[2]!.name === '.qwen/commands/git/ship.toml' &&
+          exts[2]!.value.includes('command /git:ship') &&
+          exts[2]!.value.includes('runs !{git push origin HEAD}'),
+        `unexpected projectExtensions findings: ${JSON.stringify(exts)}`,
+      );
+
+      const askText = await ghcSay(page, 'gh-ask');
+      expect(
+        !askText.includes('PRIVATE_AGENT_BODY') &&
+          !askText.includes('PRIVATE_SKILL_BODY') &&
+          !askText.includes('PRIVATE_CMD_BODY'),
+        'leaked private markdown/command prose into clone confirmation dialog',
+      );
+
+      await page.click('#gh-cancel');
+      return `rendered 2 liveVoice credential rows, 2 artifact.oss data-sink rows, and 3 parsed project extension rows without leaking prompt bodies`;
+    },
+  });
 }
 
 // #267, #260: Subagent Pause, Resume, and Abandon controls in #agents-sheet.
