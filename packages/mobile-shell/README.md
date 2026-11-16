@@ -1,6 +1,6 @@
 # Qwen Code Mobile Shell (Android)
 
-A development WebView shell around the daemon-served Web Shell. Native connection profiles use a Keystore-encrypted vault and isolated browser profiles. Per-device daemon credential revocation, background SSE and native notifications remain future work. See the [connection-profile design and reviewer test plan](../../docs/design/mobile-connection-profiles.md).
+An Android WebView shell around both the daemon-served Web Shell and the `rc-gateway` Remote Control UI (`/ui/`). Native connection profiles use a Keystore-encrypted vault and isolated browser profiles. On Remote Control (`/ui/`) connections, `MainActivity` injects the `window.qwen` (`QwenBridge` v1) bridge at document-start via `WebViewCompat`, keeping bearer tokens in Android Keystore + memory (never WebView `localStorage`/`IndexedDB`), handles `qwen-rc://` deep links (`session/<id>`, `permission/<id>`, `pair?code=...&url=...` with TLS SHA-256 fingerprint confirmation), and runs `BackgroundSseService` (`foregroundServiceType="dataSync"`) to keep the active `/session/:id/events` SSE stream alive with the screen off and post native Android notifications on approval prompts, turn completions, and stream errors. See the [connection-profile design and reviewer test plan](../../docs/design/mobile-connection-profiles.md).
 
 ## Build
 

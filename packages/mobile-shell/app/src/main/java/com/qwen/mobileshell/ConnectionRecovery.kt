@@ -18,6 +18,9 @@ internal data class ConnectionRecovery(
         putString("session", navigation.session)
         putString("workspace", navigation.workspace)
         putString("context", navigation.context)
+        putBoolean("ui", navigation.ui)
+        putString("event", navigation.event)
+        putString("permission", navigation.permission)
         putBoolean("retry", retryRequired)
     }
 
@@ -28,7 +31,14 @@ internal data class ConnectionRecovery(
             if (bundle == null) return null
             val profileId = bundle.getString("profile")?.takeIf { uuid.matches(it) } ?: return null
             val browserId = bundle.getString("browser")?.takeIf { uuid.matches(it) } ?: return null
-            val navigation = ConnectionNavigation.fromFields(bundle.getString("session"), bundle.getString("workspace"), bundle.getString("context")) ?: return null
+            val navigation = ConnectionNavigation.fromFields(
+                session = bundle.getString("session"),
+                workspace = bundle.getString("workspace"),
+                context = bundle.getString("context"),
+                ui = bundle.getBoolean("ui", false),
+                event = bundle.getString("event"),
+                permission = bundle.getString("permission"),
+            ) ?: return null
             return ConnectionRecovery(profileId, browserId, navigation, bundle.getBoolean("retry"))
         }
     }

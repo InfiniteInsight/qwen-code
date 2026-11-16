@@ -37632,6 +37632,148 @@ PAGE_SCENARIOS.push({
   },
 });
 
+// #183: QwenBridge (`window.qwen`) web fallback vs native shell injection
+// (keystore-only token handoff, >=44px Scan QR pairing, watched-session
+// background-SSE sync, and minShellVersion update gate).
+PAGE_SCENARIOS.push({
+  name: 'P608 QwenBridge reports platform web in a plain browser, keeps native shell tokens out of localStorage via window.qwen, pairs via >=44px Scan QR, syncs watchedSession, and enforces minShellVersion',
+  noConsoleErrors: true,
+  run: async ({ page, viewer }) => {
+    // 1. Plain browser: window.qwen is undefined and bridge shim reports web.
+    const webBridge = await page.evaluate(async () => ({
+      hasWindowQwen:
+        typeof (window as unknown as { qwen?: unknown }).qwen !== 'undefined',
+      bridgePlatform: bridge.platform,
+      hasRegisterApns: 'registerApns' in bridge,
+      gotToken: Boolean(await bridge.getToken()),
+    }));
+    expect(
+      !webBridge.hasWindowQwen &&
+        webBridge.bridgePlatform === 'web' &&
+        !webBridge.hasRegisterApns &&
+        webBridge.gotToken,
+      `unexpected plain-browser QwenBridge state: ${JSON.stringify(webBridge)}`,
+    );
+
+    // 2. Native shell context: inject window.qwen at document-start, pair via Scan QR,
+    // verify zero localStorage token, and verify setWatchedSession background-SSE sync.
+    const qrCode = viewer.mintPairingCode();
+    const browser = page.context().browser()!;
+    const nativeCtx = await browser.newContext({ viewport: PHONE });
+    try {
+      await nativeCtx.addInitScript({
+        content: `
+          window.__nativeState = { keystoreToken: null, watched: [] };
+          window.qwen = {
+            platform: 'android-twa',
+            version: { shell: '1.0.0', bridge: 1 },
+            __pendingToken: null,
+            getToken: function () { return Promise.resolve(window.__nativeState.keystoreToken); },
+            setToken: function (t) { window.__nativeState.keystoreToken = t; return Promise.resolve(); },
+            clearToken: function () { window.__nativeState.keystoreToken = null; return Promise.resolve(); },
+            isBiometricAvailable: function () { return Promise.resolve(false); },
+            requireBiometric: function () { return Promise.resolve(false); },
+            scanQR: function () { return Promise.resolve(${JSON.stringify(`qwen-rc-pair:${qrCode};url=${viewer.url}`)}); },
+            openExternal: function () { return Promise.resolve(); },
+            setWatchedSession: function (ptr) { window.__nativeState.watched.push(ptr); return Promise.resolve(); }
+          };
+        `,
+      });
+      const nativePage = await nativeCtx.newPage();
+      await nativePage.goto(`${viewer.url}/ui/`, {
+        waitUntil: 'domcontentloaded',
+      });
+      await nativePage.waitForSelector('#scan-qr-btn', {
+        state: 'visible',
+        timeout: 5_000,
+      });
+      const scanBox = await nativePage.locator('#scan-qr-btn').boundingBox();
+      expect(
+        Boolean(scanBox && scanBox.height >= 44 && scanBox.width >= 44),
+        `expected #scan-qr-btn >= 44x44px, got ${JSON.stringify(scanBox)}`,
+      );
+      await nativePage.click('#scan-qr-btn');
+      await nativePage.waitForFunction(
+        () => !document.getElementById('app-body')?.hidden,
+        null,
+        { timeout: 10_000 },
+      );
+      await watch(nativePage, viewer.sessionId);
+      await waitForFrame(nativePage, 1, 10_000);
+      const nativeAudit = await nativePage.evaluate(() => ({
+        localToken: localStorage.getItem('qwen-rc-token'),
+        nativeState: (window as unknown as Record<string, unknown>).__nativeState as {
+          keystoreToken: string | null;
+          watched: Array<{ sessionId?: string } | null>;
+        },
+      }));
+      expect(
+        nativeAudit.localToken === null &&
+          Boolean(nativeAudit.nativeState.keystoreToken) &&
+          nativeAudit.nativeState.watched.some(
+            (w) => w && w.sessionId === viewer.sessionId,
+          ),
+        `expected keystore token with null localStorage and watchedSession sync, got ${JSON.stringify(nativeAudit)}`,
+      );
+
+      // 3. Outdated shell version (< minShellVersion.android = 1.0.0) refuses to open #app-body.
+      const oldCtx = await browser.newContext({ viewport: PHONE });
+      try {
+        const savedToken = nativeAudit.nativeState.keystoreToken!;
+        await oldCtx.addInitScript({
+          content: `
+            window.qwen = {
+              platform: 'android-twa',
+              version: { shell: '0.9.0', bridge: 1 },
+              __pendingToken: ${JSON.stringify(savedToken)},
+              getToken: function () { return Promise.resolve(${JSON.stringify(savedToken)}); },
+              setToken: function () { return Promise.resolve(); },
+              clearToken: function () { return Promise.resolve(); },
+              isBiometricAvailable: function () { return Promise.resolve(false); },
+              requireBiometric: function () { return Promise.resolve(false); },
+              openExternal: function () { return Promise.resolve(); }
+            };
+          `,
+        });
+        const oldPage = await oldCtx.newPage();
+        await oldPage.route('**/rc/capabilities', async (route) => {
+          const res = await route.fetch();
+          const body = await res.json();
+          body.remoteControl.nativeShells = {
+            bridgeVersion: 1,
+            apnsEnabled: false,
+            supportedPlatforms: ['android-twa', 'ios-wkwebview'],
+            minShellVersion: { android: '1.0.0', ios: '1.0.0' },
+          };
+          await route.fulfill({ response: res, json: body });
+        });
+        await oldPage.goto(`${viewer.url}/ui/`, {
+          waitUntil: 'domcontentloaded',
+        });
+        await oldPage.waitForSelector('#shell-update-gate', {
+          state: 'visible',
+          timeout: 5_000,
+        });
+        const gateInfo = await oldPage.evaluate(() => ({
+          appHidden: document.getElementById('app-body')?.hidden ?? false,
+          gateText:
+            document.getElementById('shell-update-gate')?.textContent ?? '',
+        }));
+        expect(
+          gateInfo.appHidden && gateInfo.gateText.includes('0.9.0'),
+          `expected shell update gate on outdated shell, got ${JSON.stringify(gateInfo)}`,
+        );
+      } finally {
+        await oldCtx.close();
+      }
+    } finally {
+      await nativeCtx.close();
+    }
+
+    return 'plain web shim verified, native Scan QR paired into keystore (zero localStorage token), watchedSession synced, and 0.9.0 shell gated';
+  },
+});
+
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));
   const results: Result[] = [];

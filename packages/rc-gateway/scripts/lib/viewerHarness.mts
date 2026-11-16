@@ -625,6 +625,8 @@ export interface Viewer {
   pool?: { workspaces(): string[]; spawned: string[] };
   /** #110: the boot stub, for what a scenario needs to read back from it. */
   stub: StubDaemon;
+  /** #183: mints a fresh single-use owner pairing code on this gateway. */
+  mintPairingCode(): string;
   /** #212: set when booted with `hostTabs`. */
   hostTabs?: {
     registry: HostTabRegistry;
@@ -876,6 +878,7 @@ export async function bootViewer(
   const mirrored = new Set(opts.hostTabs?.mirrored ?? []);
   const goneFolders = new Set<string>();
   const github = opts.github ? await harnessGitHub(opts.github, dir) : undefined;
+  const pairing = new PairingService();
   const { app } = createGatewayApp({
     ...(github ? { github: github.deps } : {}),
     ...(opts.workspaceConfigApprovals
@@ -904,7 +907,7 @@ export async function bootViewer(
       : {}),
     daemon: daemonPool ?? new DaemonClient({ baseUrl: stub.baseUrl }),
     store,
-    pairing: new PairingService(),
+    pairing,
     auditPath: join(dir, 'audit.log'),
     // The page reads /rc/ui-prefs at boot. Left unmounted, every scenario
     // would silently run the fallback path and the saved-zone feature could
@@ -938,6 +941,7 @@ export async function bootViewer(
     url,
     sessionId: SESSION_ID,
     stub,
+    mintPairingCode: () => pairing.mint(['owner']).code,
     ...(daemonPool
       ? { pool: { workspaces: () => daemonPool.workspaces(), spawned } }
       : {}),
