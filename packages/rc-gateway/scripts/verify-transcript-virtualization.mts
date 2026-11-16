@@ -36860,6 +36860,66 @@ PAGE_SCENARIOS.push({
       return `session_recovered triggered agentsRead -> idle view showed "${idleChrome.stateText}" + 44px "1 paused" chip + More "1 paused"; Resume transitioned to "1 agent"`;
     },
   });
+
+  // #219: 503 workspace_pool_full names the slot holders, their busy/idle state, and idleReapMs next step on screen.
+  PAGE_SCENARIOS.push({
+    name: 'P602 503 workspace_pool_full on POST /session names the occupied workspace slots and idleReapMs next step (#219)',
+    waitView: false,
+    stub: {
+      pool: {
+        maxDaemons: 1,
+        idleReapMs: 15 * 60_000,
+        liveState: () => ({ sessions: [] }),
+      },
+    },
+    run: async ({ page, viewer }) => {
+      const root = join(harnessRuntimeRoot(), 'pool-full-219');
+      const wsOccupied = join(root, 'occupied-alpha');
+      const wsBlocked = join(root, 'blocked-beta');
+      mkdirSync(wsOccupied, { recursive: true });
+      mkdirSync(wsBlocked, { recursive: true });
+
+      await openList(page);
+      await page.waitForSelector('#list-new', { state: 'visible' });
+      await page.click('#list-new');
+      await page.fill('#new-session-cwd', wsOccupied);
+      const firstCreate = page.waitForResponse(
+        (res) => res.request().method() === 'POST' && new URL(res.url()).pathname === '/session',
+      );
+      await page.click('#new-session');
+      expect((await firstCreate).status() === 200, 'first POST /session did not return 200');
+      expect(
+        viewer.pool!.workspaces().includes(wsOccupied),
+        `pool did not hold ${wsOccupied}: ${JSON.stringify(viewer.pool!.workspaces())}`,
+      );
+
+      // Reopen New conversation and request a second workspace while slot 1 is busy.
+      await openList(page);
+      await page.waitForSelector('#list-new', { state: 'visible' });
+      await page.click('#list-new');
+      await page.fill('#new-session-cwd', wsBlocked);
+      const secondCreate = page.waitForResponse(
+        (res) => res.request().method() === 'POST' && new URL(res.url()).pathname === '/session',
+      );
+      await page.click('#new-session');
+      expect((await secondCreate).status() === 503, 'second POST /session did not return 503');
+      await page.waitForFunction(
+        `(document.getElementById('status')?.textContent || '').includes('workspace_pool_full (HTTP 503)')`,
+        null,
+        { timeout: 10_000 },
+      );
+
+      const statusText = (await page.textContent('#status')) ?? '';
+      expect(
+        statusText.includes('occupied-alpha') &&
+          statusText.includes('busy: 1 session') &&
+          statusText.includes('idleReapMs: 900000 ms / 15 min') &&
+          statusText.includes('--max-daemons / QWEN_RC_MAX_DAEMONS'),
+        `#status missing slot holder or idleReapMs guidance: ${JSON.stringify(statusText)}`,
+      );
+      return `#status rendered 503 workspace_pool_full with occupied-alpha (busy: 1 session) and idleReapMs (15 min) / --max-daemons guidance`;
+    },
+  });
 }
 
 async function runPageSection(): Promise<Result[]> {

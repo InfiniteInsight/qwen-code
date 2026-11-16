@@ -689,7 +689,11 @@ describe('workspace target — pool at cap (rc-workspace-scoping, #28)', () => {
     expect(res.status).toBe(503);
     const body = await res.json();
     expect(body.code).toBe('workspace_pool_full');
-    expect(body.error).toBe('Workspace daemon pool is full (max 1)');
+    expect(body.error).toContain('/proj/a (busy: 1 session');
+    expect(body.slots).toMatchObject([
+      { workspaceCwd: '/proj/a', idle: false, state: 'busy' },
+    ]);
+    expect(body.next).toContain('idleReapMs');
     // The default workspace is not pooled — it stays reachable at cap.
     const ok = await fetch(`${ctx.baseUrl}/rc/workspace/mcp`, {
       headers: authed(ctx.writeToken),

@@ -28,6 +28,7 @@ import {
 } from '../terminals.js';
 import { hostAttachGate } from './hostAttach.js';
 import { isSessionNotFoundError } from './sessionResume.js';
+import { workspacePoolFullDetailBody } from '../daemonHttpError.js';
 import { LAUNCHER_STALE_MS } from './terminals.js';
 
 /** The largest exit status a process can report. */
@@ -107,7 +108,13 @@ export function createHostTabEndRoute(deps: HostTabEndDeps): RequestHandler {
 /** A daemon endpoint for a session, or why there is none. */
 export type TabEndpointAnswer =
   | { ok: true; endpoint: DaemonEndpoint }
-  | { ok: false; status: number; code: string; error: string };
+  | {
+      ok: false;
+      status: number;
+      code: string;
+      error: string;
+      extra?: Record<string, unknown>;
+    };
 
 /**
  * The endpoint a reopened tab attaches to, from the pool: the daemon that
@@ -145,11 +152,13 @@ export function sessionEndpointResolver(
       }
     } catch (err) {
       if (err instanceof WorkspacePoolFullError) {
+        const detail = workspacePoolFullDetailBody(err);
         return {
           ok: false,
           status: 503,
           code: 'workspace_pool_full',
-          error: err.message || 'Workspace pool full',
+          error: detail.error,
+          extra: { ...detail },
         };
       }
       if (err instanceof UnknownSessionError || isSessionNotFoundError(err)) {
@@ -163,11 +172,13 @@ export function sessionEndpointResolver(
         await daemon.resumeSession(sessionId, { workspaceCwd: cwd });
       } catch (e) {
         if (e instanceof WorkspacePoolFullError) {
+          const detail = workspacePoolFullDetailBody(e);
           return {
             ok: false,
             status: 503,
             code: 'workspace_pool_full',
-            error: e.message || 'Workspace pool full',
+            error: detail.error,
+            extra: { ...detail },
           };
         }
         if (isSessionNotFoundError(e)) {
@@ -184,11 +195,13 @@ export function sessionEndpointResolver(
         endpoint = lookup(sessionId);
       } catch (e) {
         if (e instanceof WorkspacePoolFullError) {
+          const detail = workspacePoolFullDetailBody(e);
           return {
             ok: false,
             status: 503,
             code: 'workspace_pool_full',
-            error: e.message || 'Workspace pool full',
+            error: detail.error,
+            extra: { ...detail },
           };
         }
         return down;
@@ -521,7 +534,7 @@ export function createHostTabRoutes(deps: HostTabRoutesDeps): HostTabRoutes {
       if (!found.ok) {
         return refuse(
           found.status,
-          { error: found.error, code: found.code },
+          { ...(found.extra ?? {}), error: found.error, code: found.code },
           sid,
         );
       }

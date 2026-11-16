@@ -13,7 +13,10 @@ import {
 } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
-import { daemonUnavailableBody } from '../daemonHttpError.js';
+import {
+  daemonUnavailableBody,
+  workspacePoolFullBody,
+} from '../daemonHttpError.js';
 
 /**
  * POST /session/:id/resume — reactivate a past (ended) conversation on its
@@ -99,10 +102,7 @@ export function createSessionResumeRoute(
       // rather than collapsing it into the generic 502 below (mirrors
       // sessionCreate.ts).
       if (err instanceof WorkspacePoolFullError) {
-        res.status(503).json({
-          error: 'Workspace pool full',
-          code: 'workspace_pool_full',
-        });
+        res.status(503).json(workspacePoolFullBody(req, err));
         return;
       }
       if (isSessionNotFoundError(err)) {

@@ -3120,4 +3120,70 @@ describe('DaemonPool reconciles with sessions the daemon reaped (#154)', () => {
       UnknownSessionError,
     );
   });
+
+  it('includes occupied slot details, idle state, and idleReapMs in WorkspacePoolFullError (#219)', async () => {
+    let t = 1_000;
+    let releaseSpawnB!: () => void;
+    const gateB = new Promise<void>((resolve) => {
+      releaseSpawnB = resolve;
+    });
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      maxDaemons: 2,
+      idleReapMs: 15 * 60_000,
+      now: () => t,
+      spawn: async (cwd) => {
+        if (cwd === '/proj/spawning-b') {
+          await gateB;
+        }
+        return {
+          client: fakeClient(cwd, `${cwd}-s1`),
+          stop: async () => {},
+          workspaceCwd: cwd,
+        };
+      },
+    });
+
+    await pool.createOrAttachSession({ workspaceCwd: '/proj/busy-a' });
+    t = 121_000; // 2 min after /proj/busy-a was used
+    const pendingB = pool.getOrSpawn('/proj/spawning-b');
+
+    let caught: unknown;
+    try {
+      await pool.getOrSpawn('/proj/blocked-c');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(WorkspacePoolFullError);
+    const full = caught as WorkspacePoolFullError;
+    expect(full.maxDaemons).toBe(2);
+    expect(full.activeWorkspaces).toBe(2);
+    expect(full.idleReapMs).toBe(900_000);
+    expect(full.requestedWorkspaceCwd).toBe('/proj/blocked-c');
+    expect(full.slots).toEqual([
+      {
+        workspaceCwd: '/proj/busy-a',
+        idle: false,
+        state: 'busy',
+        sessionCount: 1,
+        inFlightCount: 0,
+        idleForMs: 120_000,
+      },
+      {
+        workspaceCwd: '/proj/spawning-b',
+        idle: false,
+        state: 'spawning',
+        sessionCount: 0,
+        inFlightCount: 0,
+        idleForMs: 0,
+      },
+    ]);
+    expect(full.message).toContain('/proj/busy-a (busy: 1 session, last used 2 min ago)');
+    expect(full.message).toContain('/proj/spawning-b (spawning)');
+    expect(full.nextStep).toContain('idleReapMs: 900000 ms / 15 min');
+
+    releaseSpawnB();
+    await pendingB;
+  });
 });

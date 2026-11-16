@@ -10,7 +10,10 @@ import {
   WorkspacePoolFullError,
   type SessionDaemon,
 } from '../daemonPool.js';
-import { isSessionLevelGone } from '../daemonHttpError.js';
+import {
+  isSessionLevelGone,
+  workspacePoolFullBody,
+} from '../daemonHttpError.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { isSessionMirrored } from '../hostMirrors.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
@@ -110,11 +113,7 @@ export function createTerminalOpenRoute(
       }
     } catch (err) {
       if (err instanceof WorkspacePoolFullError) {
-        res.status(503).json({
-          error: err.message,
-          code: 'workspace_pool_full',
-          activeWorkspaces: err.activeWorkspaces,
-        });
+        res.status(503).json(workspacePoolFullBody(req, err));
         return;
       }
       if (err instanceof UnknownSessionError || isSessionLevelGone(err)) {
@@ -138,11 +137,7 @@ export function createTerminalOpenRoute(
         endpoint = daemon.daemonEndpointForSession(sessionId);
       } catch (err) {
         if (err instanceof WorkspacePoolFullError) {
-          res.status(503).json({
-            error: err.message,
-            code: 'workspace_pool_full',
-            activeWorkspaces: err.activeWorkspaces,
-          });
+          res.status(503).json(workspacePoolFullBody(req, err));
           return;
         }
         if (err instanceof UnknownSessionError || isSessionLevelGone(err)) {

@@ -11,7 +11,9 @@ import {
   daemonFailureDetail,
   daemonUnavailableBody,
   isSessionLevelGone,
+  workspacePoolFullBody,
 } from './daemonHttpError.js';
+import { WorkspacePoolFullError } from './daemonPool.js';
 
 describe('isSessionLevelGone (#474)', () => {
   it('returns true only when session_not_found has neither subagentRef nor toolCallId', () => {
@@ -137,5 +139,80 @@ describe('daemonUnavailableBody (#211)', () => {
       error: 'Daemon unavailable',
       code: 'daemon_unavailable',
     });
+  });
+});
+
+describe('workspacePoolFullBody (#219, #211)', () => {
+  const err = new WorkspacePoolFullError(2, {
+    requestedWorkspaceCwd: '/home/evan/projects/new-app',
+    idleReapMs: 15 * 60_000,
+    slots: [
+      {
+        workspaceCwd: '/home/evan/projects/alpha',
+        idle: false,
+        state: 'busy',
+        sessionCount: 2,
+        inFlightCount: 0,
+        idleForMs: 120_000,
+      },
+      {
+        workspaceCwd: '/home/evan/projects/beta',
+        idle: false,
+        state: 'spawning',
+        sessionCount: 0,
+        inFlightCount: 0,
+        idleForMs: 0,
+      },
+    ],
+  });
+
+  it('gives write and owner callers the occupied slots and idleReapMs next step', () => {
+    const body = workspacePoolFullBody({ rcClient: { scopes: ['write'] } }, err);
+    expect(body).toMatchObject({
+      code: 'workspace_pool_full',
+      activeWorkspaces: 2,
+      maxDaemons: 2,
+      idleReapMs: 900_000,
+      requestedWorkspaceCwd: '/home/evan/projects/new-app',
+      slots: [
+        {
+          workspaceCwd: '/home/evan/projects/alpha',
+          idle: false,
+          state: 'busy',
+          sessionCount: 2,
+          inFlightCount: 0,
+          idleForMs: 120_000,
+        },
+        {
+          workspaceCwd: '/home/evan/projects/beta',
+          idle: false,
+          state: 'spawning',
+          sessionCount: 0,
+          inFlightCount: 0,
+          idleForMs: 0,
+        },
+      ],
+    });
+    expect(body.error).toContain('/home/evan/projects/alpha (busy: 2 sessions, last used 2 min ago)');
+    expect(body.error).toContain('/home/evan/projects/beta (spawning)');
+    expect(body.next).toContain('idleReapMs: 900000 ms / 15 min');
+    expect(body.next).toContain('--max-daemons / QWEN_RC_MAX_DAEMONS');
+  });
+
+  it('reduces the body for readers, shares, and unauthenticated callers so no host paths leak', () => {
+    for (const req of [
+      { rcClient: { scopes: ['session:read'] } },
+      { rcClient: { scopes: ['write', 'share'], shareId: 'share-1' } },
+      {},
+      undefined,
+    ]) {
+      const body = workspacePoolFullBody(req, err);
+      expect(body).toEqual({
+        error: 'Workspace daemon pool is full (max 2)',
+        code: 'workspace_pool_full',
+        activeWorkspaces: 2,
+      });
+      expect(JSON.stringify(body)).not.toContain('/home/evan');
+    }
   });
 });

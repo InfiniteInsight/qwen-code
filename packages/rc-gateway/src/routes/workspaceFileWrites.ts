@@ -91,6 +91,7 @@ import {
   deleteWorkspaceFileOnPrimary,
   type PrimaryWorkspaceDeleteClient,
 } from '../daemonPool.js';
+import { workspacePoolFullBodyFromRes } from '../daemonHttpError.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { relayDaemonAuthFailure } from './daemonAuth.js';
 
@@ -160,10 +161,7 @@ interface FsErrorBody {
 export function sendWorkspaceFileWriteError(res: Response, err: unknown): void {
   if (res.headersSent) return;
   if (err instanceof WorkspacePoolFullError) {
-    res.status(503).json({
-      error: `Workspace daemon pool is full (max ${err.maxDaemons})`,
-      code: 'workspace_pool_full',
-    });
+    res.status(503).json(workspacePoolFullBodyFromRes(res, err));
     return;
   }
   if ((err as { name?: unknown } | null)?.name === 'DaemonCapabilityMissingError') {

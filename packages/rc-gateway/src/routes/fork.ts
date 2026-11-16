@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import type { RequestHandler } from 'express';
 import type { DaemonClient } from '@qwen-code/sdk';
 import { WorkspacePoolFullError } from '../daemonPool.js';
+import { workspacePoolFullBody } from '../daemonHttpError.js';
 import type { AuditRecorder } from '../auditLog.js';
 import {
   resolveChatsDir,
@@ -384,9 +385,7 @@ export function createForkRoute(
     } catch (err) {
       await removeFork(chatsDir, newId);
       if (err instanceof WorkspacePoolFullError) {
-        res
-          .status(503)
-          .json({ error: 'Workspace pool full', code: 'workspace_pool_full' });
+        res.status(503).json(workspacePoolFullBody(req, err));
         return;
       }
       res

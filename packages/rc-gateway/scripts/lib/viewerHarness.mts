@@ -262,6 +262,10 @@ export interface BootViewerOptions {
     liveState: (cwd: string) => unknown;
     /** #132: what each spawned stub's POST /sessions/catalog serves. */
     catalog?: (cwd: string) => StubDaemonOptions['catalog'];
+    /** #219: override pool maxDaemons (default 6). */
+    maxDaemons?: number;
+    /** #219: override pool idleReapMs (default 15 min). */
+    idleReapMs?: number;
   };
   /**
    * #110: the roster GET /session/:id/agents answers (default empty). A
@@ -804,6 +808,12 @@ export async function bootViewer(
     ? new DaemonPool({
         defaultDaemon: new DaemonClient({ baseUrl: stub.baseUrl }),
         defaultWorkspaceCwd: '/stub/workspace',
+        ...(poolOpt.maxDaemons !== undefined
+          ? { maxDaemons: poolOpt.maxDaemons }
+          : {}),
+        ...(poolOpt.idleReapMs !== undefined
+          ? { idleReapMs: poolOpt.idleReapMs }
+          : {}),
         spawn: async (cwd) => {
           spawned.push(cwd);
           const own = await startStubDaemon({
