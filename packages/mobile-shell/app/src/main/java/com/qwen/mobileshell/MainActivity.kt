@@ -9,7 +9,11 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Rect
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
+import java.net.URL
+import javax.net.ssl.HttpsURLConnection
 import android.text.InputType
 import android.text.method.PasswordTransformationMethod
 import android.view.View
@@ -67,6 +71,8 @@ class MainActivity : AppCompatActivity() {
     private val microphoneLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
         microphone.result(it)
     }
+    private var notificationPermissionAsked = false
+    private val notificationLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -84,6 +90,20 @@ class MainActivity : AppCompatActivity() {
             }
         })
         loadProfiles(ConnectionRecovery.fromBundle(savedInstanceState?.getBundle("connection-recovery")))
+        if (savedInstanceState == null) {
+            handleDeepLinkIntent(intent)
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleDeepLinkIntent(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        ForegroundVisibility.isForeground = true
     }
 
     private fun loadProfiles(snapshot: ConnectionRecovery? = null) {
@@ -153,6 +173,8 @@ class MainActivity : AppCompatActivity() {
                 label(profile.origin)
                 button(getString(R.string.connect)) { connect(profile) }
                     .contentDescription = getString(R.string.connect_profile, profile.name)
+                button(getString(R.string.connect_rc)) { connect(profile, ConnectionNavigation(ui = true)) }
+                    .contentDescription = getString(R.string.connect_rc_profile, profile.name)
                 button(getString(R.string.edit)) { editProfile(profile) }
                     .contentDescription = getString(R.string.edit_named_profile, profile.name)
                 button(getString(R.string.delete)) {
@@ -287,8 +309,8 @@ class MainActivity : AppCompatActivity() {
         } else showMessage(getString(R.string.provider_update), getString(R.string.provider_requirement))
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
-    private fun openConnection(profile: ConnectionProfile) {
+    @SuppressLint("SetJavaScriptEnabled", "RequiresFeature")
+    private fun openConnection(profile: ConnectionProfile, pairCodeFragment: String? = null) {
         val view = WebView(this)
         if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
             WebViewCompat.setProfile(view, profile.browserName)
@@ -297,8 +319,21 @@ class MainActivity : AppCompatActivity() {
             showMessage(getString(R.string.provider_update), getString(R.string.provider_requirement))
             return
         }
-        val loadUrl = Uri.parse(recovery?.navigation?.url(profile.origin) ?: profile.origin).buildUpon()
-            .encodedFragment(profile.token?.let { "token=${Uri.encode(it)}" }).build().toString()
+        val nav = recovery?.navigation ?: ConnectionNavigation()
+        val bridgeSupported = nav.ui &&
+            WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT) &&
+            WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)
+        if (bridgeSupported) {
+            installQwenBridge(view, profile)
+        }
+        val fragment = when {
+            pairCodeFragment != null -> "code=${Uri.encode(pairCodeFragment)}"
+            bridgeSupported -> null // delivered via window.qwen.__pendingToken, never URL or localStorage
+            profile.token != null -> "token=${Uri.encode(profile.token)}"
+            else -> null
+        }
+        val loadUrl = Uri.parse(nav.url(profile.origin)).buildUpon()
+            .encodedFragment(fragment).build().toString()
         webView = view
         activeProfile = profile
         view.settings.apply {
@@ -464,6 +499,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun destroyConnection() {
         connectionAttempt++
+        BackgroundSseService.stop(this)
         filePicker.cancel()
         cancelMicrophone()
         microphoneAuthorized = false
@@ -520,6 +556,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onStop() {
+        ForegroundVisibility.isForeground = false
         cancelMicrophone()
         val profile = activeProfile
         if (microphoneAuthorized && profile != null) {
@@ -527,6 +564,164 @@ class MainActivity : AppCompatActivity() {
             showMessage(getString(R.string.microphone_closed), getString(R.string.microphone_reconnect)) { connect(profile) }
         }
         super.onStop()
+    }
+
+    @SuppressLint("RequiresFeature")
+    private fun installQwenBridge(view: WebView, profile: ConnectionProfile) {
+        val rule = setOf(QwenBridgeInjector.originRule(profile.origin))
+        val shellVersion = try {
+            packageManager.getPackageInfo(packageName, 0).versionName ?: "0.23.3"
+        } catch (_: Exception) {
+            "0.23.3"
+        }
+        WebViewCompat.addWebMessageListener(view, QwenBridgeInjector.JS_OBJECT_NAME, rule) { _, message, sourceOrigin, isMainFrame, replyProxy ->
+            if (!isMainFrame || !OriginPolicy.isSameOrigin(profile.origin, sourceOrigin.toString())) return@addWebMessageListener
+            val req = QwenBridgeInjector.parseRequest(message.data) ?: return@addWebMessageListener
+            when (req.method) {
+                "getToken" -> {
+                    val tok = try {
+                        store?.vault?.load()?.profiles?.find { it.id == profile.id }?.token
+                    } catch (_: Exception) {
+                        null
+                    }
+                    replyProxy.postMessage(QwenBridgeInjector.formatSuccessReply(req.id, QwenBridgeInjector.jsStringLiteral(tok)))
+                }
+                "setToken" -> {
+                    try {
+                        val storage = store ?: AndroidProfileStore(this).also { store = it }
+                        val latest = storage.vault.load()
+                        val current = latest.profiles.find { it.id == profile.id }
+                        if (current != null) {
+                            val updated = current.copy(token = req.token?.takeIf { it.isNotEmpty() })
+                            state = storage.vault.upsert(latest, updated)
+                            activeProfile = updated
+                        }
+                        replyProxy.postMessage(QwenBridgeInjector.formatSuccessReply(req.id, "null"))
+                    } catch (_: Exception) {
+                        replyProxy.postMessage(QwenBridgeInjector.formatErrorReply(req.id, "storage_error"))
+                    }
+                }
+                "clearToken" -> {
+                    try {
+                        val storage = store ?: AndroidProfileStore(this).also { store = it }
+                        val latest = storage.vault.load()
+                        val current = latest.profiles.find { it.id == profile.id }
+                        if (current != null) {
+                            val updated = current.copy(token = null)
+                            state = storage.vault.upsert(latest, updated)
+                            activeProfile = updated
+                        }
+                        BackgroundSseService.stop(this)
+                        replyProxy.postMessage(QwenBridgeInjector.formatSuccessReply(req.id, "null"))
+                    } catch (_: Exception) {
+                        replyProxy.postMessage(QwenBridgeInjector.formatErrorReply(req.id, "storage_error"))
+                    }
+                }
+                "isBiometricAvailable", "requireBiometric" -> {
+                    replyProxy.postMessage(QwenBridgeInjector.formatSuccessReply(req.id, "false"))
+                }
+                "openExternal" -> {
+                    val target = req.url.orEmpty()
+                    if (OriginPolicy.isExternalLink(target)) {
+                        try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(target))) }
+                        catch (_: Exception) { }
+                    }
+                    replyProxy.postMessage(QwenBridgeInjector.formatSuccessReply(req.id, "null"))
+                }
+                "setWatchedSession" -> {
+                    if (req.watchedCleared || req.watched == null) {
+                        BackgroundSseService.stop(this)
+                    } else {
+                        ensureNotificationPermission()
+                        BackgroundSseService.startOrUpdate(this, profile.id, req.watched)
+                    }
+                    replyProxy.postMessage(QwenBridgeInjector.formatSuccessReply(req.id, "null"))
+                }
+                else -> {
+                    replyProxy.postMessage(QwenBridgeInjector.formatErrorReply(req.id, "unsupported_method"))
+                }
+            }
+        }
+        WebViewCompat.addDocumentStartJavaScript(
+            view,
+            QwenBridgeInjector.buildDocumentStartScript(shellVersion, profile.token),
+            rule,
+        )
+    }
+
+    private fun ensureNotificationPermission() {
+        if (notificationPermissionAsked || Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            notificationPermissionAsked = true
+            notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    private fun handleDeepLinkIntent(incoming: Intent?) {
+        val data = incoming?.dataString ?: return
+        if (!data.startsWith("qwen-rc:", ignoreCase = true)) return
+        when (val parsed = QwenRcDeepLink.parseSchemeUri(data)) {
+            is QwenRcDeepLink.Invalid -> {
+                Toast.makeText(this, getString(R.string.deeplink_invalid, parsed.reason), Toast.LENGTH_LONG).show()
+            }
+            is QwenRcDeepLink.OpenSession -> {
+                val targetProfile = activeProfile ?: state.profiles.firstOrNull() ?: return
+                connect(targetProfile, parsed.toNavigation())
+            }
+            is QwenRcDeepLink.OpenPermission -> {
+                val targetProfile = activeProfile ?: state.profiles.firstOrNull() ?: return
+                connect(targetProfile, parsed.toNavigation())
+            }
+            is QwenRcDeepLink.PairDaemon -> {
+                confirmAndPairDaemon(parsed)
+            }
+        }
+    }
+
+    private fun confirmAndPairDaemon(pair: QwenRcDeepLink.PairDaemon) {
+        Thread({
+            val fingerprint = try {
+                val conn = (URL("${pair.daemonOrigin}rc/health").openConnection() as HttpsURLConnection).apply {
+                    connectTimeout = 8_000
+                    readTimeout = 8_000
+                }
+                try {
+                    conn.connect()
+                    val cert = conn.serverCertificates.firstOrNull()
+                    if (cert != null) QwenRcDeepLink.formatCertSha256GroupedHex(cert.encoded) else "(unavailable)"
+                } finally {
+                    conn.disconnect()
+                }
+            } catch (_: Exception) {
+                "(TLS probe failed - verify daemon reachability)"
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                cancelDialog()
+                activeDialog = AlertDialog.Builder(this)
+                    .setTitle(R.string.pair_confirm_title)
+                    .setMessage(getString(R.string.pair_confirm_body, pair.daemonOrigin, fingerprint))
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .setPositiveButton(R.string.pair_confirm_go) { _, _ ->
+                        try {
+                            val storage = store ?: AndroidProfileStore(this).also { store = it }
+                            val latest = storage.vault.load()
+                            val existing = latest.profiles.find { it.origin == pair.daemonOrigin }
+                            val target = existing ?: ConnectionProfile.create(
+                                Uri.parse(pair.daemonOrigin).host ?: "Remote Control",
+                                pair.daemonOrigin,
+                                null,
+                            ).also { created ->
+                                state = storage.vault.upsert(latest, created)
+                            }
+                            recovery = ConnectionRecovery(target.id, target.browserId, ConnectionNavigation(ui = true))
+                            openConnection(target, pairCodeFragment = pair.code)
+                        } catch (_: Exception) {
+                            showStorageError()
+                        }
+                    }.show()
+            }
+        }, "qwen-rc-tls-probe").start()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {

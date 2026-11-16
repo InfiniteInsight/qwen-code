@@ -43,4 +43,24 @@ class ConnectionNavigationTest {
         assertNull(ConnectionNavigation.fromFields("s", "a".repeat(129), "live"))
         assertEquals(ConnectionNavigation("s", "w", "standalone"), ConnectionNavigation.fromFields("s", "w", "standalone"))
     }
+
+    @Test fun capturesAndReconstructsRemoteControlUiNavigation() {
+        val rcRoot = ConnectionNavigation.capture(origin, "${origin}ui/")
+        assertTrue(rcRoot.ui)
+        assertEquals("${origin}ui/", rcRoot.url(origin))
+
+        val rcSession = ConnectionNavigation.capture(origin, "${origin}ui/?session=sess-42&event=108#token=secret")
+        assertTrue(rcSession.ui)
+        assertEquals("sess-42", rcSession.session)
+        assertEquals("108", rcSession.event)
+        assertEquals("${origin}ui/?session=sess-42&event=108", rcSession.url(origin))
+
+        val rcPerm = ConnectionNavigation.capture(origin, "${origin}ui/?permission=req-7")
+        assertTrue(rcPerm.ui)
+        assertEquals("req-7", rcPerm.permission)
+        assertEquals("${origin}ui/?permission=req-7", rcPerm.url(origin))
+
+        val rejected = ConnectionNavigation.capture(origin, "${origin}ui/?session=sess-42&url=https://evil.example/")
+        assertEquals(ConnectionNavigation(ui = true), rejected)
+    }
 }

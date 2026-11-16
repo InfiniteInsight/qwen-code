@@ -4518,8 +4518,30 @@
       <section>
         <label>Pairing code <input id="code" placeholder="paste code" /></label>
         <button id="pair">Pair</button>
+        <button
+          id="scan-qr-btn"
+          type="button"
+          hidden
+          style="min-height: 44px; min-width: 44px"
+        >
+          Scan QR
+        </button>
+        <button
+          id="unlock-biometric-btn"
+          type="button"
+          hidden
+          style="min-height: 44px; min-width: 44px"
+        >
+          Unlock
+        </button>
         <span id="pair-feedback" role="status" aria-live="polite"></span>
       </section>
+      <div
+        id="shell-update-gate"
+        hidden
+        role="alert"
+        style="margin-top: 12px; color: crimson"
+      ></div>
     </div>
     <div id="app-body" hidden>
       <!-- #184 (h1). The bar is the whole of the navigation: the page title,
@@ -7519,6 +7541,151 @@
       // token list can say which row is this device. A page paired before this
       // was kept has none, and its list marks nothing rather than guessing.
       const TOKEN_ID_KEY = 'qwen-rc-token-id';
+      // #183: Native shell bridge (`window.qwen` per `native-mobile-shells`).
+      // When injected by Android/iOS at document-start, bearer tokens stay in
+      // memory + platform Keystore/Keychain and are NEVER written to WebView
+      // localStorage, sessionStorage, or IndexedDB. In a plain browser,
+      // `window.qwen` stays undefined and `bridge` falls back to `platform: "web"`.
+      const rawNativeBridge =
+        typeof window.qwen === 'object' && window.qwen !== null
+          ? window.qwen
+          : null;
+      let nativeSessionToken = null;
+      let nativeApnsSubId = null;
+      if (
+        rawNativeBridge &&
+        Object.prototype.hasOwnProperty.call(rawNativeBridge, '__pendingToken')
+      ) {
+        if (
+          typeof rawNativeBridge.__pendingToken === 'string' &&
+          rawNativeBridge.__pendingToken
+        ) {
+          nativeSessionToken = rawNativeBridge.__pendingToken;
+        }
+        try {
+          delete rawNativeBridge.__pendingToken;
+        } catch {
+          rawNativeBridge.__pendingToken = null;
+        }
+      }
+      (function consumeFragmentToken() {
+        const m = /[#&]token=([^&]+)/.exec(location.hash || '');
+        if (!m) return;
+        let decoded = '';
+        try {
+          decoded = decodeURIComponent(m[1]);
+        } catch {
+          decoded = '';
+        }
+        const stripped = (location.hash || '')
+          .replace(/^#/, '')
+          .split('&')
+          .filter((kv) => kv && !kv.startsWith('token='))
+          .join('&');
+        history.replaceState(
+          history.state,
+          '',
+          location.pathname +
+            location.search +
+            (stripped ? '#' + stripped : ''),
+        );
+        if (!decoded) return;
+        if (rawNativeBridge) {
+          nativeSessionToken = decoded;
+          try {
+            localStorage.removeItem(TOKEN_KEY);
+          } catch {
+            /* ignore */
+          }
+        } else {
+          try {
+            localStorage.setItem(TOKEN_KEY, decoded);
+          } catch {
+            /* ignore */
+          }
+        }
+      })();
+      function isNativeShell() {
+        return rawNativeBridge !== null;
+      }
+      const bridge = rawNativeBridge
+        ? new Proxy(rawNativeBridge, {
+            get(target, prop) {
+              if (prop === 'getToken') {
+                return async () => {
+                  if (typeof target.getToken !== 'function') {
+                    return nativeSessionToken;
+                  }
+                  const got = await target.getToken();
+                  nativeSessionToken =
+                    typeof got === 'string' && got ? got : null;
+                  return nativeSessionToken;
+                };
+              }
+              if (prop === 'setToken') {
+                return async (t) => {
+                  const next = typeof t === 'string' && t ? t : null;
+                  nativeSessionToken = next;
+                  try {
+                    localStorage.removeItem(TOKEN_KEY);
+                  } catch {
+                    /* ignore */
+                  }
+                  if (typeof target.setToken === 'function') {
+                    await target.setToken(next);
+                  }
+                };
+              }
+              if (prop === 'clearToken') {
+                return async () => {
+                  nativeSessionToken = null;
+                  try {
+                    localStorage.removeItem(TOKEN_KEY);
+                    localStorage.removeItem(TOKEN_ID_KEY);
+                  } catch {
+                    /* ignore */
+                  }
+                  if (typeof target.clearToken === 'function') {
+                    await target.clearToken();
+                  }
+                };
+              }
+              const val = target[prop];
+              return typeof val === 'function' ? val.bind(target) : val;
+            },
+            has(target, prop) {
+              return prop in target;
+            },
+          })
+        : {
+            platform: 'web',
+            version: { shell: '0.0.0', bridge: 1 },
+            getToken: async () => localStorage.getItem(TOKEN_KEY),
+            setToken: async (t) => {
+              if (!t) localStorage.removeItem(TOKEN_KEY);
+              else localStorage.setItem(TOKEN_KEY, String(t));
+            },
+            clearToken: async () => {
+              localStorage.removeItem(TOKEN_KEY);
+              localStorage.removeItem(TOKEN_ID_KEY);
+            },
+            isBiometricAvailable: async () =>
+              Boolean(
+                window.PublicKeyCredential &&
+                  typeof PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable ===
+                    'function' &&
+                  (await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().catch(
+                    () => false,
+                  )),
+              ),
+            requireBiometric: async () => false,
+            scanQR: async () => {
+              throw new Error('qr_unavailable');
+            },
+            openExternal: async (url) => {
+              window.open(url, '_blank', 'noopener,noreferrer');
+            },
+          };
       const WATCHED_KEY = 'qwen-rc:watched-session';
       // #50. Which conversation THIS window is on, per-window, so a second window
       // can hold a second conversation. WATCHED_KEY stays what it was, the last
@@ -8605,7 +8772,9 @@
           // If a concurrent re-pair (doPair -> showApp) replaces the stored
           // token before this request's response arrives, the stale 401
           // below must not wipe out the new, valid token.
-          const tokenAtRequest = localStorage.getItem(TOKEN_KEY);
+          const tokenAtRequest = isNativeShell()
+            ? nativeSessionToken
+            : localStorage.getItem(TOKEN_KEY);
           const res = await realFetch(input, init);
           if (res.status === 401) {
             try {
@@ -8615,12 +8784,17 @@
                   : input.url,
                 location.href,
               );
-              if (
-                reqUrl.origin === location.origin &&
-                localStorage.getItem(TOKEN_KEY) === tokenAtRequest
-              ) {
-                localStorage.removeItem(TOKEN_KEY);
-                localStorage.removeItem(TOKEN_ID_KEY);
+              const curTok = isNativeShell()
+                ? nativeSessionToken
+                : localStorage.getItem(TOKEN_KEY);
+              if (reqUrl.origin === location.origin && curTok === tokenAtRequest) {
+                if (isNativeShell()) {
+                  nativeSessionToken = null;
+                  void bridge.clearToken().catch(() => {});
+                } else {
+                  localStorage.removeItem(TOKEN_KEY);
+                  localStorage.removeItem(TOKEN_ID_KEY);
+                }
                 showAuthGate();
               }
             } catch {
@@ -20382,7 +20556,8 @@
         closeHooksSheet(true);
       });
 
-      const token = () => localStorage.getItem(TOKEN_KEY);
+      const token = () =>
+        isNativeShell() ? nativeSessionToken : localStorage.getItem(TOKEN_KEY);
 
       // Validate any stored token against the gateway before revealing
       // #app-body. /rc/capabilities requires an authenticated req.rcClient
@@ -20514,7 +20689,83 @@
         if (permRulesGate()) void loadPermOverlays(false);
       }
 
-      (async function authGate() {
+      function compareSemver(a, b) {
+        const pa = String(a || '0.0.0')
+          .split('.')
+          .map((x) => parseInt(x, 10) || 0);
+        const pb = String(b || '0.0.0')
+          .split('.')
+          .map((x) => parseInt(x, 10) || 0);
+        for (let i = 0; i < 3; i++) {
+          if ((pa[i] || 0) < (pb[i] || 0)) return -1;
+          if ((pa[i] || 0) > (pb[i] || 0)) return 1;
+        }
+        return 0;
+      }
+
+      function checkShellVersionGate(capsBody) {
+        const gateEl = $('shell-update-gate');
+        if (!gateEl) return true;
+        gateEl.hidden = true;
+        gateEl.textContent = '';
+        if (!isNativeShell()) return true;
+        const ns =
+          capsBody &&
+          capsBody.remoteControl &&
+          capsBody.remoteControl.nativeShells;
+        if (!ns || !ns.minShellVersion) return true;
+        const plat = String((bridge && bridge.platform) || '');
+        const key = plat.startsWith('ios')
+          ? 'ios'
+          : plat.startsWith('android')
+            ? 'android'
+            : null;
+        if (!key || typeof ns.minShellVersion[key] !== 'string') return true;
+        const curVer = String(
+          (bridge && bridge.version && bridge.version.shell) || '0.0.0',
+        );
+        const minVer = ns.minShellVersion[key];
+        if (compareSemver(curVer, minVer) < 0) {
+          gateEl.textContent =
+            'Update required: shell version ' +
+            curVer +
+            ' is older than required minimum ' +
+            minVer +
+            '.';
+          gateEl.hidden = false;
+          showAuthGate();
+          return false;
+        }
+        return true;
+      }
+
+      async function runAuthGate() {
+        const scanBtn = $('scan-qr-btn');
+        if (scanBtn) {
+          scanBtn.hidden = !(
+            isNativeShell() &&
+            'scanQR' in bridge &&
+            typeof bridge.scanQR === 'function'
+          );
+        }
+        const unlockBtn = $('unlock-biometric-btn');
+        if (unlockBtn) unlockBtn.hidden = true;
+        if (isNativeShell() && !nativeSessionToken) {
+          try {
+            await bridge.getToken();
+          } catch (err) {
+            const msg = String((err && (err.code || err.message)) || err || '');
+            showAuthGate();
+            if (msg.includes('biometric_failed')) {
+              if (unlockBtn) unlockBtn.hidden = false;
+              pairFeedback(
+                'Biometric unlock failed or was cancelled - tap Unlock to retry.',
+                false,
+              );
+            }
+            return;
+          }
+        }
         const t = token();
         if (!t) {
           showAuthGate();
@@ -20528,6 +20779,7 @@
             // Task #27: keep the body - workspaceControl gates the
             // permission-rules / trust / MCP / tools sections.
             caps = await res.json().catch(() => null);
+            if (!checkShellVersionGate(caps)) return;
             setStatusDot(true);
             showApp();
             startHealthPoll();
@@ -20556,7 +20808,11 @@
           setStatusDot(false);
           showAuthGate();
         }
-      })();
+      }
+      void runAuthGate();
+      if ($('unlock-biometric-btn')) {
+        $('unlock-biometric-btn').onclick = () => void runAuthGate();
+      }
 
       function urlBase64ToUint8Array(base64url) {
         const padding = '='.repeat((4 - (base64url.length % 4)) % 4);
@@ -20573,6 +20829,7 @@
       // auth, key token) for cycle-12 inline voting from the service worker.
       // Wrapped so IndexedDB absence/errors never break pairing.
       function idbPutToken(tok) {
+        if (isNativeShell()) return;
         try {
           if (!('indexedDB' in self) || !tok) return;
           const req = indexedDB.open('qwen-rc', 1);
@@ -20628,14 +20885,18 @@
             return;
           }
           const data = await res.json();
-          localStorage.setItem(TOKEN_KEY, data.token);
-          try {
-            if (data.id) localStorage.setItem(TOKEN_ID_KEY, String(data.id));
-            else localStorage.removeItem(TOKEN_ID_KEY);
-          } catch {
-            /* private mode: the list just marks nothing */
+          if (isNativeShell()) {
+            await bridge.setToken(data.token);
+          } else {
+            localStorage.setItem(TOKEN_KEY, data.token);
+            try {
+              if (data.id) localStorage.setItem(TOKEN_ID_KEY, String(data.id));
+              else localStorage.removeItem(TOKEN_ID_KEY);
+            } catch {
+              /* private mode: the list just marks nothing */
+            }
+            idbPutToken(data.token);
           }
-          idbPutToken(data.token);
           $('code').value = ''; // single-use; clear it once redeemed
           // Task #27: authGate() ran before any token existed, so fetch the
           // capabilities now (non-fatal - without them the workspace
@@ -20648,6 +20909,7 @@
           } catch {
             /* best-effort */
           }
+          if (!checkShellVersionGate(caps)) return;
           applyWorkspaceControlGating();
           showApp();
           startHealthPoll();
@@ -20696,6 +20958,42 @@
       }
 
       $('pair').onclick = () => doPair($('code').value.trim());
+      if ($('scan-qr-btn')) {
+        $('scan-qr-btn').onclick = async () => {
+          if (!('scanQR' in bridge) || typeof bridge.scanQR !== 'function') {
+            return pairFeedback('QR camera scanner is not available here.', false);
+          }
+          $('scan-qr-btn').disabled = true;
+          pairFeedback('scanning QR code…', null);
+          try {
+            const raw = String((await bridge.scanQR()) || '').trim();
+            const pairMatch = /^qwen-rc-pair:([^;]+)(?:;|$)/i.exec(raw);
+            const hashMatch = /[#&]code=([^&]+)/.exec(raw);
+            const code = pairMatch
+              ? pairMatch[1].trim()
+              : hashMatch
+                ? decodeURIComponent(hashMatch[1]).trim()
+                : raw;
+            if (!code) {
+              pairFeedback('QR scan returned no pairing code.', false);
+              return;
+            }
+            $('code').value = code;
+            await doPair(code);
+          } catch (err) {
+            const msg = String((err && (err.code || err.message)) || err || '');
+            if (msg.includes('qr_cancelled')) {
+              pairFeedback('QR scan cancelled.', false);
+            } else if (msg.includes('qr_timeout')) {
+              pairFeedback('QR scan timed out - try again.', false);
+            } else {
+              pairFeedback('QR scan failed: ' + msg, false);
+            }
+          } finally {
+            $('scan-qr-btn').disabled = false;
+          }
+        };
+      }
 
       // QR auto-fill: a scanned QR opens .../ui/#code=<code>. Read it, scrub it
       // from the address bar IMMEDIATELY (so a reload/bookmark can't retry a
@@ -21785,10 +22083,35 @@
           } catch {
             /* ignore history errors */
           }
+          if (
+            'setWatchedSession' in bridge &&
+            typeof bridge.setWatchedSession === 'function'
+          ) {
+            try {
+              void bridge.setWatchedSession({
+                sessionId: watchedSessionId,
+                lastEventId: lastSeenEventId,
+                title: watchedSessionTitle || null,
+                cwd: watchedSessionCwd || null,
+              });
+            } catch {
+              /* best-effort native sync */
+            }
+          }
         }
       }
 
       function clearPersistedWatch() {
+        if (
+          'setWatchedSession' in bridge &&
+          typeof bridge.setWatchedSession === 'function'
+        ) {
+          try {
+            void bridge.setWatchedSession(null);
+          } catch {
+            /* best-effort native sync */
+          }
+        }
         try {
           const raw = localStorage.getItem(WATCHED_KEY);
           if (raw) {
@@ -29893,10 +30216,57 @@
         notifError = '';
       }
 
+      async function syncNativeApnsRegistration() {
+        if (!token() || !isNativeShell()) return false;
+        const ns =
+          caps && caps.remoteControl && caps.remoteControl.nativeShells;
+        if (!ns || ns.apnsEnabled !== true) return false;
+        if (!('registerApns' in bridge) || typeof bridge.registerApns !== 'function') {
+          return false;
+        }
+        const reg = await bridge.registerApns();
+        if (!reg || !reg.deviceToken || !reg.bundleId) return false;
+        const shellVersion = String(
+          (bridge.version && bridge.version.shell) || '1.0.0',
+        );
+        const res = await fetch('/rc/native-push/apns/register', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer ' + token(),
+          },
+          body: JSON.stringify({
+            deviceToken: reg.deviceToken,
+            bundleId: reg.bundleId,
+            shellVersion,
+          }),
+        });
+        if (!res.ok) {
+          throw new Error(
+            describeFailure(
+              res,
+              await res.json().catch(() => null),
+              'registering APNs push',
+            ),
+          );
+        }
+        const body = await res.json().catch(() => ({}));
+        nativeApnsSubId = typeof body.id === 'string' ? body.id : null;
+        return true;
+      }
+
       // Returns 'ok' | 'denied' | 'not-granted' (prompt never showed) |
       // 'unsupported' | 'no-token'.
       async function enableNotifications() {
         if (!token()) return 'no-token';
+        if (await syncNativeApnsRegistration()) {
+          try {
+            localStorage.removeItem('rc-notif-optout');
+          } catch (e) {
+            /* private mode */
+          }
+          return 'ok';
+        }
         if (!pushSupported()) return 'unsupported';
         if (Notification.permission === 'default') {
           const perm = await Notification.requestPermission();
@@ -29914,6 +30284,32 @@
       }
 
       async function disableNotifications() {
+        if (nativeApnsSubId && token()) {
+          try {
+            await fetch(
+              '/rc/native-push/apns/register/' +
+                encodeURIComponent(nativeApnsSubId),
+              {
+                method: 'DELETE',
+                headers: { Authorization: 'Bearer ' + token() },
+              },
+            );
+          } catch {
+            /* best-effort */
+          }
+          nativeApnsSubId = null;
+        }
+        if (
+          isNativeShell() &&
+          'unregisterApns' in bridge &&
+          typeof bridge.unregisterApns === 'function'
+        ) {
+          try {
+            await bridge.unregisterApns();
+          } catch {
+            /* best-effort */
+          }
+        }
         const sub = await getNotifSubscription();
         if (sub) {
           // Drop the gateway-side record first (matched by endpoint),
@@ -29955,7 +30351,7 @@
 
       async function autoEnableNotifications() {
         try {
-          if (!token() || !pushSupported()) return;
+          if (!token()) return;
           let optedOut = false;
           try {
             optedOut = localStorage.getItem('rc-notif-optout') === '1';
@@ -29963,6 +30359,8 @@
             /* private mode */
           }
           if (optedOut) return;
+          if (await syncNativeApnsRegistration()) return;
+          if (!pushSupported()) return;
           if (await getNotifSubscription()) return; // already enabled
           if (Notification.permission === 'denied') return;
           const r = await enableNotifications();
@@ -31156,7 +31554,7 @@
         } catch {
           id = '';
         }
-        if (!id) {
+        if (!id || /[\u0000-\u001f]/.test(id)) {
           setStatus('the link named no conversation this page could read');
           return false;
         }
