@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DaemonAuthFlow } from '../../src/daemon/DaemonAuthFlow.js';
 import {
   DaemonHttpError,
@@ -121,6 +121,10 @@ describe('DaemonAuthFlow.start (fold-in 10 #2)', () => {
 });
 
 describe('DaemonAuthFlow.awaitCompletion (fold-in 10 #2)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('polls until the daemon reports a terminal state (authorized)', async () => {
     const expiresAt = Date.now() + 5_000;
     const { client, calls } = makeFakeClient({
@@ -184,6 +188,100 @@ describe('DaemonAuthFlow.awaitCompletion (fold-in 10 #2)', () => {
       pollOverrideMs: 1_000,
     });
     expect(observedIntervals).toContain(10_000);
+  });
+
+  it('does not falsely fire onThrottled when pollOverrideMs differs from an unchanged server intervalMs (#269)', async () => {
+    vi.useFakeTimers();
+    const onThrottled = vi.fn();
+    const { client, calls } = makeFakeClient({
+      startResult: {
+        deviceFlowId: 'flow-A',
+        providerId: 'qwen-oauth',
+        status: 'pending',
+        userCode: 'USER-1',
+        verificationUri: 'https://idp.example/verify',
+        expiresAt: Date.now() + 60_000,
+        intervalMs: 5_000,
+        attached: false,
+      },
+      getReplies: [
+        {
+          deviceFlowId: 'flow-A',
+          providerId: 'qwen-oauth',
+          status: 'pending',
+          intervalMs: 5_000,
+          createdAt: Date.now(),
+        },
+        {
+          deviceFlowId: 'flow-A',
+          providerId: 'qwen-oauth',
+          status: 'authorized',
+          intervalMs: 5_000,
+          createdAt: Date.now(),
+        },
+      ],
+    });
+    const auth = new DaemonAuthFlow(client);
+    const handle = await auth.start({ providerId: 'qwen-oauth' });
+    const completion = handle.awaitCompletion({
+      pollOverrideMs: 1_000,
+      onThrottled,
+    });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    const final = await completion;
+
+    expect(final.status).toBe('authorized');
+    expect(calls.get).toHaveLength(2);
+    expect(onThrottled).not.toHaveBeenCalled();
+  });
+
+  it('clamps sub-1000ms snapshot.intervalMs to 1000ms and passes clamped interval to onThrottled (#269)', async () => {
+    vi.useFakeTimers();
+    const onThrottled = vi.fn();
+    const { client, calls } = makeFakeClient({
+      startResult: {
+        deviceFlowId: 'flow-A',
+        providerId: 'qwen-oauth',
+        status: 'pending',
+        userCode: 'USER-1',
+        verificationUri: 'https://idp.example/verify',
+        expiresAt: Date.now() + 60_000,
+        intervalMs: 5_000,
+        attached: false,
+      },
+      getReplies: [
+        {
+          deviceFlowId: 'flow-A',
+          providerId: 'qwen-oauth',
+          status: 'pending',
+          intervalMs: 200,
+          createdAt: Date.now(),
+        },
+        {
+          deviceFlowId: 'flow-A',
+          providerId: 'qwen-oauth',
+          status: 'authorized',
+          intervalMs: 200,
+          createdAt: Date.now(),
+        },
+      ],
+    });
+    const auth = new DaemonAuthFlow(client);
+    const handle = await auth.start({ providerId: 'qwen-oauth' });
+    const completion = handle.awaitCompletion({ onThrottled });
+
+    // Even after 999ms (well past 200ms), the second poll has not fired because
+    // the sleep interval clamped to 1000ms.
+    await vi.advanceTimersByTimeAsync(999);
+    expect(calls.get).toHaveLength(1);
+    expect(onThrottled).toHaveBeenCalledTimes(1);
+    expect(onThrottled).toHaveBeenCalledWith(1_000);
+
+    await vi.advanceTimersByTimeAsync(1);
+    const final = await completion;
+    expect(final.status).toBe('authorized');
+    expect(calls.get).toHaveLength(2);
   });
 
   it('rejects when opts.signal is aborted mid-poll', async () => {

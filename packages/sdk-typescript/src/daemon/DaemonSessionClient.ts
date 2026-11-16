@@ -838,11 +838,12 @@ export class DaemonSessionClient {
    * `invalid_client_id`) propagates.
    */
   private async withClientIdSelfHeal<T>(fn: () => Promise<T>): Promise<T> {
+    const attemptedClientId = this.clientId;
     try {
       return await fn();
     } catch (err) {
       if (!isInvalidClientId(err)) throw err;
-      await this.reattach();
+      await this.reattach(attemptedClientId);
       return await fn();
     }
   }
@@ -852,8 +853,15 @@ export class DaemonSessionClient {
    * fresh daemon-assigned `clientId`. Concurrent callers coalesce onto a single
    * in-flight `resume` so we never orphan extra registrations.
    */
-  private async reattach(): Promise<void> {
+  private async reattach(staleClientId?: string): Promise<void> {
     if (this.reattaching) return this.reattaching;
+    if (
+      staleClientId !== undefined &&
+      this.session.clientId &&
+      this.session.clientId !== staleClientId
+    ) {
+      return;
+    }
     // Send no clientId so the bridge issues a fresh registration rather than
     // validating the stale one. Keep the original context explicit: workspace
     // restore resolves by cwd, while standalone restore must use its dedicated

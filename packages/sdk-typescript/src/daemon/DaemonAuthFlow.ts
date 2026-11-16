@@ -276,7 +276,7 @@ async function pollUntilTerminal(
     1_000,
     sanitizedPollOverrideMs ?? start.intervalMs ?? 5_000,
   );
-  let lastIntervalMs = interval;
+  let lastIntervalMs = start.intervalMs;
   while (true) {
     if (signal?.aborted) {
       throw signalAbortError(signal);
@@ -296,8 +296,8 @@ async function pollUntilTerminal(
     );
     if (snapshot.intervalMs && snapshot.intervalMs !== lastIntervalMs) {
       lastIntervalMs = snapshot.intervalMs;
-      interval = snapshot.intervalMs;
-      opts.onThrottled?.(snapshot.intervalMs);
+      interval = Math.max(1_000, snapshot.intervalMs);
+      opts.onThrottled?.(interval);
     }
     if (TERMINAL_STATUSES.has(snapshot.status)) return snapshot;
     await waitFor(interval, signal);

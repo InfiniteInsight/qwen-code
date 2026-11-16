@@ -11,6 +11,7 @@ import type {
   DaemonTransportSubscribeOptions,
 } from './DaemonTransport.js';
 import { DaemonTransportClosedError } from './DaemonTransport.js';
+import { DaemonHttpError } from './DaemonHttpError.js';
 import { consumeFrames } from './sse.js';
 import {
   denormalizeAcpNotification,
@@ -252,7 +253,12 @@ export class AcpHttpTransport implements DaemonTransport {
     const { mapping, segments } = match;
 
     if (mapping.method === '_capabilities') {
-      return synthesizeResponse(200, this.initResult ?? { v: 1 });
+      const base = isRecord(this.initResult) ? this.initResult : {};
+      return synthesizeResponse(200, {
+        v: 1,
+        features: [],
+        ...base,
+      });
     }
 
     // For notifications, send via POST /acp and return 204.
@@ -466,10 +472,11 @@ export class AcpHttpTransport implements DaemonTransport {
           body && typeof body === 'object' && 'error' in body
             ? String((body as { error: unknown }).error)
             : `HTTP ${res.status}`;
-        throw Object.assign(new Error(`GET /acp (session stream): ${detail}`), {
-          status: res.status,
+        throw new DaemonHttpError(
+          res.status,
           body,
-        });
+          `GET /acp (session stream): ${detail}`,
+        );
       }
 
       const ct = res.headers.get('content-type') ?? '';
@@ -479,11 +486,10 @@ export class AcpHttpTransport implements DaemonTransport {
         } catch {
           /* body already consumed or no body */
         }
-        throw Object.assign(
-          new Error(
-            `GET /acp (session stream): expected content-type text/event-stream, got "${ct}"`,
-          ),
-          { status: res.status, body: ct },
+        throw new DaemonHttpError(
+          res.status,
+          ct,
+          `GET /acp (session stream): expected content-type text/event-stream, got "${ct}"`,
         );
       }
 

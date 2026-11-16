@@ -4330,6 +4330,83 @@ describe('DaemonSessionClient clientId self-heal', () => {
     expect(session.clientId).toBe('client-2');
   });
 
+  it('does not double-resume when a concurrent stale-clientId call rejects after the first reattach already finished (#269)', async () => {
+    let resumeCalls = 0;
+    let promptAttempt = 0;
+    let releaseSecondStaleReject!: (res: Response) => void;
+    let secondInitialRequestStarted!: () => void;
+    const secondStarted = new Promise<void>((resolve) => {
+      secondInitialRequestStarted = resolve;
+    });
+
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/resume')) {
+        resumeCalls++;
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: `client-${resumeCalls + 1}`,
+          state: {},
+        });
+      }
+      if (req.url.endsWith('/session/s-1/prompt')) {
+        promptAttempt++;
+        // Call 1 (op A initial, client-1): fail immediately with invalid_client_id.
+        if (promptAttempt === 1) {
+          return invalidClientIdResponse();
+        }
+        // Call 2 (op B initial, also sent with client-1): hold in-flight until op A
+        // finishes reattach so `this.reattaching` is already cleared when op B catches.
+        if (promptAttempt === 2) {
+          secondInitialRequestStarted();
+          return new Promise<Response>((resolve) => {
+            releaseSecondStaleReject = resolve;
+          });
+        }
+        // Retries must carry the refreshed client-2 id and succeed.
+        if (req.headers['x-qwen-client-id'] === 'client-2') {
+          return jsonResponse(200, { stopReason: 'end_turn' });
+        }
+        return invalidClientIdResponse();
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = newSession(client);
+
+    const firstPrompt = session.prompt({
+      prompt: [{ type: 'text', text: 'first' }],
+    });
+    const secondPrompt = session.prompt({
+      prompt: [{ type: 'text', text: 'second' }],
+    });
+
+    // Wait for op B's initial request to have captured client-1 and op A to
+    // have completely finished its reattach + retry.
+    await secondStarted;
+    await expect(firstPrompt).resolves.toEqual({ stopReason: 'end_turn' });
+    expect(resumeCalls).toBe(1);
+    expect(session.clientId).toBe('client-2');
+
+    // Now op B's stale client-1 request rejects AFTER `reattaching` settled.
+    releaseSecondStaleReject(invalidClientIdResponse());
+    await expect(secondPrompt).resolves.toEqual({ stopReason: 'end_turn' });
+
+    expect(resumeCalls).toBe(1);
+    expect(session.clientId).toBe('client-2');
+    const promptClientIds = calls
+      .filter((c) => c.url.endsWith('/session/s-1/prompt'))
+      .map((c) => c.headers['x-qwen-client-id']);
+    expect(promptClientIds).toEqual([
+      'client-1',
+      'client-1',
+      'client-2',
+      'client-2',
+    ]);
+  });
+
   it('resolves prompt() when turn_complete arrives on SSE while promptNonBlocking is still in flight', async () => {
     let eventsController:
       | ReadableStreamDefaultController<Uint8Array>

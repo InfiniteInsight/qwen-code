@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { AcpHttpTransport } from '../../src/daemon/AcpHttpTransport.js';
+import { DaemonHttpError } from '../../src/daemon/DaemonHttpError.js';
 import { DaemonTransportClosedError } from '../../src/daemon/DaemonTransport.js';
 
 // ---------------------------------------------------------------------------
@@ -318,7 +319,11 @@ describe('AcpHttpTransport', () => {
   describe('URL→JSON-RPC mapping', () => {
     it('GET /capabilities returns cached init result', async () => {
       const { fetch } = initAwareFetch({
-        capabilitiesResult: { v: 2, transports: ['acp-ws'] },
+        capabilitiesResult: {
+          v: 2,
+          features: ['voice'],
+          transports: ['acp-ws'],
+        },
       });
       const transport = new AcpHttpTransport('http://d', undefined, fetch);
 
@@ -327,7 +332,55 @@ describe('AcpHttpTransport', () => {
       });
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body.v).toBe(2);
+      expect(body).toEqual({
+        v: 2,
+        features: ['voice'],
+        transports: ['acp-ws'],
+      });
+
+      transport.dispose();
+    });
+
+    it('GET /capabilities synthesizes v: 1 and features: [] when initResult omits them', async () => {
+      // Simulate REST /capabilities failing during initialize() so initResult
+      // retains the raw ACP initialize payload without `v` or `features`.
+      const fetchImpl = vi.fn(
+        async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url =
+            typeof input === 'string'
+              ? input
+              : input instanceof URL
+                ? input.toString()
+                : input.url;
+          const method = init?.method ?? 'GET';
+          const body = typeof init?.body === 'string' ? init.body : null;
+          if (url.endsWith('/acp') && method === 'POST') {
+            const parsed = body ? JSON.parse(body) : {};
+            return jsonResponse(200, {
+              jsonrpc: '2.0',
+              id: parsed.id,
+              result: { protocolVersion: 1, agentCapabilities: {} },
+            });
+          }
+          if (url.endsWith('/capabilities') && method === 'GET') {
+            return new Response('not found', { status: 404 });
+          }
+          return jsonResponse(200, {});
+        },
+      ) as unknown as typeof globalThis.fetch;
+
+      const transport = new AcpHttpTransport('http://d', undefined, fetchImpl);
+      const res = await transport.fetch('http://d/capabilities', {
+        method: 'GET',
+      });
+      expect(res.status).toBe(200);
+      const caps = await res.json();
+      expect(caps).toEqual({
+        v: 1,
+        features: [],
+        protocolVersion: 1,
+        agentCapabilities: {},
+      });
 
       transport.dispose();
     });
@@ -818,8 +871,67 @@ describe('AcpHttpTransport — subscribeEvents (session-scoped /acp stream)', ()
     expect(reject).toHaveBeenCalledTimes(1); // swept by the wrapper finally
     // ...and with the REAL cause (the 401), not a generic message (M4W9a).
     const reason = reject.mock.calls[0][0] as Error;
+    expect(reason).toBeInstanceOf(DaemonHttpError);
     expect(reason.message).toMatch(/401/);
     expect(pending.has(7)).toBe(false);
+    t.dispose();
+  });
+
+  it('throws typed DaemonHttpError with status and body when GET /acp returns non-2xx (#269)', async () => {
+    const errorPayload = { error: 'invalid session token', code: 'forbidden' };
+    const { fetch } = initAwareFetch({
+      connectionIdHeader: 'conn-1',
+      subsequentReply: (req) => {
+        if (req.method === 'GET' && req.headers['acp-session-id']) {
+          return jsonResponse(403, errorPayload);
+        }
+        return jsonResponse(200, { jsonrpc: '2.0', id: 1, result: { ok: true } });
+      },
+    });
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+
+    let caught: unknown;
+    try {
+      await collect(t, 'sess-1');
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(DaemonHttpError);
+    const httpErr = caught as DaemonHttpError;
+    expect(httpErr.status).toBe(403);
+    expect(httpErr.body).toEqual(errorPayload);
+    expect(httpErr.message).toContain('invalid session token');
+    t.dispose();
+  });
+
+  it('throws typed DaemonHttpError with status and body when GET /acp returns wrong content-type (#269)', async () => {
+    const { fetch } = initAwareFetch({
+      connectionIdHeader: 'conn-1',
+      subsequentReply: (req) => {
+        if (req.method === 'GET' && req.headers['acp-session-id']) {
+          return new Response('<html>bad gateway page</html>', {
+            status: 200,
+            headers: { 'content-type': 'text/html; charset=utf-8' },
+          });
+        }
+        return jsonResponse(200, { jsonrpc: '2.0', id: 1, result: { ok: true } });
+      },
+    });
+    const t = new AcpHttpTransport('http://d', undefined, fetch);
+
+    let caught: unknown;
+    try {
+      await collect(t, 'sess-1');
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(DaemonHttpError);
+    const httpErr = caught as DaemonHttpError;
+    expect(httpErr.status).toBe(200);
+    expect(httpErr.body).toBe('text/html; charset=utf-8');
+    expect(httpErr.message).toMatch(/expected content-type text\/event-stream/i);
     t.dispose();
   });
 
