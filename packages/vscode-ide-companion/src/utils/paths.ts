@@ -7,7 +7,7 @@
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
-import * as dotenv from 'dotenv';
+import { parseDotenv } from '@qwen-code/qwen-code-core/envVarResolver';
 
 /**
  * Expands tilde and resolves relative paths to absolute.
@@ -66,7 +66,7 @@ function bootstrapHomeEnvOverrides(): void {
   const KEYS = ['QWEN_HOME', 'QWEN_RUNTIME_DIR'] as const;
   const readInto = (file: string) => {
     try {
-      const parsed = dotenv.parse(fs.readFileSync(file, 'utf-8'));
+      const parsed = parseDotenv(fs.readFileSync(file, 'utf-8'));
       for (const key of KEYS) {
         if (parsed[key] && !Object.hasOwn(process.env, key)) {
           process.env[key] = parsed[key];

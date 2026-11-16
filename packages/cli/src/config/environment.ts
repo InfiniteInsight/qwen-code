@@ -7,8 +7,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import * as dotenv from 'dotenv';
 import { getErrorMessage, QWEN_DIR, Storage } from '@qwen-code/qwen-code-core';
+import { parseDotenv } from '@qwen-code/qwen-code-core/envVarResolver';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import {
   DEFAULT_EXCLUDED_ENV_VARS,
@@ -246,7 +246,7 @@ function readHomeEnvInto(file: string): void {
     return;
   }
   try {
-    const parsed = dotenv.parse(fs.readFileSync(file, 'utf-8'));
+    const parsed = parseDotenv(fs.readFileSync(file, 'utf-8'));
     for (const key of HOME_ENV_BOOTSTRAP_KEYS) {
       if (parsed[key] && !Object.hasOwn(process.env, key)) {
         process.env[key] = parsed[key];
@@ -347,7 +347,7 @@ export function getHomeEnvFallbackVars(
       continue;
     }
     try {
-      const parsed = dotenv.parse(fs.readFileSync(candidate, 'utf-8'));
+      const parsed = parseDotenv(fs.readFileSync(candidate, 'utf-8'));
       for (const key in parsed) {
         if (Object.hasOwn(parsed, key) && !Object.hasOwn(process.env, key)) {
           result[key] ??= parsed[key]!;
@@ -498,7 +498,7 @@ export function setUpCloudShellEnvironment(envFilePath: string | null): void {
   // one of the .env files, we set the Cloud Shell-specific default here.
   if (envFilePath && fs.existsSync(envFilePath)) {
     const envFileContent = fs.readFileSync(envFilePath);
-    const parsedEnv = dotenv.parse(envFileContent);
+    const parsedEnv = parseDotenv(envFileContent);
     if (parsedEnv['GOOGLE_CLOUD_PROJECT']) {
       // .env file takes precedence in Cloud Shell
       process.env['GOOGLE_CLOUD_PROJECT'] = parsedEnv['GOOGLE_CLOUD_PROJECT'];
@@ -554,7 +554,7 @@ function parseEnvFiles(
   for (const envFilePath of envFilePaths) {
     try {
       const envFileContent = fs.readFileSync(envFilePath, 'utf-8');
-      const parsedEnv = dotenv.parse(envFileContent);
+      const parsedEnv = parseDotenv(envFileContent);
       const normalizedEnvFilePath = path.normalize(envFilePath);
       const isHomeScopedEnvFile = userLevelPaths.has(normalizedEnvFilePath);
       const isQwenScopedEnvFile =

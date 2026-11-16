@@ -5,7 +5,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as dotenv from 'dotenv';
 import {
+  parseDotenv,
   resolveEnvVarsInString,
   resolveEnvVarsInObject,
 } from './envVarResolver.js';
@@ -338,5 +340,164 @@ describe('resolveEnvVarsInObject', () => {
     expect(result.secondary.ref).not.toBe(result.primary);
     expect(result.primary).not.toBe(obj1); // New object created
     expect(result.secondary).not.toBe(obj2); // New object created
+  });
+});
+
+describe('linear-time dotenv and $VAR parity + ReDoS resistance (#264)', () => {
+  const ADVERSARIAL_BYTES = 1024 * 1024;
+
+  it.each([
+    'A=1\nB=2',
+    'export FOO="hello\\nworld\\r!"\nexport = 123\nexport\n=456\nexport\nBAR=789',
+    "SINGLE='line1\nline2\\'' # trailing comment\nUNCLOSED='abc\\'",
+    'COLON: value # comment\nCOLON_NL:\n"quoted"\nCOLON_EMPTY:\n\nNEXT=1',
+    'MULTI_QUOTE = \'bar\' \'baz\'\nEXTRA = \'bar\' extra',
+    'CRLF=one\r\nCR=two\rBACKTICK=`three\nfour`',
+    'EMPTY_COMMENT =   # just a comment\nNO_SEP_LINE\nDOT.KEY-1=ok',
+    'ESCAPE_CHAIN="a\\\\\\"b"\nNEWLINE_BEFORE_QUOTE=\n\'orphan\'\nUNCLOSED_NL=\n\'unclosed\nAFTER=yes',
+    'U2028_VAL=a\u2028b=2\nU2028_COMMENT=x#c\u2028AFTER_SEP=3',
+  ])('matches dotenv.parse on tricky edge case %#', (sample) => {
+    expect(parseDotenv(sample)).toEqual(dotenv.parse(sample));
+  });
+
+  it('matches dotenv.parse on Buffer inputs', () => {
+    const buf = Buffer.from('FOO="bar\\nbaz"\n# comment\nQUX=1\n', 'utf8');
+    expect(parseDotenv(buf)).toEqual(dotenv.parse(buf));
+  });
+
+  it('matches dotenv.parse across 1,000 deterministic fuzz documents', () => {
+    let seed = 0x264_c0de;
+    const rand = (max: number) => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed % max;
+    };
+    const tokens = [
+      'A',
+      'B_1',
+      'dot.key-2',
+      'export',
+      'export ',
+      '=',
+      ': ',
+      ':',
+      ' ',
+      '\t',
+      '\n',
+      '\r\n',
+      '\r',
+      '\u2028',
+      "'",
+      '"',
+      '`',
+      "\\'",
+      '\\"',
+      '\\`',
+      '\\n',
+      '\\r',
+      '\\',
+      '#comment',
+      'val',
+    ];
+    for (let docIdx = 0; docIdx < 1000; docIdx++) {
+      const len = 1 + rand(35);
+      let doc = '';
+      for (let k = 0; k < len; k++) {
+        doc += tokens[rand(tokens.length)];
+      }
+      expect(parseDotenv(doc)).toEqual(dotenv.parse(doc));
+    }
+  });
+
+  it('matches legacy regex oracle on 1,000 deterministic $VAR/${VAR} fuzz strings', () => {
+    const legacyRegex = /\$(?:(\w+)|{([^}]+)})/g;
+    const env: Record<string, string> = {
+      A: 'alpha',
+      B: '$&',
+      'a$B': 'weird',
+      x: 'ex',
+      y: 'why',
+    };
+    let seed = 0x51a_264;
+    const rand = (max: number) => {
+      seed = (Math.imul(seed, 22695477) + 1) >>> 0;
+      return seed % max;
+    };
+    const pieces = [
+      '$',
+      '${',
+      '}',
+      'A',
+      'B',
+      'x',
+      'y',
+      'UNDEF',
+      '_9',
+      ' ',
+      'session_id',
+      'QWEN_SERVER_TOKEN',
+    ];
+    for (let idx = 0; idx < 1000; idx++) {
+      const count = 1 + rand(25);
+      let input = '';
+      for (let k = 0; k < count; k++) {
+        input += pieces[rand(pieces.length)];
+      }
+      const expected = input.replace(legacyRegex, (m, v1, v2) => {
+        const name = (v1 || v2) as string;
+        const upper = name.toUpperCase();
+        if (
+          upper === 'SESSION_ID' ||
+          upper === 'QWEN_CODE_SESSION_ID' ||
+          upper === 'QWEN_SERVER_TOKEN'
+        ) {
+          return m;
+        }
+        return Object.hasOwn(env, name) ? env[name]! : m;
+      });
+      expect(
+        resolveEnvVarsInString(input, env, { processEnvFallback: false }),
+      ).toBe(expected);
+    }
+  });
+
+  it.each([
+    ['newlines', '\n'],
+    ['space + newline', ' \n'],
+    ['key without separator', 'a\n'],
+    ['export + newline', 'export\n'],
+    ['U+2028 line separators', '\u2028'],
+    ['empty assignments', 'A=\n'],
+    ['unclosed single quotes across lines', "A='unclosed\n"],
+  ])(
+    'parses a 1 MiB adversarial .env of %s in well under a second',
+    (_label, unit) => {
+      const payload = unit.repeat(
+        Math.floor(ADVERSARIAL_BYTES / Buffer.byteLength(unit)),
+      );
+      const started = performance.now();
+      const parsed = parseDotenv(payload);
+      expect(performance.now() - started).toBeLessThan(1000);
+      expect(typeof parsed).toBe('object');
+    },
+  );
+
+  it('parses 1 MiB of unclosed quote lines followed by an invalid-tail quote in well under a second', () => {
+    const unit = "A='unclosed\n";
+    const payload =
+      unit.repeat(Math.floor((ADVERSARIAL_BYTES - 16) / unit.length)) + "'junk";
+    const started = performance.now();
+    const parsed = parseDotenv(payload);
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(parsed['A']).toBe("'unclosed");
+  });
+
+  it('resolves a 1 MiB settings value of unclosed ${ in well under a second', () => {
+    const run = '${'.repeat(Math.floor(ADVERSARIAL_BYTES / 2));
+    const started = performance.now();
+    const resolved = resolveEnvVarsInObject({
+      tools: { callCommand: run },
+    });
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(resolved.tools.callCommand.length).toBe(run.length);
   });
 });

@@ -69,6 +69,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/acp-bridge/src/sessionAttachmentLimits.ts',
+    {
+      reason:
+        'The daemon-wide per-attachment upload cap (QWEN_SESSION_ATTACHMENT_MAX_ITEM_BYTES) is process-scoped alongside the daemon staged-upload budget.',
+      accesses: { whole: 1 },
+    },
+  ],
+  [
     'packages/acp-bridge/src/spawnChannel.ts',
     {
       reason:
