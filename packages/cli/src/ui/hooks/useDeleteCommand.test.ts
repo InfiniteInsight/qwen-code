@@ -824,4 +824,81 @@ describe('useDeleteCommand', () => {
       );
     });
   });
+
+  describe('activeSessionId guard (attached daemon session)', () => {
+    it('blocks single-session deletion when sessionId matches activeSessionId', async () => {
+      const removeSession = vi.fn().mockResolvedValue(true);
+      const { config } = createConfig({
+        currentSessionId: 'local-ephemeral-id',
+        removeSession,
+      });
+      const addItem = vi.fn();
+      const { result } = renderHook(() =>
+        useDeleteCommand({
+          config,
+          addItem,
+          activeSessionId: 'daemon-attached-id',
+        }),
+      );
+
+      await act(async () => {
+        result.current.handleDelete('daemon-attached-id');
+        await flushAsync();
+      });
+
+      expect(removeSession).not.toHaveBeenCalled();
+      expect(addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: 'Cannot delete the current active session.',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('strips activeSessionId in multi-delete and blocks when only activeSessionId is selected', async () => {
+      const removeSessions = vi.fn().mockResolvedValue({
+        removed: ['other-session'],
+        notFound: [],
+        errors: [],
+      });
+      const { config } = createConfig({
+        currentSessionId: 'local-ephemeral-id',
+        removeSessions,
+      });
+      const addItem = vi.fn();
+      const { result } = renderHook(() =>
+        useDeleteCommand({
+          config,
+          addItem,
+          activeSessionId: 'daemon-attached-id',
+        }),
+      );
+
+      await act(async () => {
+        result.current.handleDeleteMany(['daemon-attached-id']);
+        await flushAsync();
+      });
+
+      expect(removeSessions).not.toHaveBeenCalled();
+      expect(addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: 'Cannot delete the current active session.',
+        }),
+        expect.any(Number),
+      );
+
+      addItem.mockClear();
+      await act(async () => {
+        result.current.handleDeleteMany([
+          'other-session',
+          'daemon-attached-id',
+        ]);
+        await flushAsync();
+      });
+
+      expect(removeSessions).toHaveBeenCalledWith(['other-session']);
+    });
+  });
 });

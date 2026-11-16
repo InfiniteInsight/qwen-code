@@ -346,4 +346,64 @@ describe('RewindSelector', () => {
     resolveRewind!();
     await flush();
   });
+
+  it('falls back to daemon.getRewindSnapshots matched by promptId and turnIndex', async () => {
+    vi.spyOn(fileHistoryService, 'getDiffStats').mockRejectedValue(
+      new Error('no local checkpoint'),
+    );
+    const getRewindSnapshots = vi.fn().mockResolvedValue({
+      snapshots: [
+        {
+          promptId: 'daemon-only-1',
+          turnIndex: 0,
+          diffStats: {
+            filesChanged: 3,
+            insertions: 12,
+            deletions: 4,
+          },
+        },
+        {
+          promptId: 'prompt-2',
+          turnIndex: 1,
+          diffStats: {
+            filesChanged: ['src/a.ts', 'src/b.ts'],
+            insertions: 7,
+            deletions: 2,
+          },
+        },
+      ],
+    });
+
+    const { lastFrame } = render(
+      <RewindSelector
+        history={[
+          userTurn(1, 'first prompt without local promptId'),
+          userTurn(2, 'second prompt with promptId', 'prompt-2'),
+        ]}
+        onRewind={vi.fn()}
+        onCancel={vi.fn()}
+        fileCheckpointingEnabled={true}
+        fileHistoryService={fileHistoryService}
+        daemon={{ getRewindSnapshots }}
+      />,
+    );
+
+    // Selected initially is turn #2 -> matches snapshot by promptId ('prompt-2')
+    pressKey({ name: 'return' });
+    await flush();
+
+    expect(getRewindSnapshots).toHaveBeenCalledTimes(1);
+    expect(lastFrame()).toContain('Restore code and conversation');
+    expect(lastFrame()).toContain('(+7 -2 in 2 files)');
+
+    // Return to pick list, select turn #1 (no promptId) -> matches snapshot by turnIndex === 0
+    pressKey({ name: 'escape' });
+    pressKey({ name: 'up' });
+    pressKey({ name: 'return' });
+    await flush();
+
+    expect(getRewindSnapshots).toHaveBeenCalledTimes(2);
+    expect(lastFrame()).toContain('Restore code and conversation');
+    expect(lastFrame()).toContain('(+12 -4 in 3 files)');
+  });
 });

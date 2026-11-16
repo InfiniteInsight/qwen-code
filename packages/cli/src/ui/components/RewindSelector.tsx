@@ -24,6 +24,19 @@ export interface RewindSelectorProps {
   onCancel: () => void;
   fileCheckpointingEnabled: boolean;
   fileHistoryService: FileHistoryService;
+  daemon?: {
+    getRewindSnapshots?: () => Promise<{
+      snapshots?: Array<{
+        promptId: string;
+        turnIndex: number;
+        diffStats?: {
+          filesChanged: number | string[];
+          insertions: number;
+          deletions: number;
+        };
+      }>;
+    }>;
+  } | null;
 }
 
 const MAX_VISIBLE_ITEMS = 7;
@@ -158,6 +171,7 @@ export function RewindSelector({
   onCancel,
   fileCheckpointingEnabled,
   fileHistoryService,
+  daemon,
 }: RewindSelectorProps) {
   const { columns: width, rows: height } = useTerminalSize();
   const userTurns = useMemo(() => getUserTurns(history), [history]);
@@ -200,15 +214,49 @@ export function RewindSelector({
   useEffect(() => {
     if (!restoreItem || !fileCheckpointingEnabled) return;
     const promptId = (restoreItem as HistoryItemUser).promptId;
-    if (!promptId) {
-      setDiffStats(undefined);
-      setLoadingDiff(false);
-      return;
-    }
+    const targetTurnIndex = userTurns.findIndex(
+      (turn) => turn.id === restoreItem.id,
+    );
     let cancelled = false;
     setLoadingDiff(true);
-    fileHistoryService
-      .getDiffStats(promptId)
+    const loadDiffStats = async (): Promise<DiffStats | undefined> => {
+      if (promptId) {
+        try {
+          const localStats = await fileHistoryService.getDiffStats(promptId);
+          if (localStats) return localStats;
+        } catch {
+          /* fall back to daemon snapshots if attached */
+        }
+      }
+      if (typeof daemon?.getRewindSnapshots === 'function') {
+        try {
+          const snapRes = await daemon.getRewindSnapshots();
+          const matched = snapRes?.snapshots?.find(
+            (s) =>
+              (promptId && s.promptId === promptId) ||
+              (targetTurnIndex >= 0 && s.turnIndex === targetTurnIndex),
+          );
+          if (matched?.diffStats) {
+            const rawFiles = matched.diffStats.filesChanged;
+            const filesChanged = Array.isArray(rawFiles)
+              ? rawFiles
+              : Array.from(
+                  { length: Math.max(0, Number(rawFiles) || 0) },
+                  (_, i) => String(i),
+                );
+            return {
+              filesChanged,
+              insertions: matched.diffStats.insertions ?? 0,
+              deletions: matched.diffStats.deletions ?? 0,
+            };
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      return undefined;
+    };
+    loadDiffStats()
       .then((stats) => {
         if (!cancelled) {
           setDiffStats(stats);
@@ -226,7 +274,13 @@ export function RewindSelector({
     return () => {
       cancelled = true;
     };
-  }, [restoreItem, fileCheckpointingEnabled, fileHistoryService]);
+  }, [
+    restoreItem,
+    fileCheckpointingEnabled,
+    fileHistoryService,
+    daemon,
+    userTurns,
+  ]);
 
   // Legacy confirm handler
   const handleConfirmSelect = useCallback(

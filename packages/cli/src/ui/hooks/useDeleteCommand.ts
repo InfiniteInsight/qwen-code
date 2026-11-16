@@ -19,6 +19,12 @@ export interface UseDeleteCommandOptions {
    * only drive the dialog don't have to wire it up.
    */
   logger?: Logger | null;
+  /**
+   * Additional active session ID to guard against deletion (e.g. the attached
+   * daemon session in `--attach-daemon` mode when it differs from
+   * `config.getSessionId()`).
+   */
+  activeSessionId?: string;
 }
 
 export interface UseDeleteCommandResult {
@@ -42,7 +48,7 @@ export function useDeleteCommand(
     setIsDeleteDialogOpen(false);
   }, []);
 
-  const { config, addItem, logger } = options ?? {};
+  const { config, addItem, logger, activeSessionId } = options ?? {};
 
   const isDeletingManyRef = useRef(false);
 
@@ -88,7 +94,10 @@ export function useDeleteCommand(
       closeDeleteDialog();
 
       // Prevent deleting the current session.
-      if (sessionId === config.getSessionId()) {
+      if (
+        sessionId === config.getSessionId() ||
+        (activeSessionId !== undefined && sessionId === activeSessionId)
+      ) {
         addItem?.(
           {
             type: 'info',
@@ -134,7 +143,7 @@ export function useDeleteCommand(
         );
       }
     },
-    [closeDeleteDialog, config, addItem, purgeSessionLogs],
+    [closeDeleteDialog, config, addItem, purgeSessionLogs, activeSessionId],
   );
 
   const handleDeleteMany = useCallback(
@@ -157,7 +166,9 @@ export function useDeleteCommand(
         isDeletingManyRef.current = true;
 
         const currentId = config.getSessionId();
-        const filtered = sessionIds.filter((id) => id !== currentId);
+        const filtered = sessionIds.filter(
+          (id) => id !== currentId && id !== activeSessionId,
+        );
 
         if (filtered.length === 0) {
           addItem?.(
@@ -272,7 +283,7 @@ export function useDeleteCommand(
         isDeletingManyRef.current = false;
       }
     },
-    [closeDeleteDialog, config, addItem, purgeSessionLogs],
+    [closeDeleteDialog, config, addItem, purgeSessionLogs, activeSessionId],
   );
 
   return {

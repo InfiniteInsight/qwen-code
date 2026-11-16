@@ -589,6 +589,14 @@ export const DialogManager = ({
 
   if (uiState.isDeleteDialogOpen) {
     const currentSessionId = config.getSessionId();
+    const daemonSessionId = daemon?.session?.sessionId;
+    const disabledIds = Array.from(
+      new Set(
+        [currentSessionId, daemonSessionId].filter(
+          (id): id is string => Boolean(id),
+        ),
+      ),
+    );
     return (
       <SessionPicker
         sessionService={config.getSessionService()}
@@ -598,7 +606,7 @@ export const DialogManager = ({
         title={t('Delete Session')}
         enableMultiSelect
         onConfirmMulti={uiActions.handleDeleteMany}
-        disabledIds={currentSessionId ? [currentSessionId] : undefined}
+        disabledIds={disabledIds.length > 0 ? disabledIds : undefined}
       />
     );
   }
@@ -609,8 +617,12 @@ export const DialogManager = ({
         history={uiState.history}
         onRewind={uiActions.handleRewindConfirm}
         onCancel={uiActions.closeRewindSelector}
-        fileCheckpointingEnabled={config.getFileCheckpointingEnabled()}
+        fileCheckpointingEnabled={
+          config.getFileCheckpointingEnabled() ||
+          Boolean(daemon?.getRewindSnapshots)
+        }
         fileHistoryService={config.getFileHistoryService()}
+        daemon={daemon}
       />
     );
   }

@@ -2039,4 +2039,96 @@ describe('multi-step tool turns commit sub-turns as they complete (#247)', () =>
     }).state;
     expect(s.sessionTitle).toBe('Renamed Session');
   });
+
+  it('projects followup_suggestion, model_switch_failed, session_recording_degraded, current_mode_update, config_options_update, tool_output, and top-level shell_output', () => {
+    let s = initialDaemonProjectionState(SELF);
+
+    // 1. followup_suggestion sets followupSuggestion and user_message_chunk clears it
+    s = projectDaemonEvent(s, {
+      type: 'followup_suggestion',
+      data: { sessionId: 's1', suggestion: 'Run the test suite' },
+    }).state;
+    expect(s.followupSuggestion).toBe('Run the test suite');
+
+    s = projectDaemonEvent(
+      s,
+      sessionUpdate(
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'Next turn' },
+        },
+        SELF,
+      ),
+    ).state;
+    expect(s.followupSuggestion).toBeNull();
+
+    // 2. model_switch_failed commits an error item
+    const switchFailed = projectDaemonEvent(s, {
+      type: 'model_switch_failed',
+      data: {
+        sessionId: 's1',
+        requestedModelId: 'qwen-max',
+        error: 'Quota exceeded',
+      },
+    });
+    expect(switchFailed.committed).toEqual([
+      {
+        type: 'error',
+        text: 'Model switch to qwen-max failed: Quota exceeded',
+      },
+    ]);
+
+    // 3. session_recording_degraded commits a warning item
+    const degraded = projectDaemonEvent(switchFailed.state, {
+      type: 'session_recording_degraded',
+      data: { sessionId: 's1', error: 'ENOSPC: no space left on device' },
+    });
+    expect(degraded.committed).toEqual([
+      {
+        type: 'warning',
+        text: 'ENOSPC: no space left on device',
+      },
+    ]);
+
+    // 4. current_mode_update and config_options_update update approvalMode and reasoningEffort
+    s = projectDaemonEvent(
+      degraded.state,
+      sessionUpdate({
+        sessionUpdate: 'current_mode_update',
+        currentModeId: 'yolo',
+      }),
+    ).state;
+    expect(s.approvalMode).toBe('yolo');
+
+    s = projectDaemonEvent(
+      s,
+      sessionUpdate({
+        sessionUpdate: 'config_options_update',
+        configOptions: [
+          { id: 'reasoning_effort', currentValue: 'high' },
+        ],
+      }),
+    ).state;
+    expect(s.reasoningEffort).toBe('high');
+
+    // 5. top-level shell_output and session_update tool_output append to pendingShellOutput
+    s = projectDaemonEvent(s, {
+      type: 'user_shell_command',
+      data: { command: 'ls' },
+      originatorClientId: SELF,
+    }).state;
+    s = projectDaemonEvent(s, {
+      type: 'shell_output',
+      data: { output: 'file1\n' },
+      originatorClientId: SELF,
+    }).state;
+    s = projectDaemonEvent(
+      s,
+      sessionUpdate({
+        sessionUpdate: 'tool_output',
+        chunk: 'file2\n',
+      }),
+    ).state;
+    expect(pendingToolCallsOf(s)[0]?.resultDisplay).toBe('file1\nfile2\n');
+  });
 });

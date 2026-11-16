@@ -47,11 +47,17 @@ export const planCommand: SlashCommand = {
       }
       const restoredMode = config.getPrePlanMode();
       try {
-        config.setApprovalMode(restoredMode);
         if (context.services.daemon?.setApprovalMode) {
           await context.services.daemon.setApprovalMode(restoredMode, {
             planMode: false,
           });
+          try {
+            config.setApprovalMode(restoredMode);
+          } catch {
+            /* daemon owns approval mode */
+          }
+        } else {
+          config.setApprovalMode(restoredMode);
         }
       } catch (e) {
         return {
@@ -69,11 +75,17 @@ export const planCommand: SlashCommand = {
 
     if (currentMode !== ApprovalMode.PLAN) {
       try {
-        config.setApprovalMode(ApprovalMode.PLAN);
         if (context.services.daemon?.setApprovalMode) {
           await context.services.daemon.setApprovalMode(ApprovalMode.PLAN, {
             planMode: true,
           });
+          try {
+            config.setApprovalMode(ApprovalMode.PLAN);
+          } catch {
+            /* daemon owns approval mode */
+          }
+        } else {
+          config.setApprovalMode(ApprovalMode.PLAN);
         }
       } catch (e) {
         return {

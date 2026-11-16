@@ -85,6 +85,7 @@ import {
 import {
   readDaemonModels,
   readDaemonModes,
+  readDaemonReasoningEffort,
   type DaemonSessionControl,
   type DaemonSessionStateLike,
 } from './daemon-session-state.js';
@@ -210,6 +211,10 @@ export interface UseDaemonStreamResult {
   daemonApprovalMode: string | undefined;
   /** The session's display title as the daemon reports it. */
   daemonSessionTitle: string | undefined;
+  /** The session's active reasoning effort as the daemon reports it. */
+  daemonReasoningEffort?: string;
+  /** Ghost-text follow-up suggestion broadcast by the daemon. */
+  daemonFollowupSuggestion?: string | null;
   retryLastPrompt: () => Promise<void>;
   handleApprovalModeChange: (newApprovalMode?: string) => Promise<void>;
   activePtyId: number | undefined;
@@ -221,6 +226,7 @@ const now = () => Date.now();
 function recordDaemonUsage(
   usage: DaemonTurnUsage | undefined,
   modelId: string | undefined,
+  sessionId?: string,
 ): void {
   if (!usage) return;
   if (typeof usage.inputTokens === 'number' && usage.inputTokens >= 0) {
@@ -248,10 +254,13 @@ function recordDaemonUsage(
         totalTokenCount: total,
       },
     );
-    uiTelemetryService.addEvent({
-      ...event,
-      'event.name': EVENT_API_RESPONSE,
-    } as UiEvent);
+    uiTelemetryService.addEvent(
+      {
+        ...event,
+        'event.name': EVENT_API_RESPONSE,
+      } as UiEvent,
+      sessionId,
+    );
   }
 }
 
@@ -268,10 +277,16 @@ function withLoadState(
   const modelId = readDaemonModels(loadState).currentModelId ?? base.modelId;
   const approvalMode =
     readDaemonModes(loadState).currentModeId ?? base.approvalMode;
-  if (modelId === base.modelId && approvalMode === base.approvalMode) {
+  const reasoningEffort =
+    readDaemonReasoningEffort(loadState) ?? base.reasoningEffort;
+  if (
+    modelId === base.modelId &&
+    approvalMode === base.approvalMode &&
+    reasoningEffort === base.reasoningEffort
+  ) {
     return base;
   }
-  return { ...base, modelId, approvalMode };
+  return { ...base, modelId, approvalMode, reasoningEffort };
 }
 
 function hasRenderableStateChange(
@@ -286,7 +301,9 @@ function hasRenderableStateChange(
     prev.pendingPermission !== next.pendingPermission ||
     prev.modelId !== next.modelId ||
     prev.approvalMode !== next.approvalMode ||
-    prev.sessionTitle !== next.sessionTitle
+    prev.sessionTitle !== next.sessionTitle ||
+    prev.reasoningEffort !== next.reasoningEffort ||
+    prev.followupSuggestion !== next.followupSuggestion
   );
 }
 
@@ -295,6 +312,7 @@ export function useDaemonStream(
   addItem: AddHistoryItem,
   loss?: DaemonLossHandling,
   onFrame?: (frame: DaemonFrame) => void,
+  getTelemetrySessionId?: () => string | undefined,
 ): UseDaemonStreamResult {
   // PRECONDITION: the driver must be ATTACHED (clientId set) before mount.
   // Without a clientId the reducer can't distinguish our own echo from a remote
@@ -313,9 +331,14 @@ export function useDaemonStream(
   lossRef.current = loss;
   const onFrameRef = useRef(onFrame);
   onFrameRef.current = onFrame;
+  const getTelemetrySessionIdRef = useRef(getTelemetrySessionId);
+  getTelemetrySessionIdRef.current = getTelemetrySessionId;
+  const driverRef = useRef(driver);
+  driverRef.current = driver;
   const goneRef = useRef(false);
   const pendingClearTokensRef = useRef(new Set<symbol>());
   const lastPromptRef = useRef<string | DaemonPromptBlock[] | null>(null);
+  const shellResultSeqRef = useRef(0);
   // The driver whose replay snapshot has been committed. A ref (not state) so
   // StrictMode's effect re-run on the same instance sees it and never seeds a
   // second copy of the transcript.
@@ -329,6 +352,7 @@ export function useDaemonStream(
       pendingThought: '',
       tools: [],
       pendingPermission: undefined,
+      followupSuggestion: null,
     };
     stateRef.current = cleared;
     streamingResponseLengthRef.current = 0;
@@ -341,6 +365,19 @@ export function useDaemonStream(
   // event loop and the prompt()-resolution finalizer.
   const applyFrame = useCallback(
     (frame: DaemonFrame) => {
+      const currentDriver = driverRef.current;
+      if (
+        currentDriver.clientId &&
+        stateRef.current.ownClientId !== currentDriver.clientId
+      ) {
+        stateRef.current = {
+          ...stateRef.current,
+          ownClientId: currentDriver.clientId,
+        };
+      }
+      if (frame.type === 'user_shell_result') {
+        shellResultSeqRef.current += 1;
+      }
       if (pendingClearTokensRef.current.size > 0) {
         const update = (
           frame.data as {
@@ -388,7 +425,12 @@ export function useDaemonStream(
       const prevUsage = stateRef.current.lastUsage;
       const { state, committed } = projectDaemonEvent(stateRef.current, frame);
       if (state.lastUsage && state.lastUsage !== prevUsage) {
-        recordDaemonUsage(state.lastUsage, state.modelId);
+        recordDaemonUsage(
+          state.lastUsage,
+          state.modelId,
+          getTelemetrySessionIdRef.current?.() ??
+            currentDriver.session?.sessionId,
+        );
       }
       const su = (frame.data as { update?: { sessionUpdate?: string } })?.update
         ?.sessionUpdate;
@@ -497,6 +539,7 @@ export function useDaemonStream(
     // empty while MainContent's progressive <Static> replay catches up, and
     // nothing bumps the Static remount key (the #3899 path is never taken).
     if (seededDriverRef.current !== driver) {
+      const prevDriver = seededDriverRef.current;
       seededDriverRef.current = driver;
       const replay = driver.replaySnapshot;
       if (replay) {
@@ -514,14 +557,38 @@ export function useDaemonStream(
         const seeded = withLoadState(state, driver.state);
         stateRef.current = seeded;
         if (seeded.lastUsage) {
-          recordDaemonUsage(seeded.lastUsage, seeded.modelId);
+          recordDaemonUsage(
+            seeded.lastUsage,
+            seeded.modelId,
+            getTelemetrySessionIdRef.current?.() ?? driver.session?.sessionId,
+          );
         }
         for (const item of committed) addItemRef.current(item, now());
         streamingResponseLengthRef.current =
           seeded.pendingThought.length + seeded.pendingText.length;
+        if (prevDriver !== null) {
+          lastPromptRef.current = null;
+          setInitError(null);
+        }
         setSnapshot(seeded);
         // The raw wire events are in history now; let the client drop them.
         driver.consumeReplaySnapshot?.();
+      } else if (prevDriver !== null) {
+        const next = withLoadState(
+          {
+            ...initialDaemonProjectionState(driver.clientId),
+            lastEventId: driver.lastEventId,
+            streamingState: driver.hasActivePrompt
+              ? StreamingState.Responding
+              : StreamingState.Idle,
+          },
+          driver.state,
+        );
+        stateRef.current = next;
+        setSnapshot(next);
+        streamingResponseLengthRef.current = 0;
+        lastPromptRef.current = null;
+        setInitError(null);
       }
     }
 
@@ -640,6 +707,7 @@ export function useDaemonStream(
         const respondingState = {
           ...stateRef.current,
           streamingState: StreamingState.Responding,
+          followupSuggestion: null,
         };
         stateRef.current = respondingState;
         setSnapshot((prev) =>
@@ -714,8 +782,12 @@ export function useDaemonStream(
       const trimmed = command.trim();
       if (!trimmed || typeof driver.shellCommand !== 'function') return;
       addItemRef.current({ type: 'user_shell', text: trimmed }, now());
+      const seqBefore = shellResultSeqRef.current;
       const res = await driver.shellCommand(trimmed);
-      if (stateRef.current.pendingShellCommand === undefined) {
+      if (
+        shellResultSeqRef.current === seqBefore &&
+        stateRef.current.pendingShellCommand === undefined
+      ) {
         // When the driver resolves synchronously without having emitted SSE
         // shell frames yet, commit the result directly so the UI always shows
         // the shell output.
@@ -783,14 +855,45 @@ export function useDaemonStream(
       if (payload?.answers) {
         extra['answers'] = payload.answers;
       }
-      await driver.respondToSessionPermission(
-        gate.requestId,
+      const responsePayload =
         optionId === null
-          ? { outcome: { outcome: 'cancelled' }, ...extra }
-          : { outcome: { outcome: 'selected', optionId }, ...extra },
-      );
+          ? { outcome: { outcome: 'cancelled' as const }, ...extra }
+          : {
+              outcome: { outcome: 'selected' as const, optionId },
+              ...extra,
+            };
+      try {
+        const accepted = await driver.respondToSessionPermission(
+          gate.requestId,
+          responsePayload,
+        );
+        if (
+          accepted === false &&
+          stateRef.current.pendingPermission?.requestId === gate.requestId
+        ) {
+          applyFrame({
+            type: 'permission_resolved',
+            data: { requestId: gate.requestId },
+          });
+        }
+      } catch (err) {
+        const status =
+          (err as { status?: unknown; statusCode?: unknown } | null)?.status ??
+          (err as { statusCode?: unknown } | null)?.statusCode;
+        if (
+          (status === 404 || status === 410) &&
+          stateRef.current.pendingPermission?.requestId === gate.requestId
+        ) {
+          applyFrame({
+            type: 'permission_resolved',
+            data: { requestId: gate.requestId },
+          });
+          return;
+        }
+        throw err;
+      }
     },
-    [driver],
+    [driver, applyFrame],
   );
 
   const activePendingThought =
@@ -866,6 +969,8 @@ export function useDaemonStream(
     daemonModelId: snapshot.modelId,
     daemonApprovalMode: snapshot.approvalMode,
     daemonSessionTitle: snapshot.sessionTitle,
+    daemonReasoningEffort: snapshot.reasoningEffort,
+    daemonFollowupSuggestion: snapshot.followupSuggestion,
     retryLastPrompt,
     handleApprovalModeChange,
     activePtyId: undefined,

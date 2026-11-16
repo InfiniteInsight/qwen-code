@@ -1043,4 +1043,85 @@ describe('useBranchCommand', () => {
       ]),
     );
   });
+
+  it('calls switchDaemonSession after branch file + title write and before config.startNewSession', async () => {
+    const order: string[] = [];
+    forkSession.mockImplementation(async () => {
+      order.push('forkSession');
+      return { filePath: '/tmp/new.jsonl', copiedCount: 2 };
+    });
+    renameSession.mockImplementation(async () => {
+      order.push('renameSession');
+      return true;
+    });
+    startNewSessionConfig.mockImplementation(() => {
+      order.push('config.startNewSession');
+    });
+    const switchDaemonSession = vi.fn(async (_id: string) => {
+      order.push('switchDaemonSession');
+    });
+
+    const { result } = renderHook(() =>
+      useBranchCommand({
+        ...makeOptions(),
+        switchDaemonSession,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.handleBranch('feature-branch');
+    });
+
+    expect(switchDaemonSession).toHaveBeenCalledTimes(1);
+    const newId = switchDaemonSession.mock.calls[0][0];
+    expect(typeof newId).toBe('string');
+    expect(startNewSessionConfig).toHaveBeenCalledWith(
+      newId,
+      expect.any(Object),
+    );
+    expect(order).toEqual([
+      'forkSession',
+      'renameSession',
+      'switchDaemonSession',
+      'config.startNewSession',
+    ]);
+    expect(startNewSessionUI).toHaveBeenCalledWith(newId);
+  });
+
+  it('leaves local config and background state untouched and removes orphan fork when switchDaemonSession rejects', async () => {
+    const llmClient = makeSwapSlotClient();
+    config.getLlmClient = () => llmClient;
+    const switchDaemonSession = vi
+      .fn()
+      .mockRejectedValue(new Error('HTTP 412 precondition failed'));
+
+    const { result } = renderHook(() =>
+      useBranchCommand({
+        ...makeOptions(),
+        switchDaemonSession,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.handleBranch('rejected-branch');
+    });
+
+    expect(switchDaemonSession).toHaveBeenCalledTimes(1);
+    const branchedId = switchDaemonSession.mock.calls[0][0];
+    expect(startNewSessionConfig).not.toHaveBeenCalled();
+    expect(backgroundTaskRegistry.reset).not.toHaveBeenCalled();
+    expect(startNewSessionUI).not.toHaveBeenCalled();
+    expect(clearItems).not.toHaveBeenCalled();
+    expect(loadHistory).not.toHaveBeenCalled();
+    expect(removeSession).toHaveBeenCalledWith(branchedId);
+    expect(llmClient.commitTelemetrySwap).toHaveBeenCalledTimes(1);
+    expect(llmClient.abortTelemetrySwap).not.toHaveBeenCalled();
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringMatching(/Failed to branch conversation.*HTTP 412/),
+      }),
+      expect.any(Number),
+    );
+  });
 });

@@ -19,6 +19,7 @@
 export interface DaemonSessionStateLike {
   models?: unknown;
   modes?: unknown;
+  configOptions?: unknown;
 }
 
 /**
@@ -101,6 +102,11 @@ export interface DaemonSessionControl {
   ): Promise<unknown>;
   /** `PATCH /session/:id/metadata`; update session title / PR metadata. */
   updateMetadata?(metadata: { displayName?: string }): Promise<unknown>;
+  /** `POST /session/:id/generate`; stream one-shot side-query text from the daemon. */
+  generateContent?(
+    prompt: string,
+    opts?: { signal?: AbortSignal },
+  ): AsyncIterable<{ type: string; text?: string; message?: string }>;
 }
 
 export interface DaemonModelOption {
@@ -169,6 +175,20 @@ export function readDaemonModes(
     }
   }
   return { currentModeId: str(modes['currentModeId']), availableModes };
+}
+
+export function readDaemonReasoningEffort(
+  state: DaemonSessionStateLike | null | undefined,
+): string | undefined {
+  const opts = asRecord(state)['configOptions'];
+  if (!Array.isArray(opts)) return undefined;
+  for (const raw of opts) {
+    const entry = asRecord(raw);
+    if (entry['id'] === 'reasoning_effort') {
+      return str(entry['currentValue']);
+    }
+  }
+  return undefined;
 }
 
 export type DaemonModelResolution =

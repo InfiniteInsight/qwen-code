@@ -4,14 +4,26 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { useContext } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { act } from '@testing-library/react';
 import { render } from 'ink-testing-library';
 import { DAEMON_GONE_MESSAGE } from './hooks/daemon/daemon-loss.js';
+import {
+  DaemonSessionSwitchContext,
+  DaemonStreamContext,
+} from './hooks/daemon/DaemonStreamContext.js';
+import type { DaemonSessionDriver } from './hooks/daemon/useDaemonStream.js';
 
 const sdk = vi.hoisted(() => ({
   load: vi.fn(),
+  resume: vi.fn(),
   health: vi.fn(),
 }));
+
+let latestDriver: DaemonSessionDriver | null = null;
+let latestSwitchDaemonSession: ((sessionId: string) => Promise<void>) | null =
+  null;
 
 vi.mock('@qwen-code/sdk', () => ({
   DaemonClient: class {
@@ -20,11 +32,16 @@ vi.mock('@qwen-code/sdk', () => ({
   DaemonSessionClient: {
     load: sdk.load,
     createOrAttach: sdk.load,
+    resume: sdk.resume,
   },
 }));
 
 vi.mock('./AppContainer.js', () => ({
-  AppContainer: () => null,
+  AppContainer: () => {
+    latestDriver = useContext(DaemonStreamContext);
+    latestSwitchDaemonSession = useContext(DaemonSessionSwitchContext);
+    return null;
+  },
 }));
 
 import {
@@ -71,7 +88,10 @@ function mount(exitDaemonGone: () => void) {
 describe('DaemonAppContainer initial attach failure', () => {
   beforeEach(() => {
     sdk.load.mockReset();
+    sdk.resume.mockReset();
     sdk.health.mockReset();
+    latestDriver = null;
+    latestSwitchDaemonSession = null;
   });
 
   it('a transport failure with the daemon down prints one line and exits', async () => {
@@ -122,5 +142,69 @@ describe('DaemonAppContainer initial attach failure', () => {
     mount(exit);
     await vi.waitFor(() => expect(sdk.load).toHaveBeenCalledTimes(1));
     expect(sdk.load).toHaveBeenCalledWith(expect.anything(), 's1');
+  });
+
+  it('aligns config.startNewSession with the attached daemon sessionId on initial attach', async () => {
+    const sessionData = { conversation: { messages: [] } };
+    const loadSession = vi.fn().mockResolvedValue(sessionData);
+    const startNewSession = vi.fn();
+    const configWithSession = {
+      getSessionId: vi.fn().mockReturnValue('local-ephemeral-id'),
+      getSessionService: () => ({ loadSession }),
+      startNewSession,
+    };
+    const attachedDriver = {
+      clientId: 'c1',
+      session: { sessionId: 'daemon-attached-s1' },
+    };
+    sdk.load.mockResolvedValue(attachedDriver);
+
+    render(
+      <DaemonAppContainer
+        {...baseProps}
+        config={configWithSession as never}
+        daemonUrl="http://127.0.0.1:9"
+        daemonToken="t"
+        sessionId="daemon-attached-s1"
+        exitDaemonGone={vi.fn()}
+      />,
+    );
+
+    await vi.waitFor(() => expect(latestDriver).toBe(attachedDriver));
+    expect(loadSession).toHaveBeenCalledWith('daemon-attached-s1');
+    expect(startNewSession).toHaveBeenCalledWith(
+      'daemon-attached-s1',
+      sessionData,
+    );
+  });
+
+  it('provides DaemonSessionSwitchContext to resume a new session, consume its replay, and detach the previous driver', async () => {
+    const prevDetach = vi.fn().mockResolvedValue(undefined);
+    const initialDriver = {
+      clientId: 'c1',
+      session: { sessionId: 's1' },
+      detach: prevDetach,
+    };
+    const consumeReplaySnapshot = vi.fn();
+    const nextDriver = {
+      clientId: 'c2',
+      session: { sessionId: 's2' },
+      consumeReplaySnapshot,
+    };
+    sdk.load.mockResolvedValue(initialDriver);
+    sdk.resume.mockResolvedValue(nextDriver);
+
+    mount(vi.fn());
+    await vi.waitFor(() => expect(latestDriver).toBe(initialDriver));
+    expect(typeof latestSwitchDaemonSession).toBe('function');
+
+    await act(async () => {
+      await latestSwitchDaemonSession!('s2');
+    });
+
+    expect(sdk.resume).toHaveBeenCalledWith(expect.anything(), 's2');
+    expect(consumeReplaySnapshot).toHaveBeenCalledTimes(1);
+    expect(prevDetach).toHaveBeenCalledTimes(1);
+    expect(latestDriver).toBe(nextDriver);
   });
 });

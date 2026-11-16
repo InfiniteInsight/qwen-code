@@ -578,5 +578,60 @@ describe('renameCommand', () => {
       );
       expect(result).toMatchObject({ messageType: 'info' });
     });
+
+    it('falls back to context.ui.history user items and daemon.generateContent in attached mode', async () => {
+      tryGenerateSessionTitleMock.mockResolvedValue({
+        ok: false,
+        reason: 'no_client',
+      });
+      const updateMetadata = vi.fn().mockResolvedValue(undefined);
+      const generateContent = vi.fn(async function* (_prompt: string) {
+        yield { type: 'delta', text: '{"title": "Refactor daemon TUI sync"}' };
+      });
+      const mockConfig = {
+        getChatRecordingService: vi.fn().mockReturnValue(undefined),
+        getSessionId: vi.fn().mockReturnValue('daemon-sess-1'),
+        getSessionService: vi.fn().mockReturnValue({
+          renameSession: vi.fn().mockResolvedValue(true),
+        }),
+      };
+      mockContext = createMockCommandContext({
+        services: {
+          config: mockConfig as never,
+          daemon: {
+            updateMetadata,
+            generateContent,
+          },
+        },
+        ui: {
+          history: [
+            { id: 1, type: 'user', text: 'Wire attached daemon TUI parity' },
+            { id: 2, type: 'gemini', text: 'Working on it.' },
+            { id: 3, type: 'user', text: '/rename --auto' },
+          ] as never,
+        },
+      });
+
+      const result = await renameCommand.action!(mockContext, '--auto');
+
+      expect(tryGenerateSessionTitleMock).toHaveBeenCalledWith(
+        mockConfig,
+        expect.anything(),
+        ['Wire attached daemon TUI parity'],
+      );
+      expect(generateContent).toHaveBeenCalledTimes(1);
+      expect(generateContent.mock.calls[0][0]).toContain(
+        'Wire attached daemon TUI parity',
+      );
+      expect(generateContent.mock.calls[0][0]).not.toContain('/rename --auto');
+      expect(updateMetadata).toHaveBeenCalledWith({
+        displayName: 'Refactor daemon TUI sync',
+      });
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'Session renamed to "Refactor daemon TUI sync"',
+      });
+    });
   });
 });
