@@ -676,6 +676,8 @@ export interface GatewayApp {
    * tests that construct the app directly.
    */
   bridgeRegistry: BridgeRegistry;
+  /** Process-local activity tracker for working-device push suppression. */
+  workingDevice: WorkingDeviceTracker;
   /** Per-session gateway-event fan-out (exposed for the agent lifecycle). */
   promptEvents: PromptEventBroadcaster;
   /** Per-session prompt queue (add-mid-turn-recovery: the recovery
@@ -2217,6 +2219,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   const onTokenRevoked = async (
     tokenIds: string[],
   ): Promise<Map<string, RevokeCascadeCounts>> => {
+    for (const id of tokenIds) workingDevice.forget(id);
     const counts = new Map<string, RevokeCascadeCounts>(
       tokenIds.map((id) => [id, { subscriptions: 0, devices: 0 }] as const),
     );
@@ -3185,6 +3188,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     ownerEvents,
     idleToggles,
     bridgeRegistry,
+    workingDevice,
     promptEvents: promptEventBroadcaster,
     promptQueue,
     agentLifecycle,

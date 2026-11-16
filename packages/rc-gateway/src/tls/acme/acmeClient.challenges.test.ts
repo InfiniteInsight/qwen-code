@@ -7,6 +7,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { DnsChallengeHandle, DnsProvider } from './dnsProvider.js';
 
+let failAfterPresent = false;
+
 /**
  * A stand-in for the optional `acme-client` (not installed here) whose
  * `auto()` does what the real one does for `example.com` + `*.example.com`:
@@ -35,6 +37,9 @@ vi.mock('acme-client', async () => {
           opts.challengeCreateFn(apex, ch, 'ka-apex'),
           opts.challengeCreateFn(wild, ch, 'ka-wildcard'),
         ]);
+        if (failAfterPresent) {
+          throw new Error('CA validation failed');
+        }
         await opts.challengeRemoveFn(apex, ch, 'ka-apex');
         await opts.challengeRemoveFn(wild, ch, 'ka-wildcard');
         return GW_TEST_LEAF_CERT;
@@ -49,6 +54,7 @@ vi.mock('acme-client', async () => {
 
 describe('#165 apex and wildcard challenges keep separate bookkeeping', () => {
   it('each presented record is cleaned up exactly once', async () => {
+    failAfterPresent = false;
     const { createAcmeClient } = await import('./acmeClient.js');
     const presented: string[] = [];
     const cleaned: string[] = [];
@@ -74,5 +80,40 @@ describe('#165 apex and wildcard challenges keep separate bookkeeping', () => {
     );
     expect(presented.sort()).toEqual(['ka-apex', 'ka-wildcard']);
     expect(cleaned.sort()).toEqual(['ka-apex', 'ka-wildcard']);
+  });
+
+  it('cleans up remaining presented DNS-01 handles in finally when client.auto throws', async () => {
+    failAfterPresent = true;
+    try {
+      const { createAcmeClient } = await import('./acmeClient.js');
+      const presented: string[] = [];
+      const cleaned: string[] = [];
+      const provider: DnsProvider = {
+        name: 'fake',
+        async present(r) {
+          presented.push(r.value);
+          return { ...r } as DnsChallengeHandle;
+        },
+        async cleanup(h) {
+          cleaned.push(h.value);
+        },
+      };
+      const client = await createAcmeClient();
+      await expect(
+        client.obtainCertificate(
+          {
+            domains: ['qwen.example.com', '*.qwen.example.com'],
+            email: 'me@example.com',
+            directoryUrl: 'https://acme.example/dir',
+            accountKeyPem: 'pem',
+          },
+          provider,
+        ),
+      ).rejects.toThrow(/CA validation failed/);
+      expect(presented.sort()).toEqual(['ka-apex', 'ka-wildcard']);
+      expect(cleaned.sort()).toEqual(['ka-apex', 'ka-wildcard']);
+    } finally {
+      failAfterPresent = false;
+    }
   });
 });

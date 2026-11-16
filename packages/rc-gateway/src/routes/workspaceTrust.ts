@@ -138,10 +138,14 @@ export function createWorkspaceTrustRoutes(
         return;
       }
       const raw = req.query.statusVersion;
-      if (raw === undefined || raw === '2') {
+      if (raw === undefined || raw === '1' || raw === '2') {
         try {
           const result = await daemon.workspaceTrust(
-            raw === '2' ? { statusVersion: 2 } : {},
+            raw === '2'
+              ? { statusVersion: 2 }
+              : raw === '1'
+                ? { statusVersion: 1 }
+                : {},
             target.cwd,
           );
           res.status(200).json(result);

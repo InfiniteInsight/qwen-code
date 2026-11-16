@@ -134,7 +134,7 @@ export class ApnsSender {
       const { status, reason: replyBody } = await this.opts.transport.post({
         host: this.opts.host,
         deviceToken: sub.deviceToken,
-        topic: this.opts.bundleId,
+        topic: sub.bundleId || this.opts.bundleId,
         jwt: this.opts.signer.token(),
         body,
       });
@@ -174,6 +174,18 @@ export class ApnsSender {
           await this.wait(this.backoffMs(attempt));
           continue;
         }
+        await this.opts.audit?.record({
+          action: 'push_send_failed',
+          target: payload.sessionId,
+          detail: {
+            transport: 'apns',
+            subscriptionId: sub.id,
+            kind: payload.kind,
+            statusCode: status,
+            reason: 'transient_exhausted',
+            apnsReason: reason,
+          },
+        });
         return { ok: false, retriesExhausted: true };
       }
 

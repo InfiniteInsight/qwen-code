@@ -30,23 +30,35 @@ export function createOwnerEventsRoute(bus: OwnerEventBus): RequestHandler {
     let dropping = false;
     let dropped = 0;
 
+    const onDrain = (): void => {
+      dropping = false;
+      if (dropped > 0 && !res.writableEnded && !res.destroyed) {
+        try {
+          res.write(
+            `event: resync\ndata: ${JSON.stringify({ dropped })}\n\n`,
+          );
+        } catch {
+          // socket already torn down
+        }
+        dropped = 0;
+      }
+    };
+
     const handler = (event: OwnerEvent): void => {
+      if (res.writableEnded || res.destroyed) return;
       if (dropping) {
         dropped++;
         return;
       }
-      const ok = res.write(`data: ${JSON.stringify(event)}\n\n`);
+      let ok = true;
+      try {
+        ok = res.write(`data: ${JSON.stringify(event)}\n\n`);
+      } catch {
+        return;
+      }
       if (!ok) {
         dropping = true;
-        res.once('drain', () => {
-          dropping = false;
-          if (dropped > 0) {
-            res.write(
-              `event: resync\ndata: ${JSON.stringify({ dropped })}\n\n`,
-            );
-            dropped = 0;
-          }
-        });
+        res.once('drain', onDrain);
       }
     };
 
@@ -73,12 +85,20 @@ export function createOwnerEventsRoute(bus: OwnerEventBus): RequestHandler {
     req.socket?.setNoDelay?.(true);
     res.write(': ok\n\n');
 
-    const heartbeat = setInterval(() => res.write(': ping\n\n'), HEARTBEAT_MS);
+    const heartbeat = setInterval(() => {
+      if (res.writableEnded || res.destroyed) return;
+      try {
+        res.write(': ping\n\n');
+      } catch {
+        // socket already torn down
+      }
+    }, HEARTBEAT_MS);
     // Don't let the heartbeat keep the process (or a test) alive.
     if (typeof heartbeat.unref === 'function') heartbeat.unref();
 
     req.on('close', () => {
       clearInterval(heartbeat);
+      res.removeListener?.('drain', onDrain);
       unsubscribe();
       res.end();
     });

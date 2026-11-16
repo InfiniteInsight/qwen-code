@@ -196,6 +196,23 @@ describe('POST /rc/agents (spawn saga)', () => {
       timeoutSpy.mockRestore();
     }
   });
+
+  it('emits agent_spawned before agent_completed when a fast prompt settles inside the accept window', async () => {
+    const { url, ownerSeen } = await setup({ promptDelayMs: 0 });
+    const res = await fetch(`${url}/rc/agents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task: 'instant task' }),
+    });
+    expect(res.status).toBe(201);
+    await waitFor(() => ownerSeen.some((e) => e.type === 'agent_completed'));
+    const spawnedIdx = ownerSeen.findIndex((e) => e.type === 'agent_spawned');
+    const completedIdx = ownerSeen.findIndex(
+      (e) => e.type === 'agent_completed',
+    );
+    expect(spawnedIdx).toBeGreaterThanOrEqual(0);
+    expect(completedIdx).toBeGreaterThan(spawnedIdx);
+  });
 });
 
 describe('GET /rc/agents + /rc/agents/:id', () => {
@@ -538,5 +555,38 @@ describe('steer + cancel', () => {
 
     await waitFor(() => registry.get(agentId)?.status === 'completed', 4000);
     expect(registry.get(agentId)?.status).toBe('completed');
+  });
+
+  it('skips a queued steer prompt in sendSerializedPrompt if the agent settled while waiting on the lock', async () => {
+    const { url, registry } = await setup({ promptDelayMs: 200 });
+    const spawn = await fetch(`${url}/rc/agents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task: 'initial' }),
+    });
+    const { agentId, sessionId } = (await spawn.json()) as {
+      agentId: string;
+      sessionId: string;
+    };
+
+    // Queue a steer message while the initial prompt holds the session lock.
+    const msgRes = await fetch(`${url}/rc/agents/${agentId}/message`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'queued-steer' }),
+    });
+    expect(msgRes.status).toBe(202);
+
+    // Transition the agent to a terminal status before the initial prompt releases the lock.
+    const cancelRes = await fetch(`${url}/rc/agents/${agentId}/cancel`, {
+      method: 'POST',
+    });
+    expect(cancelRes.status).toBe(200);
+
+    // Wait past initial promptDelayMs so the lock releases and the queued task runs.
+    await new Promise((r) => setTimeout(r, 300));
+    const calls = stub!.promptCallLog.filter((c) => c.sessionId === sessionId);
+    expect(calls).toHaveLength(1);
+    expect(registry.get(agentId)?.status).toBe('cancelled');
   });
 });

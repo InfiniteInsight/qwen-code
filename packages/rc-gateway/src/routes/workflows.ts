@@ -267,7 +267,10 @@ export function createGetWorkflowRoute(
       status: run.status,
       phase: run.phase,
       phaseIndex: run.phaseIndex,
-      agents: run.agents,
+      agents:
+        lock === undefined
+          ? run.agents
+          : run.agents.filter((a) => a.sessionId === lock),
       tokensSpent: run.tokensSpent,
       startedAt: run.startedAt,
       finishedAt: run.finishedAt,

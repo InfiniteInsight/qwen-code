@@ -229,6 +229,7 @@ export function createShareWhoamiHandler(
       res.cookie(cookieName, '1', {
         httpOnly: true,
         sameSite: 'strict',
+        secure: req.secure || req.headers['x-forwarded-proto'] === 'https',
         ...(maxAgeMs !== undefined ? { maxAge: maxAgeMs } : {}),
       });
       void audit?.record({

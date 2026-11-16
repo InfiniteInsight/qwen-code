@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { writeFileAtomic } from '../atomicWrite.js';
 
 /** A single snooze window. `scope` is 'all' or a single push kind. */
 export interface SnoozeEntry {
@@ -138,11 +138,10 @@ export class SnoozeStore {
   }
 
   private async persist(): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true });
-    const snoozes: Record<string, number> = {};
-    for (const [scope, until] of this.state) snoozes[scope] = until;
-    await writeFile(this.filePath, JSON.stringify({ snoozes }, null, 2), {
-      mode: 0o600,
+    await writeFileAtomic(this.filePath, () => {
+      const snoozes: Record<string, number> = {};
+      for (const [scope, until] of this.state) snoozes[scope] = until;
+      return JSON.stringify({ snoozes }, null, 2);
     });
   }
 }

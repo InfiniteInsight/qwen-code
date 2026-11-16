@@ -23,7 +23,18 @@ export class WorkingDeviceTracker {
 
   /** Record activity for `tokenId` as of now. */
   touch(tokenId: string): void {
-    this.last.set(tokenId, this.nowFn());
+    const now = this.nowFn();
+    this.last.set(tokenId, now);
+    if (this.last.size > 256) {
+      for (const [id, ts] of this.last) {
+        if (now - ts >= this.windowMs) this.last.delete(id);
+      }
+    }
+  }
+
+  /** Drop activity tracking for a revoked token. */
+  forget(tokenId: string): void {
+    this.last.delete(tokenId);
   }
 
   /** True if `tokenId` posted within the window (unknown token → false). */

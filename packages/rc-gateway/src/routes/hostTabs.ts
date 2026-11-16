@@ -448,7 +448,7 @@ export function createHostTabRoutes(deps: HostTabRoutesDeps): HostTabRoutes {
           sid,
         );
       }
-      if (!isReopenable(tab, opts.auto)) {
+      if (!isReopenable(tab, opts.auto) || (opts.auto && tab.dismissed)) {
         return refuse(
           409,
           {
@@ -525,10 +525,39 @@ export function createHostTabRoutes(deps: HostTabRoutesDeps): HostTabRoutes {
           sid,
         );
       }
+      // Re-check tab state after awaiting endpointFor so a concurrent dismiss,
+      // remove, or re-attach while the daemon was starting is respected.
+      const latestTab = await registry.view(tabId);
+      if (!latestTab) return refuse(404, notFound);
+      if (latestTab.state === 'live') {
+        return refuse(
+          409,
+          {
+            error: 'This tab is open',
+            code: 'tab_live',
+            state: latestTab.state,
+          },
+          sid,
+        );
+      }
+      if (!isReopenable(latestTab, opts.auto) || (opts.auto && latestTab.dismissed)) {
+        return refuse(
+          409,
+          {
+            error: opts.auto
+              ? 'Only a crashed or lost tab is reopened'
+              : 'Only a crashed, lost, closed or quit tab is reopened',
+            code: 'tab_not_reopenable',
+            state: latestTab.state,
+          },
+          sid,
+        );
+      }
       const command = planTerminalCommand(
         { sessionId: sid, workspaceCwd: found.endpoint.workspaceCwd },
         deps.planOpts,
       );
+      await registry.noteReopen(tabId, opts.auto);
       const request = await deps.requests.enqueue({
         sessionId: sid,
         workspaceCwd: found.endpoint.workspaceCwd,
@@ -537,7 +566,6 @@ export function createHostTabRoutes(deps: HostTabRoutesDeps): HostTabRoutes {
         linuxArgv: command.linuxArgv,
         title: command.title,
       });
-      await registry.noteReopen(tabId, opts.auto);
       void audit?.record({
         action: 'host_tab_reopened',
         ...(opts.actorTokenId ? { actorTokenId: opts.actorTokenId } : {}),
@@ -644,7 +672,8 @@ export function createHostTabRoutes(deps: HostTabRoutesDeps): HostTabRoutes {
           out.status === 502 ||
           out.status === 503 ||
           'alreadyMirrored' in out.body ||
-          out.body.code === 'reopen_in_progress'
+          out.body.code === 'reopen_in_progress' ||
+          out.body.code === 'launcher_unavailable'
         ) {
           tried.delete(t.tabId);
         }

@@ -454,4 +454,47 @@ describe('GET /rc/share/whoami (redemption)', () => {
       ((await res.json()) as { usesRemaining: number | null }).usesRemaining,
     ).toBeNull();
   });
+
+  it('sets Secure on the share redemption cookie when X-Forwarded-Proto is https and omits it on plain HTTP', async () => {
+    const shareHttps = await store.issueShare({
+      scopes: [SHARE, SESSION_READ],
+      label: 'guest-https',
+      sessionLockId: 's1',
+      ttlSec: 3600,
+      parentId: 'owner-1',
+    });
+    const urlHttps = await mountWhoami({
+      id: shareHttps.id,
+      scopes: [SHARE, SESSION_READ],
+      sessionLockId: 's1',
+    });
+    const httpsRes = await fetch(`${urlHttps}/rc/share/whoami`, {
+      headers: { 'X-Forwarded-Proto': 'https' },
+    });
+    expect(httpsRes.status).toBe(200);
+    const httpsCookie = httpsRes.headers.get('set-cookie') ?? '';
+    expect(httpsCookie).toContain(`rc_share_${shareHttps.id}=1`);
+    expect(httpsCookie).toContain('Secure');
+
+    await new Promise<void>((r) => server!.close(() => r()));
+    server = undefined;
+
+    const shareHttp = await store.issueShare({
+      scopes: [SHARE, SESSION_READ],
+      label: 'guest-http',
+      sessionLockId: 's1',
+      ttlSec: 3600,
+      parentId: 'owner-1',
+    });
+    const urlHttp = await mountWhoami({
+      id: shareHttp.id,
+      scopes: [SHARE, SESSION_READ],
+      sessionLockId: 's1',
+    });
+    const httpRes = await fetch(`${urlHttp}/rc/share/whoami`);
+    expect(httpRes.status).toBe(200);
+    const httpCookie = httpRes.headers.get('set-cookie') ?? '';
+    expect(httpCookie).toContain(`rc_share_${shareHttp.id}=1`);
+    expect(httpCookie).not.toContain('Secure');
+  });
 });

@@ -251,8 +251,7 @@ export type AuditAction =
   | 'github_oauth_forgotten'
   | 'github_clone';
 
-/** Runtime list of valid actions (for validating query params). */
-export const AUDIT_ACTIONS: readonly AuditAction[] = [
+const AUDIT_ACTIONS_LIST = [
   'pairing_redeemed',
   'token_minted',
   'token_revoked',
@@ -260,7 +259,9 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'scope_denied',
   'token_expired_max_age',
   'session_attached',
+  'session_created',
   'session_detached',
+  'terminal_requested',
   'permission_voted',
   'prompt_sent',
   'prompt_timed_out',
@@ -352,6 +353,14 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'sessions_delete_failed',
   'subagent_cancelled',
   'subagent_cancel_failed',
+  'subagent_messaged',
+  'subagent_message_failed',
+  'subagent_paused',
+  'subagent_pause_failed',
+  'subagent_resumed',
+  'subagent_resume_failed',
+  'subagent_abandoned',
+  'subagent_abandon_failed',
   'session_exported',
   'attachment_uploaded',
   'attachment_removed',
@@ -409,7 +418,26 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'github_oauth_failed',
   'github_oauth_forgotten',
   'github_clone',
-];
+] as const satisfies readonly AuditAction[];
+
+type MissingAuditActions = Exclude<
+  AuditAction,
+  (typeof AUDIT_ACTIONS_LIST)[number]
+>;
+const _AUDIT_ACTION_PARITY: [MissingAuditActions] extends [never]
+  ? true
+  : ['Missing from AUDIT_ACTIONS:', MissingAuditActions] = true;
+void _AUDIT_ACTION_PARITY;
+
+/** Runtime list of valid actions (for validating query params). */
+export const AUDIT_ACTIONS: readonly AuditAction[] = AUDIT_ACTIONS_LIST;
+
+const AUDIT_ACTION_SET: ReadonlySet<string> = new Set(AUDIT_ACTIONS);
+
+/** True iff `action` is a registered {@link AuditAction}. */
+export function isValidAuditAction(action: unknown): action is AuditAction {
+  return typeof action === 'string' && AUDIT_ACTION_SET.has(action);
+}
 
 export interface AuditEntry {
   action: AuditAction;
