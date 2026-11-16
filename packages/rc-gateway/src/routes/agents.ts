@@ -70,12 +70,19 @@ function sendSerializedPrompt(
   deps: AgentRoutesDeps,
   sessionId: string,
   text: string,
+  agentId?: string,
 ): Promise<unknown> {
   const queue = deps.promptQueue ?? defaultPromptQueue;
   const turnTimeoutMs = deps.promptTimeoutMs ?? DEFAULT_PROMPT_TIMEOUT_MS;
   return (async () => {
     const release = await queue.acquire(sessionId, PROMPT_QUEUE_WAIT_MS);
     try {
+      if (agentId !== undefined) {
+        const current = deps.registry.get(agentId);
+        if (!current || TERMINAL_AGENT_STATUSES.has(current.status)) {
+          return;
+        }
+      }
       return await deps.daemon.prompt(
         sessionId,
         {
@@ -185,11 +192,10 @@ export function createSpawnAgentRoute(deps: AgentRoutesDeps): RequestHandler {
         return;
       }
 
+      deps.lifecycle.emit('agent_spawned', deps.registry.get(record.agentId)!);
       // Spawned. The prompt's eventual settlement drives completed/failed.
       // (If it already resolved - 'settled' - these handlers fire immediately.)
       void deps.lifecycle.watchPrompt(record.agentId, promptPromise);
-
-      deps.lifecycle.emit('agent_spawned', deps.registry.get(record.agentId)!);
       void deps.audit?.record({
         action: 'agent_spawned',
         actorTokenId: req.rcClient?.id,
@@ -310,7 +316,7 @@ export function createAgentMessageRoute(deps: AgentRoutesDeps): RequestHandler {
     // the same session.
     void deps.lifecycle.watchPrompt(
       rec.agentId,
-      sendSerializedPrompt(deps, rec.sessionId, body.content),
+      sendSerializedPrompt(deps, rec.sessionId, body.content, rec.agentId),
     );
     void deps.audit?.record({
       action: 'agent_message_sent',

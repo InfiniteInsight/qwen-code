@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdir, readFile, writeFile, chmod } from 'node:fs/promises';
+import { mkdir, readFile, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
+import { writeFileAtomic } from '../../atomicWrite.js';
 
 /**
  * Load the ACME account key from `<baseDir>/account.key`, or create it once via
@@ -20,14 +21,15 @@ export async function loadOrCreateAccountKey(
 ): Promise<string> {
   const path = join(baseDir, 'account.key');
   try {
-    return await readFile(path, 'utf8');
+    const existing = await readFile(path, 'utf8');
+    if (existing.trim().length > 0) return existing;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
   const key = await generate();
   await mkdir(baseDir, { recursive: true, mode: 0o700 });
   await chmod(baseDir, 0o700);
-  await writeFile(path, key, { mode: 0o600 });
+  await writeFileAtomic(path, key);
   await chmod(path, 0o600);
   return key;
 }

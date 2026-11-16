@@ -873,6 +873,37 @@ describe('tab records (#212)', () => {
     expect(res.body).not.toHaveProperty('tabId');
   });
 
+  it('does not reuse an ended tabId on attach, minting a new tab record instead', async () => {
+    const tabs = await registry();
+    const { daemon } = fakePool();
+    const { url, audit } = await mount(daemon, { tabs });
+    const first = await post(url, '/rc/host/attach', {
+      cwd: workspace,
+      pid: 4242,
+    });
+    expect(first.status).toBe(200);
+    const endedTabId = first.body.tabId as string;
+    await tabs.end(endedTabId, 137);
+    expect(tabs.get(endedTabId)?.endedAt).toBeDefined();
+
+    const reattached = await post(url, `/rc/host/attach/${SESSION}`, {
+      cwd: workspace,
+      tabId: endedTabId,
+      pid: 5353,
+    });
+    expect(reattached.status).toBe(200);
+    const freshTabId = reattached.body.tabId as string;
+    expect(isValidTabId(freshTabId)).toBe(true);
+    expect(freshTabId).not.toBe(endedTabId);
+    expect(tabs.get(freshTabId)).toMatchObject({
+      sessionId: SESSION,
+      pid: 5353,
+    });
+    expect(audit.calls.filter((c) => c.action === 'host_tab_started')).toHaveLength(
+      2,
+    );
+  });
+
   it('still attaches when the registry cannot write', async () => {
     const { daemon } = fakePool();
     const { url } = await mount(daemon, {

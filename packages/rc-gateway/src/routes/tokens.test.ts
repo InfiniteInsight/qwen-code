@@ -13,6 +13,8 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { TokenStore } from '../tokenStore.js';
 import { ConnectionRegistry } from '../connectionRegistry.js';
+import { PairingService } from '../pairing.js';
+import { createGatewayApp } from '../server.js';
 import { bearerResolve, requireScope } from '../auth.js';
 import { OWNER, SESSION_READ, APPROVE, WRITE, BRIDGE } from '../scopes.js';
 import {
@@ -490,5 +492,51 @@ describe('#205 revoke cascade hook', () => {
       body: JSON.stringify({ except: 'self' }),
     });
     expect(ran).toBe(false);
+  });
+
+  it('clears workingDevice activity tracking on single-token and revoke-all revocation in createGatewayApp', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rc-tok-gw-'));
+    const gwStore = await TokenStore.open(join(dir, 'tokens.json'));
+    const owner = await gwStore.issue([OWNER, SESSION_READ], 'owner');
+    const victim1 = await gwStore.issue([SESSION_READ], 'v1');
+    const victim2 = await gwStore.issue([SESSION_READ], 'v2');
+    const gw = createGatewayApp({
+      daemon: { capabilities: async () => ({}) } as never,
+      store: gwStore,
+      pairing: new PairingService(),
+      auditPath: join(dir, 'audit.log'),
+    });
+    server = await new Promise((resolve) => {
+      const sv = gw.app.listen(0, '127.0.0.1', () => resolve(sv));
+    });
+    const { port } = server.address() as AddressInfo;
+    const base = `http://127.0.0.1:${port}`;
+
+    gw.workingDevice.touch(owner.id);
+    gw.workingDevice.touch(victim1.id);
+    gw.workingDevice.touch(victim2.id);
+    expect(gw.workingDevice.isWorking(victim1.id)).toBe(true);
+    expect(gw.workingDevice.isWorking(victim2.id)).toBe(true);
+
+    const delRes = await fetch(`${base}/rc/tokens/${victim1.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${owner.token}` },
+    });
+    expect(delRes.status).toBe(204);
+    expect(gw.workingDevice.isWorking(victim1.id)).toBe(false);
+    expect(gw.workingDevice.isWorking(victim2.id)).toBe(true);
+    expect(gw.workingDevice.isWorking(owner.id)).toBe(true);
+
+    const revAllRes = await fetch(`${base}/rc/tokens/revoke-all`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${owner.token}`,
+      },
+      body: JSON.stringify({ except: 'self' }),
+    });
+    expect(revAllRes.status).toBe(200);
+    expect(gw.workingDevice.isWorking(victim2.id)).toBe(false);
+    expect(gw.workingDevice.isWorking(owner.id)).toBe(true);
   });
 });

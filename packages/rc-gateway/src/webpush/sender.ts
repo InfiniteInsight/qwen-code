@@ -142,7 +142,7 @@ export class PushSender {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly endpointPolicy: PushEndpointPolicy;
   private readonly requestTimeoutMs: number;
-  private vapidConfigured = false;
+  private vapidPublicKey?: string;
   /**
    * Every delivery goes through this agent, whose lookup refuses non-public
    * addresses at connect time (#165), so a hostname re-pointed at an internal
@@ -172,13 +172,14 @@ export class PushSender {
     // be POSTed to either.
     const verdict = this.endpointPolicy.checkStatic(sub.endpoint);
     if (!verdict.ok) throw new PushEndpointRefusedError(verdict.reason);
-    if (!this.vapidConfigured) {
+    const currentPubKey = this.vapid.getApplicationServerKey();
+    if (this.vapidPublicKey !== currentPubKey) {
       webpush.setVapidDetails(
         this.vapid.getSubject(),
-        this.vapid.getApplicationServerKey(),
+        currentPubKey,
         this.vapid.getKeys().privateKey,
       );
-      this.vapidConfigured = true;
+      this.vapidPublicKey = currentPubKey;
     }
     try {
       const res = await webpush.sendNotification(

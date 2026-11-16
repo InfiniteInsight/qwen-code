@@ -1196,6 +1196,113 @@ describe('autoReopenEligible', () => {
     expect(await g.requests.readAll()).toHaveLength(1);
   });
 
+  it('refuses auto-reopen with 409 tab_not_reopenable when the tab is dismissed concurrently during endpointFor', async () => {
+    let releaseEndpoint: (() => void) | undefined;
+    const endpointGate = new Promise<void>((resolve) => {
+      releaseEndpoint = resolve;
+    });
+    const g = await boot({
+      autoReopen: true,
+      endpointFor: async (_s, cwd) => {
+        await endpointGate;
+        return ENDPOINT(cwd);
+      },
+    });
+    const { crashed } = await seed(g);
+    await g.poll();
+
+    // Start sweep() and hold it inside endpointFor
+    const sweepPromise = g.sweep!();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // User dismisses the crashed tab while endpointFor is still starting the daemon
+    const dismissRes = await send(
+      g.url,
+      `/rc/host/tabs/${crashed.tabId}/dismiss`,
+      { token: g.owner },
+    );
+    expect(dismissRes.status).toBe(200);
+
+    // Let endpointFor finish; auto-reopen must see latestTab.dismissed and refuse
+    releaseEndpoint!();
+    await sweepPromise;
+
+    expect(await g.requests.readAll()).toEqual([]);
+    expect(g.registry.get(crashed.tabId)?.autoReopenedAt).toBeUndefined();
+    const rows = await auditRows(g.auditPath, 'host_tab_reopened', 1);
+    expect(rows[0]).toMatchObject({
+      target: S1,
+      outcome: 'failed',
+      detail: {
+        tabId: crashed.tabId,
+        code: 'tab_not_reopenable',
+        auto: true,
+      },
+    });
+  });
+
+  it('records noteReopen on the registry before enqueuing the terminal request', async () => {
+    const g = await boot({ autoReopen: true });
+    const { crashed } = await seed(g);
+    await g.poll();
+
+    let reopenedAtDuringEnqueue: number | undefined;
+    const origEnqueue = g.requests.enqueue.bind(g.requests);
+    vi.spyOn(g.requests, 'enqueue').mockImplementation(async (entry) => {
+      reopenedAtDuringEnqueue = g.registry.get(crashed.tabId)?.reopenedAt;
+      return origEnqueue(entry);
+    });
+
+    const res = await send(g.url, `/rc/host/tabs/${crashed.tabId}/reopen`, {
+      token: g.owner,
+    });
+    expect(res.status).toBe(202);
+    expect(reopenedAtDuringEnqueue).toBeDefined();
+  });
+
+  it('retries auto-reopen on the next sweep when reopenTab hits launcher_unavailable', async () => {
+    let firstCall = true;
+    const g = await boot({
+      autoReopen: true,
+      endpointFor: async (_s, cwd) => {
+        if (firstCall) {
+          firstCall = false;
+          // Advance past staleMs during the first tab's endpointFor so the second
+          // tab in the same sweep sees launcher_unavailable inside reopenTab.
+          g.tick(20_000);
+        }
+        return ENDPOINT(cwd);
+      },
+    });
+    g.probe.fd0.set(91, '/dev/pts/1');
+    g.probe.fd0.set(92, '/dev/pts/2');
+    const t1 = await g.registry.start({
+      sessionId: S1,
+      cwd: '/srv/w',
+      pid: 91,
+    });
+    await g.registry.end(t1.tabId, 137);
+    const t2 = await g.registry.start({
+      sessionId: S2,
+      cwd: '/srv/v',
+      pid: 92,
+    });
+    await g.registry.end(t2.tabId, 137);
+
+    await g.poll();
+    await g.sweep!();
+    // One tab reopened; the other hit launcher_unavailable and was removed from tried.
+    const firstPass = await g.requests.readAll();
+    expect(firstPass).toHaveLength(1);
+
+    // Launcher checks in again; next sweep retries the remaining crashed tab.
+    await g.poll();
+    await g.sweep!();
+    const secondPass = await g.requests.readAll();
+    expect(secondPass).toHaveLength(2);
+    expect(secondPass.map((r) => r.sessionId).sort()).toEqual([S1, S2].sort());
+  });
+
   it('maps WorkspacePoolFullError in sessionEndpointResolver to 503 workspace_pool_full (#505)', async () => {
     const resolverFromLookup = sessionEndpointResolver({
       daemonEndpointForSession: () => {

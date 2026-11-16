@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, stat, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, stat, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadOrCreateAccountKey } from './accountKeyStore.js';
@@ -35,5 +35,18 @@ describe('loadOrCreateAccountKey', () => {
     const key = await loadOrCreateAccountKey(base, generate);
     expect(key).toBe('FIRST');
     expect(generate).not.toHaveBeenCalled();
+  });
+
+  it('regenerates and overwrites an empty or whitespace-only account.key file', async () => {
+    const path = join(base, 'account.key');
+    for (const blank of ['', '   \n\t  ']) {
+      await writeFile(path, blank, { mode: 0o600 });
+      const generate = vi.fn(async () => 'REGENERATED-KEY');
+      const key = await loadOrCreateAccountKey(base, generate);
+      expect(key).toBe('REGENERATED-KEY');
+      expect(generate).toHaveBeenCalledTimes(1);
+      expect(await readFile(path, 'utf8')).toBe('REGENERATED-KEY');
+      expect((await stat(path)).mode & 0o777).toBe(0o600);
+    }
   });
 });

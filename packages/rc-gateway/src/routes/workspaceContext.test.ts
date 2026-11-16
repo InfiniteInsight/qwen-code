@@ -306,4 +306,18 @@ describe('GET /rc/workspace/agents', () => {
     );
     expect(res.status).toBe(200);
   });
+
+  it('daemon 401 -> 502 daemon_auth_failed on memory and agents reads', async () => {
+    const ctx = await setup({
+      workspaceMemoryStatus: 401,
+      workspaceAgentsStatus: 401,
+    });
+    for (const path of ['/rc/workspace/memory', '/rc/workspace/agents']) {
+      const res = await fetch(`${ctx.baseUrl}${path}`, {
+        headers: authed(ctx.writeToken),
+      });
+      expect(res.status).toBe(502);
+      expect((await res.json()).code).toBe('daemon_auth_failed');
+    }
+  });
 });

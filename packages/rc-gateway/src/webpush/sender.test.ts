@@ -308,4 +308,48 @@ describe('#165 default transport endpoint guard', () => {
     ).options;
     expect(typeof agentOpts.lookup).toBe('function');
   });
+
+  it('re-configures webpush.setVapidDetails when the VAPID public key rotates', async () => {
+    vi.spyOn(webpush, 'sendNotification').mockResolvedValue({
+      statusCode: 201,
+      body: '',
+      headers: {},
+    });
+    const setVapidSpy = vi
+      .spyOn(webpush, 'setVapidDetails')
+      .mockImplementation(() => {});
+
+    let pubKey = 'pub-key-v1';
+    let privKey = 'priv-key-v1';
+    const rotatingVapid = {
+      getSubject: () => 'mailto:ops@example.com',
+      getApplicationServerKey: () => pubKey,
+      getKeys: () => ({ publicKey: pubKey, privateKey: privKey }),
+    } as unknown as VapidStore;
+
+    const good = await store.add('tokA', {
+      endpoint: 'https://fcm.googleapis.com/fcm/send/rotate-check',
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const sender = new PushSender(rotatingVapid, store, audit, FAST);
+
+    await sender.send(good, PAYLOAD);
+    await sender.send(good, PAYLOAD);
+    expect(setVapidSpy).toHaveBeenCalledTimes(1);
+    expect(setVapidSpy).toHaveBeenLastCalledWith(
+      'mailto:ops@example.com',
+      'pub-key-v1',
+      'priv-key-v1',
+    );
+
+    pubKey = 'pub-key-v2';
+    privKey = 'priv-key-v2';
+    await sender.send(good, PAYLOAD);
+    expect(setVapidSpy).toHaveBeenCalledTimes(2);
+    expect(setVapidSpy).toHaveBeenLastCalledWith(
+      'mailto:ops@example.com',
+      'pub-key-v2',
+      'priv-key-v2',
+    );
+  });
 });

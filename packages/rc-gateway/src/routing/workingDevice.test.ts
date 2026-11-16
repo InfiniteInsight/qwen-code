@@ -32,6 +32,42 @@ describe('WorkingDeviceTracker', () => {
     tracker.touch('t1');
     expect(tracker.isWorking('t1')).toBe(true);
   });
+
+  it('forgets a revoked token immediately and ignores unknown tokens', () => {
+    const now = 1000;
+    const tracker = new WorkingDeviceTracker(120000, () => now);
+    tracker.touch('t1');
+    tracker.touch('t2');
+    expect(tracker.isWorking('t1')).toBe(true);
+
+    tracker.forget('t1');
+    expect(tracker.isWorking('t1')).toBe(false);
+    expect(tracker.isWorking('t2')).toBe(true);
+
+    expect(() => tracker.forget('never-seen')).not.toThrow();
+  });
+
+  it('prunes expired entries once the map exceeds 256 tokens while preserving live ones', () => {
+    let now = 1000;
+    const tracker = new WorkingDeviceTracker(60_000, () => now);
+    for (let i = 0; i < 256; i++) {
+      tracker.touch(`stale-${i}`);
+    }
+    now += 40_000;
+    tracker.touch('still-live');
+    // Advance so stale-0..255 are expired (>= 60_000) while still-live is 25_000 old.
+    now += 25_000;
+    // Touching another token pushes size > 256 and sweeps expired entries.
+    tracker.touch('fresh');
+
+    expect(tracker.isWorking('stale-0')).toBe(false);
+    expect(tracker.isWorking('stale-255')).toBe(false);
+    expect(tracker.isWorking('still-live')).toBe(true);
+    expect(tracker.isWorking('fresh')).toBe(true);
+    expect((tracker as unknown as { last: Map<string, number> }).last.size).toBe(
+      2,
+    );
+  });
 });
 
 describe('recordActivity middleware', () => {

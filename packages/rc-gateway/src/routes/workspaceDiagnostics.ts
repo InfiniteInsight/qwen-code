@@ -7,6 +7,7 @@
 import type { RequestHandler } from 'express';
 import type { SessionDaemon } from '../daemonPool.js';
 import { WorkspacePoolFullError } from '../daemonPool.js';
+import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 /** The daemon surface these two routes need. */
 export type WorkspaceDiagnosticsDaemon = Pick<
@@ -82,6 +83,7 @@ function diagnosticsRead(
         });
         return;
       }
+      if (relayDaemonAuthFailure(res, err, `workspace_${which}`)) return;
       const status = (err as { status?: unknown }).status;
       if (status === 404) {
         res.status(502).json({

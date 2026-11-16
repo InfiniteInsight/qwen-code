@@ -121,6 +121,21 @@ describe('GET /rc/workspace/trust', () => {
     expect((await res.json()).v).toBe(2);
   });
 
+  it('?statusVersion=1 is accepted and passed through to the daemon', async () => {
+    const ctx = await setup();
+    const res = await fetch(
+      `${ctx.baseUrl}/rc/workspace/trust?statusVersion=1`,
+      {
+        headers: authed(ctx.writeToken),
+      },
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      v: 1,
+      effective: { state: 'trusted', source: 'explicit' },
+    });
+  });
+
   it('?statusVersion=3 → 400 invalid_status_version (no daemon call)', async () => {
     const ctx = await setup();
     const res = await fetch(

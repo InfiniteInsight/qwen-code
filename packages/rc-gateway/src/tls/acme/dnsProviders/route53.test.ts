@@ -98,7 +98,7 @@ describe('Route53DnsProvider', () => {
     ).resolves.toBeUndefined();
   });
 
-  it('throws if the change never reaches INSYNC before the deadline', async () => {
+  it('throws if the change never reaches INSYNC before the deadline and cleans up the TXT record', async () => {
     const client = fakeClient(['PENDING']);
     let t = 0;
     const provider = new Route53DnsProvider({
@@ -110,6 +110,44 @@ describe('Route53DnsProvider', () => {
       pollIntervalMs: 1000,
     });
     await expect(provider.present(record)).rejects.toThrow(/INSYNC/);
+    expect(client.changes).toEqual([
+      {
+        hostedZoneId: 'Z1',
+        action: 'UPSERT',
+        name: record.fqdn,
+        values: [record.value],
+        ttl: 60,
+      },
+      {
+        hostedZoneId: 'Z1',
+        action: 'DELETE',
+        name: record.fqdn,
+        values: [record.value],
+        ttl: 60,
+      },
+    ]);
+  });
+
+  it('cleans up the presented TXT record when getChangeStatus throws inside waitInSync', async () => {
+    const changes: Route53ChangeInput[] = [];
+    const client: Route53Client = {
+      async changeTxtRecord(input) {
+        changes.push(input);
+        return { changeId: '/change/C-ERR' };
+      },
+      async getChangeStatus() {
+        throw new Error('ThrottlingException');
+      },
+    };
+    const provider = new Route53DnsProvider({
+      client,
+      hostedZoneId: 'Z1',
+      sleep: async () => {},
+    });
+    await expect(provider.present(record)).rejects.toThrow(
+      /ThrottlingException/,
+    );
+    expect(changes.map((c) => c.action)).toEqual(['UPSERT', 'DELETE']);
   });
 });
 

@@ -348,6 +348,31 @@ describe('GET /rc/workflows/:runId (detail)', () => {
     expect(((await ownRes.json()) as { runId: string }).runId).toBe(own.runId);
   });
 
+  it('session-locked share token filters run.agents to a.sessionId === lock so cross-session agent ids never leak', async () => {
+    const { url, runRegistry } = await setup(50, undefined, {
+      id: 'tkn-share',
+      scopes: ['session:read', 'share'],
+      sessionLockId: 'S1',
+    });
+    const mixed = runRegistry.create({
+      runId: 'r-mixed',
+      name: 'mixed',
+      scriptHash: 'hmix',
+    });
+    runRegistry.addAgent(mixed.runId, 'agent-s1', 'S1');
+    runRegistry.addAgent(mixed.runId, 'agent-s2-secret', 'S2-secret');
+
+    const res = await fetch(`${url}/rc/workflows/${mixed.runId}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      runId: string;
+      agents: Array<{ agentId: string; sessionId: string }>;
+    };
+    expect(body.agents).toEqual([{ agentId: 'agent-s1', sessionId: 'S1' }]);
+    expect(JSON.stringify(body)).not.toContain('S2-secret');
+    expect(JSON.stringify(body)).not.toContain('agent-s2-secret');
+  });
+
   it('non-locked owner token: detail on any run → 200 (unaffected)', async () => {
     const { url, runRegistry } = await setup();
     const other = runRegistry.create({

@@ -18,9 +18,10 @@
  * gateway appends requests, launcher appends its own results elsewhere.
  */
 
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { writeFileAtomic } from './atomicWrite.js';
 
 /** A request to open a host terminal showing one daemon session. */
 export interface TerminalRequest {
@@ -244,11 +245,10 @@ export class TerminalRequestLog {
    * of growing without limit on a host that polls every few seconds forever.
    */
   async recordPoll(cursor: number): Promise<void> {
-    await mkdir(dirname(this.heartbeatPath), { recursive: true });
-    await writeFile(
+    await writeFileAtomic(
       this.heartbeatPath,
       JSON.stringify({ at: this.now(), cursor }),
-      { encoding: 'utf8', mode: 0o600 },
+      { mode: 0o600 },
     );
   }
 

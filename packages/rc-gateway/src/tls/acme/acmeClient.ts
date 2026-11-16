@@ -127,34 +127,42 @@ export async function createAcmeClient(): Promise<AcmeClient> {
       const key = (a: AcmeAuthz, c: AcmeChallenge, keyAuthorization: string) =>
         `${a.identifier.value}|${c.type}|${keyAuthorization}`;
 
-      const fullchain = await client.auto({
-        csr,
-        email: req.email,
-        termsOfServiceAgreed: true,
-        challengePriority: ['dns-01'],
-        challengeCreateFn: async (authz, challenge, keyAuthorization) => {
-          if (challenge.type !== 'dns-01') {
-            throw new Error(
-              `acme: unexpected challenge "${challenge.type}" (dns-01 only)`,
+      let fullchain: string;
+      try {
+        fullchain = await client.auto({
+          csr,
+          email: req.email,
+          termsOfServiceAgreed: true,
+          challengePriority: ['dns-01'],
+          challengeCreateFn: async (authz, challenge, keyAuthorization) => {
+            if (challenge.type !== 'dns-01') {
+              throw new Error(
+                `acme: unexpected challenge "${challenge.type}" (dns-01 only)`,
+              );
+            }
+            // acme-client's auto() passes the READY-TO-USE dns-01 record value as
+            // keyAuthorization (already base64url(sha256(token.thumbprint))).
+            // VERIFY ON STAGING: if validation fails with a TXT mismatch, this is
+            // the one line to revisit (digest vs raw).
+            const fqdn = `_acme-challenge.${authz.identifier.value}`;
+            handles.set(
+              key(authz, challenge, keyAuthorization),
+              await provider.present({ fqdn, value: keyAuthorization }),
             );
-          }
-          // acme-client's auto() passes the READY-TO-USE dns-01 record value as
-          // keyAuthorization (already base64url(sha256(token.thumbprint))).
-          // VERIFY ON STAGING: if validation fails with a TXT mismatch, this is
-          // the one line to revisit (digest vs raw).
-          const fqdn = `_acme-challenge.${authz.identifier.value}`;
-          handles.set(
-            key(authz, challenge, keyAuthorization),
-            await provider.present({ fqdn, value: keyAuthorization }),
-          );
-        },
-        challengeRemoveFn: async (authz, challenge, keyAuthorization) => {
-          const k = key(authz, challenge, keyAuthorization);
-          const handle = handles.get(k);
-          handles.delete(k);
-          if (handle) await provider.cleanup(handle);
-        },
-      });
+          },
+          challengeRemoveFn: async (authz, challenge, keyAuthorization) => {
+            const k = key(authz, challenge, keyAuthorization);
+            const handle = handles.get(k);
+            handles.delete(k);
+            if (handle) await provider.cleanup(handle);
+          },
+        });
+      } finally {
+        for (const handle of handles.values()) {
+          await provider.cleanup(handle).catch(() => {});
+        }
+        handles.clear();
+      }
 
       const { leaf, chain } = splitPemChain(fullchain);
       return {

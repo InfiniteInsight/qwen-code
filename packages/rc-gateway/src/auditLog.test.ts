@@ -16,7 +16,12 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { AuditLog, AUDIT_ACTIONS, parseAuditEnvNumber } from './auditLog.js';
+import {
+  AuditLog,
+  AUDIT_ACTIONS,
+  isValidAuditAction,
+  parseAuditEnvNumber,
+} from './auditLog.js';
 
 function freshDir(): string {
   return mkdtempSync(join(tmpdir(), 'rc-audit-'));
@@ -751,5 +756,31 @@ describe('parseAuditEnvNumber', () => {
     expect(parseAuditEnvNumber('-1')).toBeUndefined();
     expect(parseAuditEnvNumber('abc')).toBeUndefined();
     expect(parseAuditEnvNumber('1.5')).toBeUndefined();
+  });
+});
+
+describe('AUDIT_ACTIONS parity and isValidAuditAction', () => {
+  it('contains no duplicate entries and accepts all subagent and session/terminal actions', () => {
+    expect(new Set(AUDIT_ACTIONS).size).toBe(AUDIT_ACTIONS.length);
+    for (const action of [
+      'session_created',
+      'terminal_requested',
+      'subagent_cancelled',
+      'subagent_cancel_failed',
+      'subagent_messaged',
+      'subagent_message_failed',
+      'subagent_paused',
+      'subagent_pause_failed',
+      'subagent_resumed',
+      'subagent_resume_failed',
+      'subagent_abandoned',
+      'subagent_abandon_failed',
+    ] as const) {
+      expect(AUDIT_ACTIONS).toContain(action);
+      expect(isValidAuditAction(action)).toBe(true);
+    }
+    expect(isValidAuditAction('not_a_real_action')).toBe(false);
+    expect(isValidAuditAction(null)).toBe(false);
+    expect(isValidAuditAction(42)).toBe(false);
   });
 });

@@ -94,12 +94,18 @@ export class Route53DnsProvider implements DnsProvider {
     // Outside the queue: Route53 applies changes in submission order, and a
     // later change only adds to this value, so waiting here need not hold
     // up the other challenge's write.
-    await this.waitInSync(changeId);
-    return {
+    const handle: DnsChallengeHandle = {
       ...record,
       hostedZoneId: zone,
       changeId,
     };
+    try {
+      await this.waitInSync(changeId);
+    } catch (err) {
+      await this.cleanup(handle).catch(() => {});
+      throw err;
+    }
+    return handle;
   }
 
   async cleanup(handle: DnsChallengeHandle): Promise<void> {

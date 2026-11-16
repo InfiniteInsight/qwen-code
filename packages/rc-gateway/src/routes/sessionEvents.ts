@@ -1332,7 +1332,12 @@ function writeFrame(
   res: Response,
   ev: { id?: number; type?: string; data?: unknown },
 ): void {
-  res.write(serializeFrame(ev));
+  if (res.writableEnded || res.destroyed) return;
+  try {
+    res.write(serializeFrame(ev));
+  } catch {
+    // socket already torn down
+  }
 }
 
 /**
@@ -1341,7 +1346,12 @@ function writeFrame(
  * single write; fired only on the coalescer's timer, never mid-daemon-frame.
  */
 function writeUsageTick(res: Response, tick: UsageTick): void {
-  res.write(`data: ${JSON.stringify({ type: 'usage_tick', data: tick })}\n\n`);
+  if (res.writableEnded || res.destroyed) return;
+  try {
+    res.write(`data: ${JSON.stringify({ type: 'usage_tick', data: tick })}\n\n`);
+  } catch {
+    // socket already torn down
+  }
 }
 
 /**

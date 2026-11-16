@@ -179,13 +179,47 @@ describe('ApnsSender', () => {
     expect(t.calls).toBe(2);
   });
 
-  it('persistent 5xx → retriesExhausted after maxAttempts (default 5)', async () => {
+  it('persistent 5xx → retriesExhausted after maxAttempts (default 5) + push_send_failed audit', async () => {
     const s = await sub();
-    const t = fakeTransport([503]);
+    const t = fakeTransport([{ status: 503, reason: appleBody('ServiceUnavailable') }]);
     const r = await make(t).send(s, payload);
     expect(r).toEqual({ ok: false, retriesExhausted: true });
     expect(t.calls).toBe(5);
     expect(store.get(s.id)).toBeDefined(); // a 5xx never removes the sub
+    expect(audits).toEqual([
+      {
+        action: 'push_send_failed',
+        target: 's1',
+        detail: {
+          transport: 'apns',
+          subscriptionId: s.id,
+          kind: 'agent.completed',
+          statusCode: 503,
+          reason: 'transient_exhausted',
+          apnsReason: 'ServiceUnavailable',
+        },
+      },
+    ]);
+  });
+
+  it('uses per-subscription sub.bundleId as APNs topic and falls back to sender bundleId when empty', async () => {
+    const customSub = await store.register({
+      tokenId: 't-custom',
+      deviceToken: 'dt-custom',
+      bundleId: 'dev.qwen.rc.enterprise',
+      shellVersion: '1',
+    });
+    const topics: string[] = [];
+    const transport: ApnsTransport = {
+      async post(req) {
+        topics.push(req.topic);
+        return { status: 200 };
+      },
+    };
+    const sender = make(transport);
+    await sender.send(customSub, payload);
+    await sender.send({ ...customSub, bundleId: '' }, payload);
+    expect(topics).toEqual(['dev.qwen.rc.enterprise', 'dev.qwen.rc']);
   });
 
   it('other 4xx (e.g. 403) → rejected, no retry, no removal', async () => {

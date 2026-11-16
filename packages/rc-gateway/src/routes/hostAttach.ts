@@ -58,7 +58,9 @@ export interface HostAttachDeps {
       cwd: string;
       pid: number;
     }): Promise<{ tabId: string }>;
-    get(tabId: string): { sessionId: string } | undefined;
+    get(
+      tabId: string,
+    ): { sessionId: string; endedAt?: number | string } | undefined;
   };
 }
 
@@ -185,7 +187,9 @@ export function createHostAttachRoutes(deps: HostAttachDeps): HostAttachRoutes {
     const body = (req.body ?? {}) as { pid?: unknown; tabId?: unknown };
     if (isValidTabId(body.tabId)) {
       const known = tabs.get(body.tabId);
-      if (known && known.sessionId === sessionId) return body.tabId;
+      if (known && known.sessionId === sessionId && known.endedAt === undefined) {
+        return body.tabId;
+      }
     }
     const pid = body.pid;
     if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) {

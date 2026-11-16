@@ -2345,6 +2345,7 @@ export class DaemonPool implements SessionDaemon {
     // daemon. Recorded after the call, because a failed transfer produced no
     // replacement to record.
     const replacementId = (result as { sessionId?: unknown } | null)?.sessionId;
+    const replacementClientId = (result as { clientId?: unknown } | null)?.clientId;
     if (
       ownerKey !== undefined &&
       typeof replacementId === 'string' &&
@@ -2352,6 +2353,21 @@ export class DaemonPool implements SessionDaemon {
       replacementId !== sessionId
     ) {
       this.trackSession(ownerKey, replacementId);
+      const entry =
+        ownerKey === this.defaultWorkspaceCwd
+          ? this.defaultEntry
+          : this.byWorkspace.get(ownerKey);
+      if (
+        entry &&
+        !entry.dead &&
+        typeof replacementClientId === 'string' &&
+        replacementClientId.length > 0
+      ) {
+        this.boundClients.set(replacementId, {
+          clientId: replacementClientId,
+          entry,
+        });
+      }
     }
     return result;
   }
@@ -3086,7 +3102,9 @@ export class DaemonPool implements SessionDaemon {
     const pooled =
       key !== this.defaultWorkspaceCwd ? this.byWorkspace.get(key) : undefined;
     if (pooled && !pooled.dead) {
-      const list = await pooled.client.listWorkspaceSessions(key);
+      const list = await this.callOn(key, pooled, (client) =>
+        client.listWorkspaceSessions(key),
+      );
       for (const s of list) {
         if (typeof s?.sessionId === 'string' && s.sessionId.length > 0) {
           if (isLiveWorkspaceSessionSummary(s)) {
@@ -3575,14 +3593,21 @@ export class DaemonPool implements SessionDaemon {
   // daemon's per-id outcome is returned untouched so a partial failure stays
   // visible.
 
-  archiveSessionsData(
+  async archiveSessionsData(
     sessionIds: string[],
     clientId?: string,
     workspaceCwd?: string,
   ): Promise<DaemonArchiveSessionsResult> {
-    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+    const res = await this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
       client.archiveSessionsData(sessionIds, clientId),
     );
+    const removed = (res as { removed?: unknown } | null)?.removed;
+    if (Array.isArray(removed)) {
+      for (const id of removed) {
+        if (typeof id === 'string') this.removeSession(id);
+      }
+    }
+    return res;
   }
 
   unarchiveSessionsData(
@@ -3595,14 +3620,21 @@ export class DaemonPool implements SessionDaemon {
     );
   }
 
-  deleteSessionsData(
+  async deleteSessionsData(
     sessionIds: string[],
     clientId?: string,
     workspaceCwd?: string,
   ): Promise<DaemonDeleteSessionsResult> {
-    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+    const res = await this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
       client.deleteSessionsData(sessionIds, clientId),
     );
+    const removed = (res as { removed?: unknown } | null)?.removed;
+    if (Array.isArray(removed)) {
+      for (const id of removed) {
+        if (typeof id === 'string') this.removeSession(id);
+      }
+    }
+    return res;
   }
 
   /** Live pooled daemons (excl. default). */

@@ -144,6 +144,9 @@ describe('GET /rc/events', () => {
       once(ev: string, cb: () => void) {
         if (ev === 'drain') drain = cb;
       },
+      removeListener(ev: string, cb: () => void) {
+        if (ev === 'drain' && drain === cb) drain = undefined;
+      },
       end() {},
     } as unknown as Response;
     const req = {
@@ -171,5 +174,79 @@ describe('GET /rc/events', () => {
     expect(resync[0]).toContain('"dropped":2');
 
     close?.(); // clear the heartbeat interval
+  });
+
+  it('detaches onDrain on close and ignores writes to closed or destroyed sockets without throwing', () => {
+    const bus = new OwnerEventBus();
+    let drain: (() => void) | undefined;
+    let close: (() => void) | undefined;
+    let ended = false;
+    let destroyed = false;
+    let throwOnWrite = false;
+    let writeOk = true;
+    const writes: string[] = [];
+
+    const res = {
+      get writableEnded() {
+        return ended;
+      },
+      get destroyed() {
+        return destroyed;
+      },
+      writeHead() {},
+      flushHeaders() {},
+      write(s: string) {
+        if (throwOnWrite) throw new Error('ERR_STREAM_DESTROYED');
+        writes.push(s);
+        return writeOk;
+      },
+      once(ev: string, cb: () => void) {
+        if (ev === 'drain') drain = cb;
+      },
+      removeListener(ev: string, cb: () => void) {
+        if (ev === 'drain' && drain === cb) drain = undefined;
+      },
+      end() {
+        ended = true;
+      },
+    } as unknown as Response;
+    const req = {
+      on(ev: string, cb: () => void) {
+        if (ev === 'close') close = cb;
+      },
+      socket: { setNoDelay() {} },
+    } as unknown as Request;
+
+    createOwnerEventsRoute(bus)(req, res, () => {});
+    expect(writes).toEqual([': ok\n\n']);
+
+    // Trigger backpressure so onDrain is attached via res.once('drain', onDrain).
+    writeOk = false;
+    bus.publish({ type: 'audit', record: auditRecord('bp-1') });
+    bus.publish({ type: 'audit', record: auditRecord('bp-2') });
+    expect(drain).toBeTypeOf('function');
+
+    // A throwing write or destroyed/ended socket must never throw to publishers.
+    throwOnWrite = true;
+    const savedDrain = drain;
+    expect(() => savedDrain?.()).not.toThrow();
+    expect(() =>
+      bus.publish({ type: 'audit', record: auditRecord('after-throw') }),
+    ).not.toThrow();
+
+    // Re-arm drain listener, then close the request: onDrain must be detached.
+    throwOnWrite = false;
+    writeOk = false;
+    bus.publish({ type: 'audit', record: auditRecord('bp-3') });
+    expect(drain).toBeTypeOf('function');
+
+    destroyed = true;
+    expect(() =>
+      bus.publish({ type: 'audit', record: auditRecord('after-destroy') }),
+    ).not.toThrow();
+
+    close?.();
+    expect(drain).toBeUndefined();
+    expect(bus.size).toBe(0);
   });
 });

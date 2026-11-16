@@ -2954,4 +2954,170 @@ describe('DaemonPool reconciles with sessions the daemon reaped (#154)', () => {
       id: 'sess-parent',
     });
   });
+
+  it('binds replacementClientId on resetWorktreeSession so source/artifact mutations authenticate on the replacement session', async () => {
+    const sourceClientIds: Array<[string, string | undefined]> = [];
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      spawn: async (cwd) => ({
+        client: {
+          ...fakeClient(cwd, 'sess-orig'),
+          async createOrAttachSession() {
+            return {
+              sessionId: 'sess-orig',
+              clientId: 'cid-orig',
+              workspaceCwd: cwd,
+              attached: false,
+            };
+          },
+          async resetWorktreeSession() {
+            return {
+              sessionId: 'sess-repl',
+              clientId: 'cid-repl',
+              workspaceCwd: cwd,
+              attached: true,
+            } as never;
+          },
+          async upsertSessionSource(
+            id: string,
+            _source: unknown,
+            cid?: string,
+          ) {
+            sourceClientIds.push([id, cid]);
+            return { ok: true } as never;
+          },
+        } as unknown as DaemonClient,
+        stop: async () => {},
+        workspaceCwd: cwd,
+      }),
+    });
+
+    await pool.createOrAttachSession({ workspaceCwd: '/proj/wt' });
+    const reset = await pool.resetWorktreeSession('sess-orig');
+    expect((reset as { sessionId: string }).sessionId).toBe('sess-repl');
+
+    await pool.upsertSessionSource('sess-repl', {
+      kind: 'url',
+      uri: 'https://example.com',
+    } as never);
+    expect(sourceClientIds).toEqual([['sess-repl', 'cid-repl']]);
+  });
+
+  it('triggers transport death recovery via callOn when pooled listWorkspaceSessions hits a dead daemon', async () => {
+    const audits: AuditEntry[] = [];
+    let spawnCount = 0;
+    let dead = false;
+    const connRefused = Object.assign(new TypeError('fetch failed'), {
+      cause: { code: 'ECONNREFUSED' },
+    });
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      deathProbeDelayMs: 0,
+      spawn: async (cwd) => {
+        const gen = ++spawnCount;
+        return {
+          client: {
+            ...fakeClient(`${cwd}#${gen}`, `sess-${gen}`),
+            async listWorkspaceSessions() {
+              if (gen === 1 && dead) throw connRefused;
+              return [
+                {
+                  sessionId: `sess-${gen}`,
+                  workspaceCwd: cwd,
+                  attached: true,
+                },
+              ] as never;
+            },
+            async health() {
+              if (gen === 1 && dead) throw connRefused;
+              return { status: 'ok' } as never;
+            },
+          } as unknown as DaemonClient,
+          stop: async () => {},
+          workspaceCwd: cwd,
+        };
+      },
+    });
+    pool.setAudit({ record: async (e) => void audits.push(e) });
+
+    await pool.createOrAttachSession({ workspaceCwd: '/proj/dead-list' });
+    expect(pool.size()).toBe(1);
+
+    dead = true;
+    await expect(
+      pool.listWorkspaceSessions('/proj/dead-list'),
+    ).rejects.toThrow(/fetch failed/);
+
+    expect(audits.some((a) => a.action === 'daemon_died')).toBe(true);
+    expect(pool.size()).toBe(0);
+
+    // Subsequent getOrSpawn respawns a fresh daemon (#2).
+    const next = await pool.getOrSpawn('/proj/dead-list');
+    expect((next as unknown as { tag: string }).tag).toBe('/proj/dead-list#2');
+    expect(spawnCount).toBe(2);
+  });
+
+  it('removes archived and deleted session ids from pool tracking while preserving unremoved ids', async () => {
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      spawn: async (cwd) => {
+        let seq = 0;
+        return {
+          client: {
+            ...fakeClient(cwd),
+            async createOrAttachSession() {
+              const id = `sess-${++seq}`;
+              return {
+                sessionId: id,
+                clientId: `cid-${seq}`,
+                workspaceCwd: cwd,
+                attached: false,
+              };
+            },
+            async archiveSessionsData() {
+              return {
+                archived: ['sess-1'],
+                removed: ['sess-1'],
+                failed: [{ sessionId: 'sess-2', reason: 'active' }],
+              } as never;
+            },
+            async deleteSessionsData() {
+              return {
+                deleted: ['sess-3'],
+                removed: ['sess-3'],
+                failed: [],
+              } as never;
+            },
+          } as unknown as DaemonClient,
+          stop: async () => {},
+          workspaceCwd: cwd,
+        };
+      },
+    });
+
+    await pool.createOrAttachSession({ workspaceCwd: '/proj/clean' }); // sess-1
+    await pool.createOrAttachSession({ workspaceCwd: '/proj/clean' }); // sess-2
+    await pool.createOrAttachSession({ workspaceCwd: '/proj/clean' }); // sess-3
+
+    await pool.archiveSessionsData(
+      ['sess-1', 'sess-2'],
+      undefined,
+      '/proj/clean',
+    );
+    expect(pool.sessionWorkspaceCwd('sess-1')).toBeUndefined();
+    await expect(pool.sessionContext('sess-1')).rejects.toBeInstanceOf(
+      UnknownSessionError,
+    );
+    // sess-2 failed to archive so its ownership remains intact.
+    expect(pool.sessionWorkspaceCwd('sess-2')).toBe('/proj/clean');
+
+    await pool.deleteSessionsData(['sess-3'], undefined, '/proj/clean');
+    expect(pool.sessionWorkspaceCwd('sess-3')).toBeUndefined();
+    await expect(pool.sessionContext('sess-3')).rejects.toBeInstanceOf(
+      UnknownSessionError,
+    );
+  });
 });
