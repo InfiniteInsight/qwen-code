@@ -351,6 +351,7 @@ export interface BootViewerOptions {
     repos?: Record<string, unknown[]>;
     flow?: 'connect' | 'deny' | 'expire';
     settings?: string | null;
+    files?: Record<string, string>;
     cloneExit?: number;
   };
 }
@@ -547,6 +548,13 @@ async function harnessGitHub(
         if (typeof o.settings === 'string') {
           mkdirSync(join(dest, '.qwen'), { recursive: true });
           writeFileSync(join(dest, '.qwen', 'settings.json'), o.settings);
+        }
+        if (o.files) {
+          for (const [rel, content] of Object.entries(o.files)) {
+            const parts = rel.split('/');
+            mkdirSync(join(dest, ...parts.slice(0, -1)), { recursive: true });
+            writeFileSync(join(dest, ...parts), content);
+          }
         }
       } catch {
         void child.exit(128, 'fatal: harness could not write the destination');

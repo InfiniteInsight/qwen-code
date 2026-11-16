@@ -23,7 +23,12 @@
 import { constants } from 'node:fs';
 import { lstat, open, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { isInternalSecretEnvVar } from '@qwen-code/qwen-code-core';
+import {
+  isInternalSecretEnvVar,
+  parse as parseYamlFrontmatter,
+} from '@qwen-code/qwen-code-core';
+import { parse as parseToml } from 'smol-toml';
+import { parseDocument as parseYamlDocument } from 'yaml';
 
 export const REPO_SETTINGS_MAX_BYTES = 1024 * 1024;
 
@@ -69,8 +74,10 @@ export interface RepoSettingsFindings {
   otherSettings: Array<{ key: string; value: string }>;
   /**
    * Agent, skill, command and saved-workflow files the CLI loads from the
-   * project, by path relative to the repo, presence only: their contents are
-   * not read. `note` says why one was not looked into.
+   * project, by path relative to the repo. `note` names parsed capabilities
+   * (agent/skill/command name, approval/permission modes, external executor,
+   * allowedTools, MCP servers, hooks, command `!{...}` / `@{...}` injections)
+   * or why an entry could not be read or parsed.
    */
   projectExtensions: Array<{ file: string; note?: string }>;
 }
@@ -184,6 +191,11 @@ const WIDENING_SETTINGS: readonly string[] = [
  *   go along.
  * - `dualOutput.jsonFile`: the session's structured event stream.
  * - `model.openAILoggingDir`: OpenAI API request and response logs.
+ * - `artifact.oss.bucket`, `artifact.oss.endpoint`: the Aliyun OSS bucket and
+ *   `*.aliyuncs.com` host where `OssPublisher` uploads published HTML
+ *   artifacts (`public-read` by default), signed via HMAC-SHA1 from the
+ *   owner's `$OSS_ACCESS_KEY_ID` / `$OSS_ACCESS_KEY_SECRET` (or
+ *   `$ALIBABA_CLOUD_ACCESS_KEY_ID` / `$ALIBABA_CLOUD_ACCESS_KEY_SECRET`).
  */
 const DATA_SINK_SETTINGS: readonly string[] = [
   'telemetry.otlpEndpoint',
@@ -194,6 +206,8 @@ const DATA_SINK_SETTINGS: readonly string[] = [
   'telemetry.target',
   'dualOutput.jsonFile',
   'model.openAILoggingDir',
+  'artifact.oss.bucket',
+  'artifact.oss.endpoint',
 ];
 
 type ReadResult =
@@ -592,27 +606,31 @@ function withDetails(
   return out;
 }
 
-function describeHook(hook: Record<string, unknown>): string {
+function describeHook(hook: Record<string, unknown>, expands = true): string {
   if (hook['type'] === 'http') {
     const text = withDetails(`http ${valueText(hook['url'])}`, [
       ['headers', pairsText(hook['headers'])],
       ['env vars', listText(hook['allowedEnvVars'])],
     ]);
-    return shown(text, [hook['url'], hook['headers'], hook['allowedEnvVars']]);
+    return shown(
+      text,
+      [hook['url'], hook['headers'], hook['allowedEnvVars']],
+      expands,
+    );
   }
   if (hook['type'] === 'prompt') {
-    return shown(`prompt ${valueText(hook['prompt'])}`, [hook['prompt']]);
+    return shown(`prompt ${valueText(hook['prompt'])}`, [hook['prompt']], expands);
   }
   if (hook['type'] === 'command' && typeof hook['command'] === 'string') {
     // The hook runner spreads a hook's own env over the session's, unfiltered.
     const text = withDetails(hook['command'], [
       ['env', pairsText(hook['env'])],
     ]);
-    return shown(text, [hook['command'], hook['env']]);
+    return shown(text, [hook['command'], hook['env']], expands);
   }
   // An entry the CLI would discard (no or unknown type, a non-string command)
   // is still shown whole rather than guessed at.
-  return shown(valueText(hook), [hook]);
+  return shown(valueText(hook), [hook], expands);
 }
 
 /**
@@ -623,6 +641,7 @@ function describeHook(hook: Record<string, unknown>): string {
  */
 function hooksOf(
   settings: Record<string, unknown>,
+  expands = true,
 ): RepoSettingsFindings['hooks'] {
   const hooks = settings['hooks'];
   if (!isRecord(hooks)) return [];
@@ -635,7 +654,10 @@ function hooksOf(
       }
       for (const hook of definition['hooks']) {
         if (!isRecord(hook)) continue;
-        out.push({ event: visible(event), command: describeHook(hook) });
+        out.push({
+          event: visible(event),
+          command: describeHook(hook, expands),
+        });
       }
     }
   }
@@ -936,6 +958,25 @@ function credentialsOf(
       ),
     });
   }
+  const liveVoiceEndpoint = at(settings, 'experimental.liveVoice.endpoint');
+  if (present(liveVoiceEndpoint)) {
+    out.push({
+      key: 'experimental.liveVoice.endpoint',
+      value: shown(valueText(liveVoiceEndpoint), [liveVoiceEndpoint]),
+    });
+  }
+  const liveVoiceApiKey = at(settings, 'experimental.liveVoice.apiKey');
+  if (present(liveVoiceApiKey)) {
+    out.push({
+      key: 'experimental.liveVoice.apiKey',
+      value: shown(
+        'a key is set (value not shown)',
+        [liveVoiceApiKey],
+        true,
+        isEnvName,
+      ),
+    });
+  }
   const proxy = settings['proxy'];
   if (present(proxy)) {
     out.push({ key: 'proxy', value: shown(valueText(proxy), [proxy]) });
@@ -1040,6 +1081,8 @@ function reportedByCategory(
     ...(present(at(settings, 'omni.delivery.upload.baseUrl'))
       ? ['omni.delivery.upload.apiKeyEnv']
       : []),
+    'experimental.liveVoice.endpoint',
+    'experimental.liveVoice.apiKey',
     'proxy',
     ...DATA_SINK_SETTINGS,
   ];
@@ -1275,13 +1318,295 @@ export const PROJECT_EXTENSIONS_MAX = 100;
 /** Entries looked at in all, so a huge tree cannot stall the clone. */
 const PROJECT_EXTENSIONS_VISIT_MAX = 10_000;
 const PROJECT_EXTENSIONS_DEPTH = 8;
+const PROJECT_EXTENSION_NOTE_MAX = 600;
+
+function cappedExtensionNote(text: string): string {
+  return text.length > PROJECT_EXTENSION_NOTE_MAX
+    ? `${text.slice(0, PROJECT_EXTENSION_NOTE_MAX)}... [cut]`
+    : text;
+}
 
 /**
- * Names every file under PROJECT_EXTENSION_DIRS, sorted, without reading one
- * and without following a symlink: a symlink, a directory that cannot be
- * read or one too deep to walk is named with a note, so it still counts. A
- * missing directory, or a plain file where one is expected, holds nothing
- * the CLI loads. After PROJECT_EXTENSIONS_MAX names the rest are counted.
+ * Splits leading YAML frontmatter (`---\n...\n---(?:\n|$)`) in linear time
+ * without regex backtracking over large markdown files.
+ */
+function splitYamlFrontmatter(raw: string): {
+  frontmatterYaml?: string;
+  body: string;
+} {
+  const text = stripUtf8Bom(raw).replace(/\r\n?/g, '\n');
+  let openEnd = -1;
+  if (text.startsWith('---')) {
+    let i = 3;
+    while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i++;
+    if (i === text.length) return { body: text };
+    if (text[i] === '\n') openEnd = i + 1;
+  }
+  if (openEnd === -1) return { body: text };
+
+  // Empty frontmatter: `---\n---` (+ optional horizontal spaces + `\n` or EOF)
+  if (text.startsWith('---', openEnd)) {
+    let j = openEnd + 3;
+    while (j < text.length && (text[j] === ' ' || text[j] === '\t')) j++;
+    if (j === text.length) return { frontmatterYaml: '', body: '' };
+    if (text[j] === '\n') {
+      return { frontmatterYaml: '', body: text.slice(j + 1) };
+    }
+  }
+
+  let search = openEnd;
+  while (search < text.length) {
+    const idx = text.indexOf('\n---', search);
+    if (idx === -1) break;
+    let after = idx + 4;
+    while (after < text.length && (text[after] === ' ' || text[after] === '\t')) {
+      after++;
+    }
+    if (after === text.length || text[after] === '\n') {
+      return {
+        frontmatterYaml: text.slice(openEnd, idx),
+        body: after < text.length ? text.slice(after + 1) : '',
+      };
+    }
+    search = idx + 4;
+  }
+
+  return { body: text };
+}
+
+function formatExtensionMcpServers(raw: unknown): string {
+  if (!isRecord(raw)) return setText(raw);
+  const servers = serversOf(raw, '', false);
+  if (servers.length === 0) return '{}';
+  return servers
+    .map((s) => {
+      const detail = s.command ?? s.url;
+      return detail !== undefined ? `${s.name} (${detail})` : s.name;
+    })
+    .join(', ');
+}
+
+function formatExtensionHooks(raw: unknown): string {
+  if (!isRecord(raw)) return setText(raw);
+  const hooks = hooksOf({ hooks: raw }, false);
+  if (hooks.length === 0) return setText(raw);
+  return hooks.map((h) => `${h.event}: ${h.command}`).join(', ');
+}
+
+/**
+ * Linear-time scan matching `extractInjections` in CLI `injectionParser.ts`
+ * for `!{...}` shell injections and `@{...}` file injections.
+ */
+function collectPromptInjections(
+  prompt: string,
+  trigger: string,
+  label: string,
+): string[] {
+  const out: string[] = [];
+  let index = 0;
+  while (index < prompt.length) {
+    const start = prompt.indexOf(trigger, index);
+    if (start === -1) break;
+    let cur = start + trigger.length;
+    let braces = 1;
+    let closed = false;
+    while (cur < prompt.length) {
+      const ch = prompt[cur];
+      if (ch === '{') braces++;
+      else if (ch === '}') {
+        braces--;
+        if (braces === 0) {
+          const inner = prompt.slice(start + trigger.length, cur).trim();
+          out.push(`${label} ${trigger}${capped(inner)}}`);
+          index = cur + 1;
+          closed = true;
+          break;
+        }
+      }
+      cur++;
+    }
+    if (!closed) {
+      out.push(`unclosed ${trigger}...}`);
+      break;
+    }
+  }
+  return out;
+}
+
+function commandSlashName(rel: string, extLen: number): string {
+  const relUnder = rel.slice('.qwen/commands/'.length, rel.length - extLen);
+  return (
+    '/' +
+    relUnder
+      .split('/')
+      .map((seg) => seg.replaceAll(':', '_'))
+      .join(':')
+  );
+}
+
+/**
+ * Inspects a single project agent, skill or command file without executing
+ * anything and without revealing prose markdown prompt bodies (#263).
+ */
+async function inspectProjectExtensionFile(
+  dir: string,
+  rel: string,
+): Promise<string | undefined> {
+  const lower = rel.toLowerCase();
+  const isAgent = rel.startsWith('.qwen/agents/') && lower.endsWith('.md');
+  const isSkill =
+    (rel.startsWith('.qwen/skills/') || rel.startsWith('.agents/skills/')) &&
+    lower.endsWith('/skill.md');
+  const isTomlCmd =
+    rel.startsWith('.qwen/commands/') && lower.endsWith('.toml');
+  const isMdCmd = rel.startsWith('.qwen/commands/') && lower.endsWith('.md');
+
+  if (!isAgent && !isSkill && !isTomlCmd && !isMdCmd) {
+    return undefined;
+  }
+
+  let read: ReadResult;
+  try {
+    read = await readRepoFile(dir, rel.split('/'));
+  } catch (e) {
+    return visible(`cannot be read (${errCode(e)})`);
+  }
+  if (read.kind === 'none') return undefined;
+  if (read.kind === 'unreadable') {
+    return visible(`cannot be read: ${read.reason}`);
+  }
+
+  if (isAgent) {
+    const { frontmatterYaml } = splitYamlFrontmatter(read.text);
+    if (frontmatterYaml === undefined) return undefined;
+    const doc = parseYamlDocument(frontmatterYaml);
+    const fm = parseYamlFrontmatter(frontmatterYaml);
+    const parts: string[] = [];
+    if (present(fm['name'])) parts.push(`agent ${valueText(fm['name'])}`);
+    if (present(fm['approvalMode'])) {
+      parts.push(`approvalMode: ${valueText(fm['approvalMode'])}`);
+    }
+    if (present(fm['permissionMode'])) {
+      parts.push(`permissionMode: ${valueText(fm['permissionMode'])}`);
+    }
+    if (fm['executor'] !== undefined) {
+      const execRaw = fm['executor'];
+      if (isRecord(execRaw) && present(execRaw['command'])) {
+        const args = Array.isArray(execRaw['args']) ? execRaw['args'] : [];
+        const cmd = [execRaw['command'], ...args]
+          .map((p) => quoteArg(valueText(p)))
+          .join(' ');
+        parts.push(
+          `executor: ${withDetails(cmd, [['env', pairsText(execRaw['env'])]])}`,
+        );
+      } else {
+        parts.push(`executor: ${setText(execRaw)}`);
+      }
+    } else if (/^[ \t]*["']?executor["']?[ \t]*:/m.test(frontmatterYaml)) {
+      parts.push('executor: invalid YAML block');
+    }
+    if (fm['mcpServers'] !== undefined) {
+      parts.push(`mcpServers: ${formatExtensionMcpServers(fm['mcpServers'])}`);
+    }
+    if (fm['hooks'] !== undefined) {
+      parts.push(`hooks: ${formatExtensionHooks(fm['hooks'])}`);
+    }
+    if (
+      parts.length === 0 &&
+      doc.errors.length > 0 &&
+      frontmatterYaml.trim() !== ''
+    ) {
+      parts.push('invalid YAML frontmatter');
+    }
+    return parts.length > 0
+      ? visible(cappedExtensionNote(parts.join('; ')))
+      : undefined;
+  }
+
+  if (isSkill) {
+    const { frontmatterYaml } = splitYamlFrontmatter(read.text);
+    if (frontmatterYaml === undefined) return undefined;
+    const doc = parseYamlDocument(frontmatterYaml);
+    const fm = parseYamlFrontmatter(frontmatterYaml);
+    const parts: string[] = [];
+    if (present(fm['name'])) parts.push(`skill ${valueText(fm['name'])}`);
+    const rawAllowed = fm['allowedTools'] ?? fm['allowed-tools'];
+    if (rawAllowed !== undefined) {
+      parts.push(`allowedTools: ${listText(rawAllowed) ?? setText(rawAllowed)}`);
+    }
+    if (fm['mcpServers'] !== undefined) {
+      parts.push(`mcpServers: ${formatExtensionMcpServers(fm['mcpServers'])}`);
+    }
+    if (fm['hooks'] !== undefined) {
+      parts.push(`hooks: ${formatExtensionHooks(fm['hooks'])}`);
+    }
+    if (
+      parts.length === 0 &&
+      doc.errors.length > 0 &&
+      frontmatterYaml.trim() !== ''
+    ) {
+      parts.push('invalid YAML frontmatter');
+    }
+    return parts.length > 0
+      ? visible(cappedExtensionNote(parts.join('; ')))
+      : undefined;
+  }
+
+  if (isTomlCmd) {
+    const slash = commandSlashName(rel, 5);
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = parseToml(stripUtf8Bom(read.text)) as Record<string, unknown>;
+    } catch {
+      return visible(`command ${slash}; not valid TOML`);
+    }
+    if (typeof parsed['prompt'] !== 'string') {
+      return Object.keys(parsed).length > 0
+        ? visible(`command ${slash}`)
+        : undefined;
+    }
+    const parts = [
+      `command ${slash}`,
+      ...collectPromptInjections(parsed['prompt'], '!{', 'runs'),
+      ...collectPromptInjections(parsed['prompt'], '@{', 'reads'),
+    ];
+    return visible(cappedExtensionNote(parts.join('; ')));
+  }
+
+  // Markdown command (`.qwen/commands/**/*.md`)
+  const slash = commandSlashName(rel, 3);
+  const { frontmatterYaml, body } = splitYamlFrontmatter(read.text);
+  if (frontmatterYaml === undefined && body.trim() === '') {
+    return undefined;
+  }
+  const parts: string[] = [`command ${slash}`];
+  if (frontmatterYaml !== undefined && frontmatterYaml.trim() !== '') {
+    const doc = parseYamlDocument(frontmatterYaml);
+    const fm = parseYamlFrontmatter(frontmatterYaml);
+    const rawAllowed = fm['allowedTools'] ?? fm['allowed-tools'];
+    if (rawAllowed !== undefined) {
+      parts.push(`allowedTools: ${listText(rawAllowed) ?? setText(rawAllowed)}`);
+    }
+    if (fm['hooks'] !== undefined) {
+      parts.push(`hooks: ${formatExtensionHooks(fm['hooks'])}`);
+    }
+    if (Object.keys(fm).length === 0 && doc.errors.length > 0) {
+      parts.push('invalid YAML frontmatter');
+    }
+  }
+  parts.push(
+    ...collectPromptInjections(body, '!{', 'runs'),
+    ...collectPromptInjections(body, '@{', 'reads'),
+  );
+  return visible(cappedExtensionNote(parts.join('; ')));
+}
+
+/**
+ * Names every file under PROJECT_EXTENSION_DIRS, sorted, without following a
+ * symlink, and parses agent/skill/command metadata and capabilities (#263): a
+ * symlink, an unreadable file/directory, or one too deep to walk is named with
+ * a note, so it still counts. After PROJECT_EXTENSIONS_MAX names the rest are
+ * counted.
  */
 async function inspectProjectExtensions(
   dir: string,
@@ -1291,16 +1616,26 @@ async function inspectProjectExtensions(
   let more = 0;
   let visited = 0;
   let stopped = false;
-  const add = (file: string, note?: string): void => {
+  const add = async (
+    file: string,
+    note?: string,
+    inspectContent = false,
+  ): Promise<void> => {
     if (seen.has(file)) return;
     seen.add(file);
     if (out.length >= PROJECT_EXTENSIONS_MAX) {
       more += 1;
       return;
     }
-    out.push(
+    const resolvedNote =
       note !== undefined
-        ? { file: visible(file), note }
+        ? note
+        : inspectContent
+          ? await inspectProjectExtensionFile(dir, file)
+          : undefined;
+    out.push(
+      resolvedNote !== undefined
+        ? { file: visible(file), note: resolvedNote }
         : { file: visible(file) },
     );
   };
@@ -1309,7 +1644,7 @@ async function inspectProjectExtensions(
     try {
       entries = await readdir(abs, { withFileTypes: true });
     } catch (e) {
-      add(rel, `cannot be read (${errCode(e)})`);
+      await add(rel, `cannot be read (${errCode(e)})`);
       return;
     }
     entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
@@ -1321,15 +1656,15 @@ async function inspectProjectExtensions(
       visited += 1;
       const childRel = `${rel}/${entry.name}`;
       if (entry.isSymbolicLink()) {
-        add(childRel, 'a symbolic link, not followed');
+        await add(childRel, 'a symbolic link, not followed');
       } else if (entry.isDirectory()) {
         if (depth + 1 >= PROJECT_EXTENSIONS_DEPTH) {
-          add(childRel, 'a directory too deep to list');
+          await add(childRel, 'a directory too deep to list');
         } else {
           await walk(join(abs, entry.name), childRel, depth + 1);
         }
       } else {
-        add(childRel);
+        await add(childRel, undefined, true);
       }
     }
   };
@@ -1343,7 +1678,7 @@ async function inspectProjectExtensions(
       try {
         const st = await lstat(path);
         if (st.isSymbolicLink()) {
-          add(rel, 'a symbolic link, not followed');
+          await add(rel, 'a symbolic link, not followed');
           found = false;
         } else if (!st.isDirectory()) {
           found = false;
@@ -1351,7 +1686,7 @@ async function inspectProjectExtensions(
       } catch (e) {
         const code = errCode(e);
         if (code !== 'ENOENT' && code !== 'ENOTDIR') {
-          add(rel, `cannot be read (${code})`);
+          await add(rel, `cannot be read (${code})`);
         }
         found = false;
       }
