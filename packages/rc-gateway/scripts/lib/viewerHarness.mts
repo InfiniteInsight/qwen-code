@@ -41,6 +41,7 @@ import {
 import { HostTabRegistry, type TabProcProbe } from '../../src/hostTabs.js';
 import { TerminalRequestLog } from '../../src/terminals.js';
 import { openGitHubDeps, type GitHubRouteDeps } from '../../src/routes/github.js';
+import type { WorkspaceConfigApprovalsDeps } from '../../src/routes/workspaceConfigApprovals.js';
 import type { CloneChild, CloneSpawner } from '../../src/github/clone.js';
 import type { GhRunner } from '../../src/github/credentials.js';
 import { resetRepoCache } from '../../src/github/repos.js';
@@ -249,6 +250,8 @@ export interface BootViewerOptions {
    * draws no row. Nothing on the host is ever run.
    */
   hostActions?: boolean;
+  /** #242: mount `/rc/workspace-config-approvals` against the supplied store + workspaceCwd. */
+  workspaceConfigApprovals?: Omit<WorkspaceConfigApprovalsDeps, 'audit'>;
   /**
    * #190: run the gateway on a real `DaemonPool` rather than the bare stub
    * client, so a scenario can count what the pool holds and what it spawned.
@@ -856,6 +859,9 @@ export async function bootViewer(
   const github = opts.github ? await harnessGitHub(opts.github, dir) : undefined;
   const { app } = createGatewayApp({
     ...(github ? { github: github.deps } : {}),
+    ...(opts.workspaceConfigApprovals
+      ? { workspaceConfigApprovals: opts.workspaceConfigApprovals }
+      : {}),
     ...(tabRegistry && tabRequests
       ? {
           terminalRequests: tabRequests,

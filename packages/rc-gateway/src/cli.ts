@@ -229,6 +229,10 @@ import {
   createRoutingHotReload,
   type HotReload,
 } from './policy/hotReload.js';
+import {
+  WorkspaceConfigApprovalStore,
+  type HeldWorkspaceConfig,
+} from './policy/workspaceConfigApprovals.js';
 import { PermissionOverlayStore } from './policy/overlays.js';
 import {
   checkPolicyFilePermissions,
@@ -1117,12 +1121,20 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         signal: exit.signal ?? null,
       }),
     );
+    const workspaceConfigApprovals = WorkspaceConfigApprovalStore.open(
+      join(homedir(), '.qwen', 'rc', 'workspace-config-approvals.json'),
+    );
+    const bootRoutingHeld: HeldWorkspaceConfig[] = [];
     const { matcher: routing, ruleCount: routingRuleCount } =
       await loadLayeredRoutingMatcher(
         join(homedir(), '.qwen', 'rc', 'routing.yaml'),
         workspaceCwd,
         // eslint-disable-next-line no-console
         (msg) => console.warn(msg),
+        {
+          approvals: workspaceConfigApprovals,
+          onHeld: (held) => bootRoutingHeld.push(held),
+        },
       );
     // Idle suggestions pre-wiring (built before createGatewayApp so the toggle
     // store + status resolver can be injected): the per-session override store, the
@@ -1329,6 +1341,36 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       uiPrefs,
       hostActions,
       ...(github ? { github } : {}),
+      workspaceConfigApprovals: {
+        store: workspaceConfigApprovals,
+        workspaceCwd: () => workspaceCwd,
+        onApproved: async (kind, filePath) => {
+          if (kind === 'policy') {
+            if (reloader?.reloadNow) {
+              await reloader.reloadNow(filePath);
+            } else {
+              currentPolicy = await loadLayeredPolicy(
+                join(homedir(), '.qwen', 'rc', 'policy.yaml'),
+                workspaceCwd,
+                // eslint-disable-next-line no-console
+                (msg) => console.warn(msg),
+                { approvals: workspaceConfigApprovals },
+              );
+            }
+          } else if (routingReloader?.reloadNow) {
+            await routingReloader.reloadNow(filePath);
+          } else if (notifier) {
+            const loaded = await loadLayeredRoutingMatcher(
+              join(homedir(), '.qwen', 'rc', 'routing.yaml'),
+              workspaceCwd,
+              // eslint-disable-next-line no-console
+              (msg) => console.warn(msg),
+              { approvals: workspaceConfigApprovals },
+            );
+            notifier.setRouting(loaded.matcher);
+          }
+        },
+      },
       ...(opts.maxAttachmentBytes !== undefined
         ? { maxAttachmentBytes: opts.maxAttachmentBytes }
         : {}),
@@ -1620,10 +1662,33 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     // a MALFORMED user file still
     // throws (cycle-14 boot-fail, unchanged - do NOT wrap in a swallowing catch); a
     // malformed workspace file is logged + ignored (fail-closed: keep user policy).
+    for (const held of bootRoutingHeld) {
+      void audit.record({
+        action: 'routing_workspace_held',
+        target: held.path,
+        detail: {
+          file: held.path,
+          sha256: held.sha256,
+          phase: 'boot',
+        },
+      });
+    }
     const userPolicyPath = join(homedir(), '.qwen', 'rc', 'policy.yaml');
     // eslint-disable-next-line no-console
     const warn = (msg: string) => console.warn(msg);
-    const policy = await loadLayeredPolicy(userPolicyPath, workspaceCwd, warn);
+    const policy = await loadLayeredPolicy(userPolicyPath, workspaceCwd, warn, {
+      approvals: workspaceConfigApprovals,
+      onHeld: (held) =>
+        void audit.record({
+          action: 'policy_workspace_held',
+          target: held.path,
+          detail: {
+            file: held.path,
+            sha256: held.sha256,
+            phase: 'boot',
+          },
+        }),
+    });
     currentPolicy = policy;
     // Advisory-only lint warnings: alias-widened `allow` rules and the
     // newly-live-allow-rules note from policyAdvisories. Emitted ONCE at boot on
@@ -1717,6 +1782,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
           currentPolicy = p;
         },
         audit,
+        approvals: workspaceConfigApprovals,
       });
       const activeReloader = reloader;
       // Routing shares the same workspace cwd + parent dirs as policy, so build its
@@ -1731,6 +1797,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
           // Sync field swap; notify() captures the matcher once per event.
           apply: (matcher) => activeNotifier.setRouting(matcher),
           audit,
+          approvals: workspaceConfigApprovals,
         });
       }
       const activeRoutingReloader = routingReloader;
@@ -2750,6 +2817,11 @@ if (process.argv[2] === 'serve') {
     ctx.projectRoot,
     // eslint-disable-next-line no-console
     (msg) => console.warn(msg),
+    {
+      approvals: WorkspaceConfigApprovalStore.open(
+        join(homedir(), '.qwen', 'rc', 'workspace-config-approvals.json'),
+      ),
+    },
   )
     .then((policy) => {
       // eslint-disable-next-line no-console
@@ -2774,6 +2846,11 @@ if (process.argv[2] === 'serve') {
     resolved ? process.cwd() : undefined,
     // eslint-disable-next-line no-console
     (msg) => console.warn(msg),
+    {
+      approvals: WorkspaceConfigApprovalStore.open(
+        join(homedir(), '.qwen', 'rc', 'workspace-config-approvals.json'),
+      ),
+    },
   ).then((rules) => {
     // eslint-disable-next-line no-console
     console.log(formatResolvedRouting(rules));
@@ -2806,6 +2883,11 @@ if (process.argv[2] === 'serve') {
       request.resolved ? process.cwd() : undefined,
       // eslint-disable-next-line no-console
       (msg) => console.warn(msg),
+      {
+        approvals: WorkspaceConfigApprovalStore.open(
+          join(homedir(), '.qwen', 'rc', 'workspace-config-approvals.json'),
+        ),
+      },
     );
     // eslint-disable-next-line no-console
     console.log(

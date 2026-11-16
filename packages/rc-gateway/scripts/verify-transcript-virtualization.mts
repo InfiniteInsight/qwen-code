@@ -40,6 +40,10 @@ import type { Page, Route } from 'playwright';
 import { bootViewer, harnessRuntimeRoot, GITHUB_HARNESS_DEVICE_CODE, GITHUB_HARNESS_USER_CODE, HARNESS_HOST_NAME, HOST_ACTION_LABEL, type BootViewerOptions, type Frame, type Viewer } from './lib/viewerHarness.mjs';
 import { resolveChatsDir } from '../src/sessions/chatsPath.js';
 import type { StubDaemonOptions } from '../src/testing/stubDaemon.js';
+import {
+  WorkspaceConfigApprovalStore,
+  sha256Hex,
+} from '../src/policy/workspaceConfigApprovals.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -23067,6 +23071,7 @@ async function runPageScenario(
     hooks: s.stub?.hooks,
     hostTabs: s.stub?.hostTabs,
     github: s.stub?.github,
+    workspaceConfigApprovals: s.stub?.workspaceConfigApprovals,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];
@@ -36918,6 +36923,107 @@ PAGE_SCENARIOS.push({
         `#status missing slot holder or idleReapMs guidance: ${JSON.stringify(statusText)}`,
       );
       return `#status rendered 503 workspace_pool_full with occupied-alpha (busy: 1 session) and idleReapMs (15 min) / --max-daemons guidance`;
+    },
+  });
+}
+
+// #242: held-at-boot workspace .qwen/policy.yaml surfaces in More > Trust and
+// policy with SHA-256 + YAML preview, and tapping Approve applies it.
+{
+  const root = join(harnessRuntimeRoot(), 'ws-config-approvals-242');
+  const wsDir = join(root, 'workspace');
+  mkdirSync(join(wsDir, '.qwen'), { recursive: true });
+  const policyYaml =
+    'version: 1\nrules:\n  - id: hold-shell\n    match:\n      tool: execute\n    action: deny\n';
+  const policyPath = join(wsDir, '.qwen', 'policy.yaml');
+  writeFileSync(policyPath, policyYaml);
+  const expectedSha = sha256Hex(policyYaml);
+  const store = WorkspaceConfigApprovalStore.open(
+    join(root, 'workspace-config-approvals.json'),
+  );
+  store.recordHeld({
+    path: policyPath,
+    kind: 'policy',
+    sha256: expectedSha,
+    phase: 'boot',
+  });
+  let approvedCallbacks = 0;
+
+  PAGE_SCENARIOS.push({
+    name: 'P603 held-at-boot workspace policy.yaml surfaces in More > Trust and policy and approves cleanly (#242)',
+    waitView: false,
+    stub: {
+      workspaceCwd: wsDir,
+      workspaceConfigApprovals: {
+        store,
+        workspaceCwd: () => wsDir,
+        onApproved: () => {
+          approvedCallbacks += 1;
+        },
+      },
+    },
+    run: async ({ page }) => {
+      await page.waitForSelector('#h1-more', { state: 'visible' });
+      await page.click('#h1-more');
+      const trustVal = page.locator(
+        '#more-screen .row[data-panel="trust"] .val',
+      );
+      await page.waitForFunction(
+        () => {
+          const el = document.querySelector(
+            '#more-screen .row[data-panel="trust"] .val',
+          );
+          return Boolean(el && (el.textContent || '').includes('1 held'));
+        },
+        null,
+        { timeout: 5_000 },
+      );
+      const beforeBadge = (await trustVal.textContent()) ?? '';
+      expect(
+        beforeBadge.includes('1 held'),
+        `expected More > Trust and policy to say "1 held", got ${JSON.stringify(beforeBadge)}`,
+      );
+
+      await page.click('#more-screen .row[data-panel="trust"]');
+      await page.waitForSelector(
+        '#ws-config-approvals .ws-cfg-item[data-kind="policy"][data-status="held"]',
+        { timeout: 5_000 },
+      );
+      const cardText =
+        (await page.locator('#ws-config-approvals').textContent()) ?? '';
+      expect(
+        cardText.includes('held at boot (unapproved)') &&
+          cardText.includes(expectedSha) &&
+          cardText.includes('hold-shell'),
+        `#ws-config-approvals missing boot hold, sha256, or YAML preview: ${JSON.stringify(cardText)}`,
+      );
+
+      const approveBtn = page.locator(
+        '#ws-config-approvals button.ws-cfg-approve[data-kind="policy"]',
+      );
+      const box = await approveBtn.boundingBox();
+      expect(
+        Boolean(box && box.height >= 44),
+        `Approve button height was ${box ? box.height : 'null'}px, want >= 44px`,
+      );
+      await approveBtn.click();
+
+      await page.waitForSelector(
+        '#ws-config-approvals .ws-cfg-item[data-kind="policy"][data-status="approved"]',
+        { timeout: 5_000 },
+      );
+      expect(
+        approvedCallbacks === 1 && store.isApproved(policyPath, expectedSha),
+        `expected 1 onApproved callback and persisted approval, got callbacks=${approvedCallbacks}`,
+      );
+
+      await page.click('#panel-back');
+      const afterBadge = (await trustVal.textContent()) ?? '';
+      expect(
+        !afterBadge.includes('held'),
+        `expected More > Trust and policy held badge to clear, got ${JSON.stringify(afterBadge)}`,
+      );
+      return `More showed "1 held", #ws-config-approvals rendered held-at-boot + sha256 + preview (${Math.round(box!.height)}px button), and Approve flipped to approved`;
     },
   });
 }

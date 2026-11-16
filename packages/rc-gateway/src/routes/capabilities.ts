@@ -177,6 +177,8 @@ export function createCapabilityRoute(deps: {
   hostTabs?: boolean;
   /** #257: true when the /rc/github routes are mounted. */
   githubClone?: boolean;
+  /** #242: true when the /rc/workspace-config-approvals routes are mounted. */
+  workspaceConfigApprovals?: boolean;
   /**
    * The upload size limit the attachment route enforces (#196), so the page
    * can shrink an image to fit before sending it. Omitted when not wired; the
@@ -366,6 +368,8 @@ export function createCapabilityRoute(deps: {
       // clone jobs) are mounted. The page draws the GitHub panel and Clone
       // from GitHub only when this is set, so an older gateway shows neither.
       githubClone: deps.githubClone === true,
+      // #242: the OWNER /rc/workspace-config-approvals routes are mounted.
+      workspaceConfigApprovals: deps.workspaceConfigApprovals === true,
     };
     if (deps.costTracking) {
       remoteControl.costTracking = {

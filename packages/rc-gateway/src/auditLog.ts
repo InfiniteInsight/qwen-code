@@ -252,7 +252,11 @@ export type AuditAction =
   | 'github_clone'
   | 'github_clone_acknowledged'
   // #220: workspace daemon pool exhaustion refusal.
-  | 'workspace_pool_full';
+  | 'workspace_pool_full'
+  // #242: watched workspace policy/routing approval gate.
+  | 'policy_workspace_held'
+  | 'routing_workspace_held'
+  | 'workspace_config_approved';
 
 const AUDIT_ACTIONS_LIST = [
   'pairing_redeemed',
@@ -423,6 +427,9 @@ const AUDIT_ACTIONS_LIST = [
   'github_clone',
   'github_clone_acknowledged',
   'workspace_pool_full',
+  'policy_workspace_held',
+  'routing_workspace_held',
+  'workspace_config_approved',
 ] as const satisfies readonly AuditAction[];
 
 type MissingAuditActions = Exclude<
