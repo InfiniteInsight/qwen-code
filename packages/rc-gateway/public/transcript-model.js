@@ -246,6 +246,7 @@
     var forkItem = null;
     var planItem = null;
     var toolIndex = new Map(); // toolCallId -> tool item
+    var unsettledSubs = new Set(); // parentToolCallId of tools in toolIndex with !sub.done (#136)
     var subagentTypes = new Map(); // parentToolCallId -> child type label
     var subToolIndex = new WeakMap(); // sub -> Map(child toolCallId -> entry)
 
@@ -490,9 +491,12 @@
       ) {
         return null;
       }
-      toolIndex.forEach(function (tool, pid) {
-        finishSubagent(pid, 'failed');
-      });
+      if (unsettledSubs.size) {
+        var failIds = Array.from(unsettledSubs);
+        for (var fi = 0; fi < failIds.length; fi++) {
+          finishSubagent(failIds[fi], 'failed');
+        }
+      }
       return push(
         newItem('system', {
           text: clean(text),
@@ -608,11 +612,18 @@
         list[list.length - 1].streaming = false;
       }
     }
+    function syncUnsettled(tool) {
+      var id = tool && tool.toolCallId;
+      if (!id || toolIndex.get(id) !== tool) return;
+      if (tool.sub && !tool.sub.done) unsettledSubs.add(id);
+      else unsettledSubs.delete(id);
+    }
     function subagentOf(parentId, time) {
       var tool = toolIndex.get(parentId);
       if (!tool) return null;
       if (!tool.sub) {
         tool.sub = newSub(parentId, time);
+        syncUnsettled(tool);
       } else {
         var stamp = validStamp(time);
         if (
@@ -649,6 +660,7 @@
 
     // Returns the tool item when something changed (caller emits).
     function settle(parentId, status, settledBySweep) {
+      unsettledSubs.delete(parentId);
       var tool = toolIndex.get(parentId);
       var s = tool && tool.sub;
       if (!s || s.done) return null;
@@ -665,11 +677,14 @@
     }
     function settleAllSubagents() {
       // A turn can't end while an Agent tool is still in flight: settle any
-      // indicator whose terminal update never arrived.
-      toolIndex.forEach(function (tool, pid) {
-        var settled = settle(pid, 'completed', true);
+      // indicator whose terminal update never arrived (#136: touch only
+      // unsettled subagents instead of scanning every tool in toolIndex).
+      if (!unsettledSubs.size) return;
+      var ids = Array.from(unsettledSubs);
+      for (var i = 0; i < ids.length; i++) {
+        var settled = settle(ids[i], 'completed', true);
         if (settled) emitUpdate(settled);
-      });
+      }
     }
 
     function setSubagentType(parentId, type) {
@@ -849,6 +864,7 @@
         if (early) {
           tool.sub = early;
           orphanSubs.delete(id);
+          syncUnsettled(tool);
         }
       }
       // The parent agent tool reaching a terminal status settles the nested
@@ -938,6 +954,7 @@
 
     function dropBookkeeping() {
       toolIndex.clear();
+      unsettledSubs.clear();
       subagentTypes.clear();
       orphanSubs.clear();
       pendingOrphans.clear();
@@ -1135,6 +1152,7 @@
         t.sub.failed = t.status === 'failed';
         t.sub.endedAt = t.sub.endedAt || now();
       }
+      syncUnsettled(t);
     }
     function fillTool(into, from) {
       if (nameless(into) && !nameless(from)) into.label = from.label;
