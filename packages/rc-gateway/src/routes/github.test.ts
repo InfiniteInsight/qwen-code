@@ -214,12 +214,14 @@ interface BootOpts {
   oauthFile?: string;
   /** A group/world-writable token file, so the store refuses it. */
   refuseStore?: boolean;
+  /** Reuse an existing rcDir to simulate a gateway restart (#266). */
+  rcDir?: string;
 }
 
 async function boot(o: BootOpts = {}) {
   runtimeBase = await mkdtemp(join(tmpdir(), 'rc-github-route-'));
-  const rcDir = join(runtimeBase, 'rc');
-  mkdirSync(rcDir, { mode: 0o700 });
+  const rcDir = o.rcDir ?? join(runtimeBase, 'rc');
+  mkdirSync(rcDir, { recursive: true, mode: 0o700 });
   if (o.clientId !== undefined) {
     writeFileSync(
       join(rcDir, 'github-oauth.json'),
@@ -384,9 +386,12 @@ describe('scope', () => {
         '/rc/github/clone',
         { account: 'gh:octocat', repo: 'octocat/hello', dest: '/tmp/x' },
       ],
+      ['GET', '/rc/github/clone'],
+      ['POST', '/rc/github/clone-ack', { dest: '/tmp/x' }],
+      ['POST', '/rc/github/clone-dismiss', { dest: '/tmp/x' }],
       ['GET', '/rc/github/clone/some-job'],
     ];
-    expect(routes).toHaveLength(7);
+    expect(routes).toHaveLength(10);
     for (const [method, path, body] of routes) {
       const r = await call(`${g.url}${path}`, g.write, method, body);
       expect([path, r.status]).toEqual([path, 403]);
@@ -1103,5 +1108,159 @@ describe('capability', () => {
     expect(
       (b.body!['remoteControl'] as Record<string, unknown>)['githubClone'],
     ).toBe(false);
+  });
+});
+
+describe('gateway-enforced ask-before-start (#266)', () => {
+  it('blocks POST /session in or under an unacknowledged clone across gateway restarts until POST /rc/github/clone-ack', async () => {
+    const persistentRcDir = await mkdtemp(join(tmpdir(), 'rc-gh-persist-'));
+    chmodSync(persistentRcDir, 0o700);
+    const destRoot = await mkdtemp(join(tmpdir(), 'rc-gh-cloned-'));
+    const dest = join(destRoot, 'hooky');
+    const subDir = join(dest, 'packages', 'sub');
+
+    const spawner = fakeSpawner((child) => {
+      mkdirSync(join(dest, '.git'), { recursive: true });
+      mkdirSync(join(dest, '.qwen'), { recursive: true });
+      mkdirSync(subDir, { recursive: true });
+      writeFileSync(
+        join(dest, '.qwen', 'settings.json'),
+        JSON.stringify({
+          hooks: {
+            SessionStart: [{ hooks: [{ type: 'command', command: 'echo hi' }] }],
+          },
+        }),
+      );
+      void child.exit(0);
+    });
+
+    const g1 = await boot({ rcDir: persistentRcDir, spawner });
+    const c = await call(`${g1.url}/rc/github/clone`, g1.owner, 'POST', {
+      account: 'gh:octocat',
+      repo: 'octocat/hooky',
+      dest,
+    });
+    expect(c.status).toBe(202);
+    const jobId = String(c.body!['jobId']);
+    const done = await waitJob(g1.url, g1.owner, jobId);
+    expect(done['state']).toBe('done');
+    expect(done['hasFindings']).toBe(true);
+
+    // Owner POST /session in a subdirectory is refused 409 with findings.
+    const blockedOwner = await call(`${g1.url}/session`, g1.owner, 'POST', {
+      cwd: subDir,
+      scope: 'thread',
+    });
+    expect(blockedOwner.status).toBe(409);
+    expect(blockedOwner.body).toMatchObject({
+      code: 'clone_confirmation_required',
+      repo: 'octocat/hooky',
+      dest,
+      hasFindings: true,
+    });
+
+    // Write-only token is also refused 409, without leaking paths or findings.
+    const blockedWrite = await call(`${g1.url}/session`, g1.write, 'POST', {
+      cwd: dest,
+      scope: 'thread',
+    });
+    expect(blockedWrite.status).toBe(409);
+    expect(blockedWrite.body).toEqual({
+      error:
+        'Owner confirmation is required before starting a session in this cloned repository.',
+      code: 'clone_confirmation_required',
+    });
+
+    // Simulate a full gateway restart against the same rcDir.
+    await new Promise<void>((r) => server!.close(() => r()));
+    server = undefined;
+    await stub!.close();
+    stub = undefined;
+
+    const g2 = await boot({ rcDir: persistentRcDir });
+    // In-memory CloneJobs forgot jobId...
+    const lost = await call(`${g2.url}/rc/github/clone/${jobId}`, g2.owner);
+    expect(lost.status).toBe(404);
+    expect(lost.body?.['code']).toBe('job_not_found');
+
+    // ...but GET /rc/github/clone still lists it from disk with live findings!
+    const listed = await call(`${g2.url}/rc/github/clone`, g2.owner);
+    expect(listed.status).toBe(200);
+    const pending = listed.body?.['pending'] as Array<Record<string, unknown>>;
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({
+      state: 'done',
+      repo: 'octocat/hooky',
+      dest,
+      hasFindings: true,
+    });
+
+    // And POST /session is STILL refused 409 after the restart!
+    const stillBlocked = await call(`${g2.url}/session`, g2.owner, 'POST', {
+      cwd: dest,
+      scope: 'thread',
+    });
+    expect(stillBlocked.status).toBe(409);
+    expect(stillBlocked.body?.['code']).toBe('clone_confirmation_required');
+
+    // Dismissing hides it from GET /rc/github/clone, while POST /session STILL asks.
+    const dis = await call(`${g2.url}/rc/github/clone-dismiss`, g2.owner, 'POST', {
+      dest,
+    });
+    expect(dis.status).toBe(200);
+    const afterDismiss = await call(`${g2.url}/rc/github/clone`, g2.owner);
+    expect(afterDismiss.body?.['pending']).toEqual([]);
+    const blockedAfterDismiss = await call(`${g2.url}/session`, g2.owner, 'POST', {
+      cwd: dest,
+      scope: 'thread',
+    });
+    expect(blockedAfterDismiss.status).toBe(409);
+
+    // Owner acknowledges -> audited, and POST /session now succeeds 200.
+    const ack = await call(`${g2.url}/rc/github/clone-ack`, g2.owner, 'POST', {
+      dest,
+    });
+    expect(ack.status).toBe(200);
+    expect(ack.body).toEqual({ acknowledged: true });
+    const rows = await pollRows(g2.auditPath, (rs) =>
+      rs.some((r) => r['action'] === 'github_clone_acknowledged'),
+    );
+    expect(
+      rows.find((r) => r['action'] === 'github_clone_acknowledged'),
+    ).toMatchObject({
+      outcome: 'ok',
+      detail: { acknowledged: true, repo: 'octocat/hooky' },
+    });
+
+    const started = await call(`${g2.url}/session`, g2.owner, 'POST', {
+      cwd: dest,
+      scope: 'thread',
+    });
+    expect(started.status).toBe(200);
+  });
+
+  it('automatically clears a clean clone so POST /session succeeds without manual acknowledgement', async () => {
+    const spawner = fakeSpawner((child, callArgs) => {
+      const target = callArgs.args[callArgs.args.length - 1]!;
+      mkdirSync(join(target, '.git'), { recursive: true });
+      writeFileSync(join(target, 'README.md'), 'clean\n');
+      void child.exit(0);
+    });
+    const g = await boot({ spawner });
+    const dest = await freshDest();
+    const c = await call(`${g.url}/rc/github/clone`, g.owner, 'POST', {
+      account: 'gh:octocat',
+      repo: 'octocat/clean',
+      dest,
+    });
+    expect(c.status).toBe(202);
+    const done = await waitJob(g.url, g.owner, String(c.body!['jobId']));
+    expect(done['hasFindings']).toBe(false);
+
+    const started = await call(`${g.url}/session`, g.owner, 'POST', {
+      cwd: dest,
+      scope: 'thread',
+    });
+    expect(started.status).toBe(200);
   });
 });

@@ -5,11 +5,18 @@
  */
 
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import type { Request, RequestHandler, Response } from 'express';
 import type { AuditRecorder } from '../auditLog.js';
 import { CloneJobs } from '../github/clone.js';
 import type { CloneJobStatus, CloneJobsDeps } from '../github/clone.js';
+import {
+  GITHUB_PENDING_CLONES_FILE,
+  PendingCloneStore,
+  pathExists,
+} from '../github/pendingClones.js';
+import { hasRepoFindings, inspectRepoSettings } from '../github/repoSettings.js';
+import type { CloneStartGate, CloneStartGateHit } from './sessionCreate.js';
 import {
   GitHubCredentialError,
   GitHubCredentials,
@@ -116,6 +123,8 @@ export interface GitHubRouteDeps {
   oauthStoreError?: string;
   /** Test only: the clock of the start window and the account cache. */
   now?: () => number;
+  /** Persistent pending-clone ledger (#266); defaults to in-memory when omitted. */
+  pendingClones?: PendingCloneStore;
 }
 
 export interface GitHubRoutes {
@@ -125,7 +134,11 @@ export interface GitHubRoutes {
   oauthStatus: RequestHandler;
   forget: RequestHandler;
   clone: RequestHandler;
+  cloneList: RequestHandler;
   cloneStatus: RequestHandler;
+  cloneAck: RequestHandler;
+  cloneDismiss: RequestHandler;
+  checkSessionStart: CloneStartGate;
 }
 
 function fail(
@@ -154,6 +167,7 @@ export function createGitHubRoutes(
 ): GitHubRoutes {
   const now = deps.now ?? (() => Date.now());
   const audit = opts.audit;
+  const pendingClones = deps.pendingClones ?? PendingCloneStore.inMemory();
   /** Who started each live flow, for its audit row. */
   const flowActors = new Map<string, string | undefined>();
   /** Starts that reached GitHub inside the window, oldest first. */
@@ -443,6 +457,28 @@ export function createGitHubRoutes(
       if (token === undefined) return;
       const actorTokenId = req.rcClient?.id;
       const onEnd = (s: CloneJobStatus) => {
+        void (async () => {
+          if (s.state === 'done') {
+            if (s.hasFindings === false && !s.error) {
+              await pendingClones.acknowledge(s.dest);
+            } else if (s.error) {
+              await pendingClones.markError(s.dest);
+            }
+          } else if (s.state === 'failed') {
+            if (!(await pathExists(s.dest))) {
+              await pendingClones.acknowledge(s.dest);
+            } else {
+              try {
+                const f = await inspectRepoSettings(s.dest);
+                if (!hasRepoFindings(f)) {
+                  await pendingClones.acknowledge(s.dest);
+                }
+              } catch {
+                await pendingClones.markError(s.dest);
+              }
+            }
+          }
+        })().catch(() => {});
         void audit?.record({
           action: 'github_clone',
           actorTokenId,
@@ -482,6 +518,13 @@ export function createGitHubRoutes(
         );
         return;
       }
+      await pendingClones.record({
+        dest: check.path,
+        repo: `${ref.owner}/${ref.name}`,
+        account: account.id,
+        startedAt: now(),
+        jobId: started.jobId,
+      });
       res.status(202).json({
         jobId: started.jobId,
         ...(account.error !== undefined
@@ -503,6 +546,153 @@ export function createGitHubRoutes(
     }
   };
 
+  const resolvePendingHit = async (entry: {
+    dest: string;
+    repo: string;
+    account: GitHubAccount['id'];
+    startedAt: number;
+    jobId?: string;
+    hadError?: boolean;
+  }): Promise<CloneStartGateHit | null> => {
+    const live = entry.jobId ? deps.clones.status(entry.jobId) : null;
+    if (live?.state === 'running') {
+      return {
+        state: 'running' as const,
+        repo: entry.repo,
+        dest: entry.dest,
+        jobId: entry.jobId,
+      };
+    }
+    if (live?.state === 'done') {
+      if (live.hasFindings === false && !live.error) {
+        await pendingClones.acknowledge(entry.dest);
+        return null;
+      }
+      return {
+        state: 'done' as const,
+        repo: live.repo || entry.repo,
+        dest: live.dest || entry.dest,
+        ...(entry.jobId ? { jobId: entry.jobId } : {}),
+        ...(live.findings ? { findings: live.findings } : {}),
+        ...(live.gitLfsSkipped ? { gitLfsSkipped: true } : {}),
+        ...(live.error ? { inspectError: live.error } : {}),
+      };
+    }
+    if (!(await pathExists(entry.dest))) {
+      await pendingClones.acknowledge(entry.dest);
+      return null;
+    }
+    try {
+      const findings = await inspectRepoSettings(entry.dest);
+      if (!hasRepoFindings(findings) && !entry.hadError) {
+        await pendingClones.acknowledge(entry.dest);
+        return null;
+      }
+      return {
+        state: 'done' as const,
+        repo: entry.repo,
+        dest: entry.dest,
+        findings,
+      };
+    } catch (e) {
+      return {
+        state: 'done' as const,
+        repo: entry.repo,
+        dest: entry.dest,
+        inspectError: scrubSecrets(
+          `The clone finished but its settings could not be inspected: ${errText(e)}`,
+          [],
+        ),
+      };
+    }
+  };
+
+  const checkSessionStart: CloneStartGate = async (workspaceCwd) => {
+    const entry = await pendingClones.findCovering(workspaceCwd);
+    if (!entry) return null;
+    return resolvePendingHit(entry);
+  };
+
+  const cloneList: RequestHandler = async (_req, res) => {
+    try {
+      const pending: Array<Record<string, unknown>> = [];
+      for (const entry of pendingClones.list()) {
+        const hit = await resolvePendingHit(entry);
+        if (!hit) continue;
+        pending.push({
+          state: hit.state,
+          repo: hit.repo,
+          dest: hit.dest,
+          account: entry.account,
+          startedAt: entry.startedAt,
+          ...(hit.jobId ? { jobId: hit.jobId } : {}),
+          hasFindings: true,
+          ...(hit.findings ? { findings: hit.findings } : {}),
+          ...(hit.gitLfsSkipped ? { gitLfsSkipped: true } : {}),
+          ...(hit.inspectError ? { error: hit.inspectError } : {}),
+        });
+      }
+      res.json({ pending });
+    } catch {
+      fail(res, 500, 'clone_list_failed', 'Could not read pending clones');
+    }
+  };
+
+  const cloneAck: RequestHandler = async (req, res) => {
+    try {
+      const body =
+        req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+          ? (req.body as Record<string, unknown>)
+          : {};
+      const dest = typeof body['dest'] === 'string' ? body['dest'].trim() : '';
+      if (!dest || !isAbsolute(dest)) {
+        fail(
+          res,
+          400,
+          'dest_not_absolute',
+          'dest must be an absolute path on the host',
+        );
+        return;
+      }
+      const removed = await pendingClones.acknowledge(dest);
+      void audit?.record({
+        action: 'github_clone_acknowledged',
+        actorTokenId: req.rcClient?.id,
+        outcome: 'ok',
+        detail: {
+          acknowledged: removed !== null,
+          ...(removed ? { repo: removed.repo } : {}),
+        },
+      });
+      res.json({ acknowledged: true });
+    } catch {
+      fail(res, 500, 'clone_ack_failed', 'Could not acknowledge the clone');
+    }
+  };
+
+  const cloneDismiss: RequestHandler = async (req, res) => {
+    try {
+      const body =
+        req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+          ? (req.body as Record<string, unknown>)
+          : {};
+      const dest = typeof body['dest'] === 'string' ? body['dest'].trim() : '';
+      if (!dest || !isAbsolute(dest)) {
+        fail(
+          res,
+          400,
+          'dest_not_absolute',
+          'dest must be an absolute path on the host',
+        );
+        return;
+      }
+      await pendingClones.dismiss(dest);
+      res.json({ dismissed: true });
+    } catch {
+      fail(res, 500, 'clone_dismiss_failed', 'Could not dismiss the clone');
+    }
+  };
+
   const cloneStatus: RequestHandler = (req, res) => {
     const status = deps.clones.status(String(req.params['jobId'] ?? ''));
     if (!status) {
@@ -519,7 +709,11 @@ export function createGitHubRoutes(
     oauthStatus,
     forget,
     clone,
+    cloneList,
     cloneStatus,
+    cloneAck,
+    cloneDismiss,
+    checkSessionStart,
   };
 }
 
@@ -652,6 +846,14 @@ export async function openGitHubDeps(opts: {
     store,
   });
   const clones = new CloneJobs({ env: opts.env, ...opts.clones });
+  let pendingClones: PendingCloneStore;
+  try {
+    pendingClones = await PendingCloneStore.open(
+      join(opts.rcDir, GITHUB_PENDING_CLONES_FILE),
+    );
+  } catch {
+    pendingClones = PendingCloneStore.inMemory();
+  }
   opts.log(
     oauthStoreError !== undefined
       ? `github clone: on; OAuth connect off: ${oauthStoreError}`
@@ -665,6 +867,7 @@ export async function openGitHubDeps(opts: {
     flows,
     flowEnds,
     clones,
+    pendingClones,
     fetch: fetchFn,
     oauthConfigPath,
     ...(oauthConfigError !== undefined ? { oauthConfigError } : {}),

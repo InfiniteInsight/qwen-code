@@ -25310,6 +25310,35 @@
         $('gh-go').textContent = 'Clone';
         ghcView('form');
       }
+      async function ghcResumeFromGateway(gen) {
+        try {
+          const res = await fetch('/rc/github/clone', {
+            headers: githubAuth(),
+          });
+          if (!res.ok) return;
+          const body = await res.json().catch(() => null);
+          if (gen !== ghc.gen || $('gh-clone').hidden) return;
+          if (ghc.phase !== 'form' || ghc.repo || ghc.destTyped) return;
+          const list = body && Array.isArray(body.pending) ? body.pending : [];
+          if (!list.length) return;
+          const first = list[0];
+          if (!first || typeof first.dest !== 'string') return;
+          if (first.state === 'running' && typeof first.jobId === 'string') {
+            const p = {
+              jobId: first.jobId,
+              repo: ghcText(first.repo),
+              dest: first.dest,
+              account: ghcText(first.account),
+            };
+            ghcSavePending(p);
+            ghcResume(p);
+          } else {
+            ghcShowAsk(first);
+          }
+        } catch {
+          // Gateway list is best-effort; POST /session still enforces 409.
+        }
+      }
       function setGhCloneOpen(open, refocus) {
         const scr = $('gh-clone');
         if (scr.hidden === !open) return;
@@ -25322,8 +25351,10 @@
             ghcResume(pending);
             return;
           }
+          const gen = ghc.gen;
           void ghcLoadAccounts();
           void ghcHome().then(() => ghcSyncDest());
+          void ghcResumeFromGateway(gen);
           return;
         }
         const phase = ghc.phase;
@@ -25680,6 +25711,10 @@
             [
               ['', 'The gateway no longer knows this clone (it probably restarted), so how it ended is unknown.'],
               ['', 'Check the folder ' + job.dest + ' on the host.'],
+              [
+                'ghc-warn',
+                'If the clone finished with repo settings, hooks or agents, starting a conversation there will still list them and ask first.',
+              ],
             ],
             [['gh-retry', 'Try again', ghcRetry]],
           );
@@ -25913,7 +25948,8 @@
         go.type = 'button';
         go.id = 'gh-start';
         go.textContent = 'Start a conversation here';
-        go.onclick = () => void ghcStartIn(repo, dest, st.gitLfsSkipped === true);
+        go.onclick = () =>
+          void ghcStartIn(repo, dest, st.gitLfsSkipped === true, true);
         const no = document.createElement('button');
         no.type = 'button';
         no.id = 'gh-cancel';
@@ -25921,6 +25957,14 @@
         no.onclick = () => {
           ghcClearPending();
           ghc.job = null;
+          void fetch('/rc/github/clone-dismiss', {
+            method: 'POST',
+            headers: Object.assign(
+              { 'Content-Type': 'application/json' },
+              githubAuth(),
+            ),
+            body: JSON.stringify({ dest }),
+          }).catch(() => {});
           ghcEnd(
             [
               ['', 'Nothing was started.'],
@@ -25961,13 +26005,59 @@
       // (startConversationIn): when it works, the page moves onto the new
       // conversation and the list shuts, which closes this screen; when it does
       // not, this screen is still up and says so.
-      async function ghcStartIn(repo, dest, lfsSkipped) {
+      async function ghcStartIn(repo, dest, lfsSkipped, ackFirst) {
         // Start was pressed (or the repo brings nothing): answered.
         ghcClearPending();
         const gen = ++ghc.gen;
         ghc.job = { id: '', repo, dest };
         ghcRenderRun('Cloned ' + repo + ' into ' + dest + '. Starting a conversation there…', '');
         ghcView('starting');
+        if (ackFirst) {
+          try {
+            const ackRes = await fetch('/rc/github/clone-ack', {
+              method: 'POST',
+              headers: Object.assign(
+                { 'Content-Type': 'application/json' },
+                githubAuth(),
+              ),
+              body: JSON.stringify({ dest }),
+            });
+            if (!ackRes.ok) {
+              const ackBody = await ackRes.json().catch(() => null);
+              if (gen !== ghc.gen || $('gh-clone').hidden) return;
+              ghcEnd(
+                [
+                  ['', 'The clone is at ' + dest + ', but the conversation did not start.'],
+                  ['ghc-line', describeFailure(ackRes, ackBody, 'acknowledging the clone')],
+                ],
+                [
+                  [
+                    'gh-restart',
+                    'Try starting again',
+                    () => void ghcStartIn(repo, dest, lfsSkipped, true),
+                  ],
+                ],
+              );
+              return;
+            }
+          } catch (e) {
+            if (gen !== ghc.gen || $('gh-clone').hidden) return;
+            ghcEnd(
+              [
+                ['', 'The clone is at ' + dest + ', but the conversation did not start.'],
+                ['ghc-line', failureOf(e, 'acknowledging the clone')],
+              ],
+              [
+                [
+                  'gh-restart',
+                  'Try starting again',
+                  () => void ghcStartIn(repo, dest, lfsSkipped, true),
+                ],
+              ],
+            );
+            return;
+          }
+        }
         await startConversationIn(dest);
         if (gen !== ghc.gen || $('gh-clone').hidden) {
           if (lfsSkipped && $('gh-clone').hidden) {
@@ -25984,7 +26074,7 @@
             ['', 'The clone is at ' + dest + ', but the conversation did not start.'],
             ...(why ? [['ghc-line', why]] : []),
           ],
-          [['gh-restart', 'Try starting again', () => void ghcStartIn(repo, dest)]],
+          [['gh-restart', 'Try starting again', () => void ghcStartIn(repo, dest, lfsSkipped, false)]],
         );
       }
       $('gh-clone-open').addEventListener('click', () => setGhCloneOpen(true));
@@ -28534,6 +28624,35 @@
           } else {
             const failBody = await res.json().catch(() => null);
             if (gen !== switchGen) return;
+            if (
+              res.status === 409 &&
+              failBody &&
+              failBody.code === 'clone_confirmation_required' &&
+              typeof failBody.dest === 'string' &&
+              failBody.dest
+            ) {
+              setStatus(GH_NOT_ASKED);
+              if (!listShown()) setListOpen(true);
+              ghcReset();
+              $('gh-clone').hidden = false;
+              ghc.resumeWhy = GH_NOT_ASKED;
+              if (
+                failBody.state === 'running' &&
+                typeof failBody.jobId === 'string'
+              ) {
+                const p = {
+                  jobId: failBody.jobId,
+                  repo: ghcText(failBody.repo),
+                  dest: failBody.dest,
+                  account: '',
+                };
+                ghcSavePending(p);
+                ghcResume(p);
+              } else {
+                ghcShowAsk(failBody);
+              }
+              return;
+            }
             const base = describeFailure(res, failBody, 'creating the conversation');
             setStatus(
               res.status === 401 || res.status === 403

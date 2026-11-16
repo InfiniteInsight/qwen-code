@@ -9,6 +9,21 @@ import { stat } from 'node:fs/promises';
 import { WorkspacePoolFullError, type SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { daemonUnavailableBody } from '../daemonHttpError.js';
+import type { RepoSettingsFindings } from '../github/repoSettings.js';
+
+export interface CloneStartGateHit {
+  state: 'running' | 'done';
+  repo: string;
+  dest: string;
+  jobId?: string;
+  findings?: RepoSettingsFindings;
+  gitLfsSkipped?: boolean;
+  inspectError?: string;
+}
+
+export type CloneStartGate = (
+  workspaceCwd: string,
+) => Promise<CloneStartGateHit | null>;
 
 /**
  * POST /session — create (or attach to) a daemon session so a freshly-paired
@@ -39,6 +54,7 @@ import { daemonUnavailableBody } from '../daemonHttpError.js';
 export function createSessionCreateRoute(
   daemon: SessionDaemon,
   audit?: AuditRecorder,
+  checkCloneGate?: CloneStartGate,
 ): RequestHandler {
   return async (req, res) => {
     const body = (req.body ?? {}) as { cwd?: unknown; scope?: unknown };
@@ -66,6 +82,34 @@ export function createSessionCreateRoute(
           code: 'invalid_workspace',
         });
         return;
+      }
+
+      // #266: refuse starting in or under an unacknowledged GitHub clone that
+      // is still running or brought repo settings/hooks/agents, even across
+      // new tabs, blocked sessionStorage, or gateway restarts.
+      if (checkCloneGate) {
+        const hit = await checkCloneGate(workspaceCwd);
+        if (hit) {
+          const isOwner = Boolean(req.rcClient?.scopes.includes('owner'));
+          res.status(409).json({
+            error:
+              hit.inspectError ??
+              'Owner confirmation is required before starting a session in this cloned repository.',
+            code: 'clone_confirmation_required',
+            ...(isOwner
+              ? {
+                  state: hit.state,
+                  repo: hit.repo,
+                  dest: hit.dest,
+                  hasFindings: true,
+                  ...(hit.jobId ? { jobId: hit.jobId } : {}),
+                  ...(hit.findings ? { findings: hit.findings } : {}),
+                  ...(hit.gitLfsSkipped ? { gitLfsSkipped: true } : {}),
+                }
+              : {}),
+          });
+          return;
+        }
       }
     }
 
