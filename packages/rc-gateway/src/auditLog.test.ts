@@ -775,6 +775,7 @@ describe('AUDIT_ACTIONS parity and isValidAuditAction', () => {
       'subagent_resume_failed',
       'subagent_abandoned',
       'subagent_abandon_failed',
+      'workspace_pool_full',
     ] as const) {
       expect(AUDIT_ACTIONS).toContain(action);
       expect(isValidAuditAction(action)).toBe(true);

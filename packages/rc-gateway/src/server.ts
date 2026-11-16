@@ -776,6 +776,11 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // Routes that relay daemon errors reach the audit log through the app, so
   // a daemon 401 can leave a row without every factory taking `audit`.
   app.locals.audit = audit;
+  // #220: connect a pooled daemon to the audit chain automatically when
+  // createGatewayApp is constructed directly without cli.ts's post-boot wire.
+  (
+    deps.daemon as { setAuditIfUnset?: (recorder: AuditLog) => void }
+  ).setAuditIfUnset?.(audit);
   // #165: rows that unauthenticated traffic can cause (401s, refused CORS
   // preflights) are written once per peer per minute with a count, through
   // this one shared throttle, instead of once per request.

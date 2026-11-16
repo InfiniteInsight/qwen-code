@@ -250,7 +250,9 @@ export type AuditAction =
   | 'github_oauth_failed'
   | 'github_oauth_forgotten'
   | 'github_clone'
-  | 'github_clone_acknowledged';
+  | 'github_clone_acknowledged'
+  // #220: workspace daemon pool exhaustion refusal.
+  | 'workspace_pool_full';
 
 const AUDIT_ACTIONS_LIST = [
   'pairing_redeemed',
@@ -420,6 +422,7 @@ const AUDIT_ACTIONS_LIST = [
   'github_oauth_forgotten',
   'github_clone',
   'github_clone_acknowledged',
+  'workspace_pool_full',
 ] as const satisfies readonly AuditAction[];
 
 type MissingAuditActions = Exclude<
