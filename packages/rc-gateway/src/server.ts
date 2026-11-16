@@ -1725,6 +1725,10 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan, // banned chat user -> 403 (a control act is never rate-limited)
     createMidTurnMessagesSendNowRoute(deps.daemon, audit),
   );
+  const githubRoutes = deps.github
+    ? createGitHubRoutes(deps.github, { audit })
+    : undefined;
+
   // POST /session — create (or attach to) a session so a freshly-paired client
   // (the web UI's "New conversation" button) has one to watch and prompt.
   // Write-scoped; bare namespace, mirroring the daemon's own POST /session.
@@ -1732,7 +1736,11 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     '/session',
     requireScope(WRITE, audit),
     subActorBan, // banned chat user → 403 (before touching the daemon)
-    createSessionCreateRoute(deps.daemon, audit),
+    createSessionCreateRoute(
+      deps.daemon,
+      audit,
+      githubRoutes?.checkSessionStart,
+    ),
   );
   // POST /rc/terminals — open a terminal on the gateway's own host showing one
   // conversation (issue #49). Write-scoped like /session. Mounted whenever a
@@ -2578,8 +2586,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // The /rc/github routes (#257): gateway-global and OWNER-scoped, like the
   // host actions above, because they read the owner's GitHub tokens and
   // write folders on the host. Absent deps -> not mounted at all (404).
-  if (deps.github) {
-    const githubRoutes = createGitHubRoutes(deps.github, { audit });
+  if (githubRoutes) {
     app.get(
       '/rc/github/accounts',
       requireScope(OWNER, audit),
@@ -2601,10 +2608,25 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       requireScope(OWNER, audit),
       githubRoutes.forget,
     );
+    app.get(
+      '/rc/github/clone',
+      requireScope(OWNER, audit),
+      githubRoutes.cloneList,
+    );
     app.post(
       '/rc/github/clone',
       requireScope(OWNER, audit),
       githubRoutes.clone,
+    );
+    app.post(
+      '/rc/github/clone-ack',
+      requireScope(OWNER, audit),
+      githubRoutes.cloneAck,
+    );
+    app.post(
+      '/rc/github/clone-dismiss',
+      requireScope(OWNER, audit),
+      githubRoutes.cloneDismiss,
     );
     app.get(
       '/rc/github/clone/:jobId',

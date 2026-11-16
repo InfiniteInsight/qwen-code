@@ -249,7 +249,8 @@ export type AuditAction =
   | 'github_oauth_connected'
   | 'github_oauth_failed'
   | 'github_oauth_forgotten'
-  | 'github_clone';
+  | 'github_clone'
+  | 'github_clone_acknowledged';
 
 const AUDIT_ACTIONS_LIST = [
   'pairing_redeemed',
@@ -418,6 +419,7 @@ const AUDIT_ACTIONS_LIST = [
   'github_oauth_failed',
   'github_oauth_forgotten',
   'github_clone',
+  'github_clone_acknowledged',
 ] as const satisfies readonly AuditAction[];
 
 type MissingAuditActions = Exclude<

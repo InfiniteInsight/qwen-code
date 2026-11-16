@@ -34469,6 +34469,100 @@ PAGE_SCENARIOS.push({
       return `rendered .lsp.json server under "LSP servers (.lsp.json)" and displayed Git LFS skipped-smudge notice`;
     },
   });
+
+  // #266: gateway-enforced ask-before-start when sessionStorage is cleared (new tab / PWA relaunch / blocked storage)
+  PAGE_SCENARIOS.push({
+    name: 'P601 gateway enforces ask-before-start on POST /session and GET /rc/github/clone even when sessionStorage is cleared (#266)',
+    waitView: false,
+    stub: {
+      github: {
+        ghLogins: ['octo-gate'],
+        repos: { 'gh:octo-gate': [ghcRepo('octo-gate/gated')] },
+        settings: JSON.stringify({
+          hooks: {
+            SessionStart: [
+              { hooks: [{ type: 'command', command: 'echo must-ask' }] },
+            ],
+          },
+        }),
+        files: {
+          'packages/sub/.keep': '',
+        },
+      },
+    },
+    run: async ({ page, viewer }) => {
+      const dest = join(ghcProjects(), 'gated');
+      rmSync(dest, { recursive: true, force: true });
+      const sessionResponses: Array<{ status: number; cwd: string }> = [];
+      page.on('response', (res) => {
+        const req = res.request();
+        if (req.method() === 'POST' && new URL(res.url()).pathname === '/session') {
+          let cwd = '';
+          try {
+            cwd = String((JSON.parse(req.postData() ?? '{}') as { cwd?: string }).cwd ?? '');
+          } catch {
+            cwd = '';
+          }
+          sessionResponses.push({ status: res.status(), cwd });
+        }
+      });
+      await ghcOpen(page);
+      await ghcWaitRows(page, 1);
+      await ghcPick(page, 'octo-gate/gated');
+      await page.click('#gh-go');
+      await page.waitForSelector('#gh-ask', { state: 'visible', timeout: 15_000 });
+
+      // Simulate a brand-new tab / PWA relaunch where sessionStorage is empty.
+      await page.evaluate(`sessionStorage.clear(); undefined`);
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await page.waitForFunction(`typeof githubOn === 'function' && githubOn()`, null, { timeout: 15_000 });
+
+      // 1. Opening Clone from GitHub with empty sessionStorage recovers the unanswered clone via GET /rc/github/clone.
+      await ghcOpen(page);
+      await page.waitForSelector('#gh-ask', { state: 'visible', timeout: 15_000 });
+      expect(
+        (await ghcSay(page, 'gh-ask')).includes('octo-gate/gated'),
+        'GET /rc/github/clone did not recover unanswered clone after sessionStorage.clear()',
+      );
+
+      // 2. Dismissing (Cancel) hides it from Clone from GitHub, yet typing a nested path into Start here still hits 409 on POST /session and opens #gh-ask!
+      await page.click('#gh-cancel');
+      await page.click('#gh-back');
+      await page.evaluate(`sessionStorage.clear(); undefined`);
+      await page.fill('#new-session-cwd', `${dest}/packages/sub`);
+      await page.click('#new-session');
+      await page.waitForSelector('#gh-ask', { state: 'visible', timeout: 15_000 });
+      const askText = await ghcSay(page, 'gh-ask');
+      const cats = await ghcFindings(page);
+      expect(
+        askText.includes('This folder is a clone you have not been asked about yet.') &&
+          cats.some((c) => c.heading === 'Hooks'),
+        `POST /session 409 did not redirect to #gh-ask with findings: ${JSON.stringify({ askText, cats })}`,
+      );
+      expect(
+        sessionResponses.length === 1 &&
+          sessionResponses[0]!.status === 409 &&
+          sessionResponses[0]!.cwd === `${dest}/packages/sub`,
+        `expected 409 on nested POST /session, got ${JSON.stringify(sessionResponses)}`,
+      );
+      expect(
+        viewer.stub.createdSessionCount === 0,
+        `daemon session was created before acknowledgement (count=${viewer.stub.createdSessionCount})`,
+      );
+
+      // 3. Pressing Start a conversation here acknowledges via POST /rc/github/clone-ack and starts the session.
+      await page.click('#gh-start');
+      await page.waitForFunction(`document.getElementById('gh-clone').hidden`, null, { timeout: 15_000 });
+      expect(
+        sessionResponses.length === 2 &&
+          sessionResponses[1]!.status === 200 &&
+          sessionResponses[1]!.cwd === dest &&
+          viewer.stub.createdSessionCount === 1,
+        `expected acknowledged POST /session 200 in ${dest}, got responses=${JSON.stringify(sessionResponses)}, stubCount=${viewer.stub.createdSessionCount}`,
+      );
+      return `recovered unanswered clone via GET /rc/github/clone after sessionStorage.clear(), intercepted nested POST /session with 409 -> #gh-ask (daemon count=0) after Cancel, and started cleanly after Start (daemon count=1)`;
+    },
+  });
 }
 
 // #267, #260: Subagent Pause, Resume, and Abandon controls in #agents-sheet.
