@@ -299,6 +299,9 @@ export function createCapabilityRoute(deps: {
       // #110: true when the connected daemon advertises session_task_output
       // (GET /session/:id/tasks/:taskId/output).
       sessionTaskOutput: false,
+      // #113: GET /rc/sessions/active is mounted (OWNER) so a second device
+      // can discover and join a conversation already live on the host or phone.
+      activeSession: true,
       // #132: POST /rc/sessions/catalog is mounted: one merged order and one
       // cursor across the workspaces, with groups. The page is served from
       // disk and can meet an older gateway, so it reads the catalog only when

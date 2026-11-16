@@ -485,6 +485,15 @@ export interface StubDaemonOptions {
   /** Status for POST /session/:id/model (default 200). */
   setModelStatus?: number;
   /**
+   * #113: when true, POST /session/:id/prompt pushes user_message_chunk,
+   * agent_message_chunk, and turn_complete frames onto every open
+   * /session/:id/events stream for that session and appends them to replay
+   * history.
+   */
+  promptBroadcastsEvents?: boolean;
+  /** #113: custom reply text for `promptBroadcastsEvents` (defaults to `ack: <prompt>`). */
+  promptReplyText?: string;
+  /**
    * Response body for POST /session/:id/model on success. Defaults to
    * `{ modelId: req.body.modelId }` so a test that doesn't care about the
    * exact value still gets one consistent with what it sent.
@@ -1831,10 +1840,19 @@ export async function startStubDaemon(
     res.json({ sessions: opts.sessions ?? [] });
   });
 
+  const openEventStreams = new Map<
+    string,
+    Set<{ res: express.Response; nextId: () => number }>
+  >();
+  const livePromptHistory = new Map<
+    string,
+    Array<{ id: number; type: string; data: unknown }>
+  >();
+
   app.get('/session/:id/events', (req, res) => {
-    state.lastEventIdHeader = req.headers['last-event-id'] as
-      | string
-      | undefined;
+    const sessionId = String(req.params.id);
+    const rawCursor = req.headers['last-event-id'] as string | undefined;
+    state.lastEventIdHeader = rawCursor;
     if (opts.eventsStatus && opts.eventsStatus !== 200) {
       res.status(opts.eventsStatus).json({ error: 'stub error' });
       return;
@@ -1847,7 +1865,7 @@ export async function startStubDaemon(
     // Extend `frames` with any scripted `permissionFrames`, assigning ids
     // sequentially so both sets replay through the same JSON-envelope
     // convention documented below.
-    const allFrames = opts.permissionFrames
+    const baseFrames = opts.permissionFrames
       ? [
           ...frames,
           ...opts.permissionFrames.map((f, i) => ({
@@ -1857,7 +1875,14 @@ export async function startStubDaemon(
           })),
         ]
       : frames;
+    const extraFrames = livePromptHistory.get(sessionId) ?? [];
+    const allFrames = [...baseFrames, ...extraFrames];
+    const parsedCursor =
+      rawCursor !== undefined && /^\d+$/.test(rawCursor)
+        ? Number.parseInt(rawCursor, 10)
+        : 0;
     for (const f of allFrames) {
+      if (parsedCursor > 0 && f.id <= parsedCursor) continue;
       // IMPORTANT: the SDK's parseSseStream reads the event id from INSIDE
       // the data JSON envelope (`parsed.id`, required to be an integer >= 1),
       // and ignores the SSE `id:` line. So the id MUST live in the JSON. We
@@ -1870,13 +1895,25 @@ export async function startStubDaemon(
           id: f.id,
           type: f.type,
           data: f.data,
-          ...(f._meta !== undefined ? { _meta: f._meta } : {}),
+          ...('_meta' in f && f._meta !== undefined ? { _meta: f._meta } : {}),
         })}\n\n`,
       );
     }
     if (opts.holdOpenMs) {
       let ended = false;
-      let nextLiveId = allFrames.length + 1;
+      let nextLiveId =
+        (allFrames.length > 0 ? allFrames[allFrames.length - 1]!.id : 0) + 1;
+      const subscriber = { res, nextId: () => nextLiveId++ };
+      let subs = openEventStreams.get(sessionId);
+      if (!subs) {
+        subs = new Set();
+        openEventStreams.set(sessionId, subs);
+      }
+      subs.add(subscriber);
+      const cleanupSub = () => {
+        subs?.delete(subscriber);
+        if (subs && subs.size === 0) openEventStreams.delete(sessionId);
+      };
       const ticker =
         opts.liveFrameIntervalMs && opts.liveFrameIntervalMs > 0
           ? setInterval(() => {
@@ -1895,10 +1932,12 @@ export async function startStubDaemon(
           : undefined;
       const timer = setTimeout(() => {
         ended = true;
+        cleanupSub();
         if (ticker) clearInterval(ticker);
         res.end();
       }, opts.holdOpenMs);
       req.on('close', () => {
+        cleanupSub();
         if (!ended) {
           state.eventsAbortedByClient = true;
           clearTimeout(timer);
@@ -4225,8 +4264,80 @@ export async function startStubDaemon(
       return;
     }
     const respond = () => {
+      const sessionId = String(req.params.id);
+      if (status === 200 && opts.promptBroadcastsEvents) {
+        const rawPrompt = (req.body as { prompt?: unknown } | undefined)?.prompt;
+        const promptText =
+          typeof rawPrompt === 'string'
+            ? rawPrompt
+            : Array.isArray(rawPrompt)
+              ? rawPrompt
+                  .map((b) =>
+                    b && typeof b === 'object' && typeof (b as { text?: unknown }).text === 'string'
+                      ? (b as { text: string }).text
+                      : '',
+                  )
+                  .filter(Boolean)
+                  .join('\n')
+              : '';
+        const replyText = opts.promptReplyText ?? `ack: ${promptText}`;
+        const hist = livePromptHistory.get(sessionId) ?? [];
+        const baseCount = opts.permissionFrames
+          ? frames.length + opts.permissionFrames.length
+          : frames.length;
+        let nextHistId =
+          (hist.length > 0 ? hist[hist.length - 1]!.id : baseCount) + 1;
+        const turnFrames = [
+          {
+            id: nextHistId++,
+            type: 'session_update',
+            data: {
+              sessionId,
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: promptText },
+              },
+            },
+          },
+          {
+            id: nextHistId++,
+            type: 'session_update',
+            data: {
+              sessionId,
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: replyText },
+              },
+            },
+          },
+          {
+            id: nextHistId++,
+            type: 'turn_complete',
+            data: { stopReason: opts.promptStopReason ?? 'end_turn' },
+          },
+        ];
+        hist.push(...turnFrames);
+        livePromptHistory.set(sessionId, hist);
+        const subs = openEventStreams.get(sessionId);
+        if (subs) {
+          for (const sub of subs) {
+            for (const tf of turnFrames) {
+              const id = Math.max(sub.nextId(), tf.id);
+              sub.res.write(`id: ${id}\n`);
+              sub.res.write(
+                `data: ${JSON.stringify({
+                  v: 1,
+                  id,
+                  type: tf.type,
+                  data: tf.data,
+                })}\n\n`,
+              );
+            }
+          }
+        }
+      }
       state.promptCallLog.push({
-        sessionId: req.params.id,
+        sessionId,
         startedAt,
         endedAt: Date.now(),
       });

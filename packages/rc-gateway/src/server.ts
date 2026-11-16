@@ -248,6 +248,7 @@ import {
 } from './routes/sessionQueue.js';
 /** #111: which sessions in a workspace are actually open right now. */
 import { createSessionLiveStateRoute } from './routes/sessionLiveState.js';
+import { createSessionActiveRoute } from './routes/sessionActive.js';
 import { createSessionCatalogRoute } from './routes/sessionCatalog.js';
 import { createSessionCreateRoute } from './routes/sessionCreate.js';
 import { createTerminalOpenRoute } from './routes/terminals.js';
@@ -2073,6 +2074,16 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     '/rc/sessions/live-state',
     requireScope(OWNER, audit),
     createSessionLiveStateRoute(deps.daemon),
+  );
+  // GET /rc/sessions/active (#113) - OWNER-scoped pointer to the conversation
+  // currently live on a host terminal tab or watched over SSE on another device.
+  app.get(
+    '/rc/sessions/active',
+    requireScope(OWNER, audit),
+    createSessionActiveRoute({
+      watchPresence,
+      hostTabs: deps.hostTabs?.registry,
+    }),
   );
   // POST /rc/sessions/catalog (#132): the session catalog across workspaces,
   // one merged order and one cursor. OWNER like the listing and the
