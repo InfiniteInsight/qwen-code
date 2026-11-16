@@ -13817,9 +13817,11 @@ class QwenAgent implements Agent {
         }
         const config = session.getConfig();
         const registry = config.getBackgroundTaskRegistry();
-        const task =
-          registry.get(taskId) ??
-          registry.getAll().find((t) => t.toolUseId === taskId);
+        let task = findSubagentTask(registry, taskId);
+        if (!task) {
+          await config.loadPausedBackgroundAgents?.(config.getSessionId());
+          task = findSubagentTask(registry, taskId);
+        }
         if (!task) {
           const revived = await config.reviveCompletedBackgroundAgent(
             taskId,
@@ -13945,9 +13947,14 @@ class QwenAgent implements Agent {
         const config = this.sessionOrThrow(sessionId).getConfig();
         const registry = config.getBackgroundTaskRegistry();
         // Same lookup as cancel, pause, and message: the agent id, or the tool
-        // call that launched it. An unknown id goes to the service, which
-        // answers agent_not_found.
-        const agentId = findSubagentTask(registry, taskId)?.id ?? taskId;
+        // call that launched it. Hydrate cold paused sidecars first if the
+        // session has not loaded them into the registry yet (#274).
+        let matched = findSubagentTask(registry, taskId);
+        if (!matched) {
+          await config.loadPausedBackgroundAgents?.(config.getSessionId());
+          matched = findSubagentTask(registry, taskId);
+        }
+        const agentId = matched?.id ?? taskId;
         const outcome = await config.resumeBackgroundAgentWithOutcome(
           agentId,
           message,

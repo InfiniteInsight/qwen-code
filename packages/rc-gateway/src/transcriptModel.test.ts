@@ -18,8 +18,30 @@ interface Sub {
   failed: boolean;
   type: string;
   text: string;
+  time?: number;
+  thinking?: boolean;
+  thoughts?: Array<{
+    text: string;
+    textAt: number;
+    toolIdx: number;
+    time?: number;
+    streaming: boolean;
+  }>;
+  textSpans?: Array<{
+    from: number;
+    to: number;
+    toolIdx: number;
+    thoughtIdx: number;
+    time?: number;
+  }>;
   // #110: textAt is how much of `text` had arrived when the call started.
-  tools: Array<{ id: string; label: string; status: string; textAt?: number }>;
+  tools: Array<{
+    id: string;
+    label: string;
+    status: string;
+    textAt?: number;
+    time?: number;
+  }>;
 }
 interface Item {
   id: number;
@@ -73,8 +95,13 @@ interface Model {
   setPlan(entries: unknown[]): void;
   upsertTool(u: Record<string, unknown>, time?: number): void;
   setSubagentType(parentId: string, type: string): void;
-  appendSubagentText(parentId: string, text: string): void;
-  upsertSubagentTool(u: Record<string, unknown>, parentId: string): void;
+  appendSubagentThought(parentId: string, text: string, time?: number): void;
+  appendSubagentText(parentId: string, text: string, time?: number): void;
+  upsertSubagentTool(
+    u: Record<string, unknown>,
+    parentId: string,
+    time?: number,
+  ): void;
   finishSubagent(parentId: string, status: string): void;
   settleAllSubagents(): void;
   resetTurn(): void;
@@ -1509,6 +1536,107 @@ describe('TranscriptModel', () => {
       // Synthetic tool call with no timestamp leaves time undefined.
       m.upsertTool({ toolCallId: 't3', title: 'Bare', status: 'completed' });
       expect(m.items[2].time).toBeUndefined();
+    });
+
+    it('records subagent thoughts, text spans, and child tool timestamps across live and replay (#274)', () => {
+      const m = api.createTranscriptModel({ now: () => 5000 });
+      m.upsertTool(
+        { toolCallId: 'parent-1', title: 'Agent', status: 'in_progress' },
+        1_700_000_000_000,
+      );
+      m.setSubagentType('parent-1', 'Explore');
+      m.appendSubagentThought('parent-1', 'first ', 1_700_000_001_000);
+      m.appendSubagentThought('parent-1', 'thought', 1_700_000_002_000);
+      expect(m.items[0].sub?.thinking).toBe(true);
+      expect(m.items[0].sub?.thoughts).toEqual([
+        {
+          text: 'first thought',
+          textAt: 0,
+          toolIdx: 0,
+          time: 1_700_000_001_000,
+          streaming: true,
+        },
+      ]);
+
+      m.appendSubagentText('parent-1', 'found routes', 1_700_000_003_000);
+      expect(m.items[0].sub?.thinking).toBe(false);
+      expect(m.items[0].sub?.thoughts?.[0]?.streaming).toBe(false);
+      expect(m.items[0].sub?.textSpans).toEqual([
+        {
+          from: 0,
+          to: 12,
+          toolIdx: 0,
+          thoughtIdx: 1,
+          time: 1_700_000_003_000,
+        },
+      ]);
+
+      m.upsertSubagentTool(
+        { toolCallId: 'child-t1', title: 'Read server.ts', status: 'in_progress' },
+        'parent-1',
+        1_700_000_005_000,
+      );
+      m.upsertSubagentTool(
+        { toolCallId: 'child-t1', status: 'completed' },
+        'parent-1',
+        1_700_000_009_000,
+      );
+      expect(m.items[0].sub?.tools[0]).toMatchObject({
+        id: 'child-t1',
+        label: 'Read server.ts',
+        status: 'completed',
+        textAt: 12,
+        time: 1_700_000_005_000,
+      });
+
+      const replayed = api.replayStoredPage([
+        {
+          type: 'session_update',
+          _meta: { serverTimestamp: 1_700_000_100_000 },
+          data: {
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'parent-r',
+              title: 'Agent',
+              status: 'in_progress',
+            },
+          },
+        },
+        {
+          type: 'session_update',
+          _meta: { serverTimestamp: 1_700_000_102_000 },
+          data: {
+            update: {
+              sessionUpdate: 'agent_thought_chunk',
+              content: { text: 'analyzing' },
+              _meta: { parentToolCallId: 'parent-r', subagentType: 'Explore' },
+            },
+          },
+        },
+        {
+          type: 'session_update',
+          _meta: { serverTimestamp: 1_700_000_106_000 },
+          data: {
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'child-r1',
+              title: 'Grep',
+              status: 'completed',
+              _meta: { parentToolCallId: 'parent-r', subagentType: 'Explore' },
+            },
+          },
+        },
+      ]);
+      expect(replayed[0].sub?.thoughts).toEqual([
+        {
+          text: 'analyzing',
+          textAt: 0,
+          toolIdx: 0,
+          time: 1_700_000_102_000,
+          streaming: false,
+        },
+      ]);
+      expect(replayed[0].sub?.tools[0]?.time).toBe(1_700_000_106_000);
     });
   });
 });

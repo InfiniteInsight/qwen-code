@@ -950,7 +950,11 @@
       );
     }
     function patchSubClock(r, s, now) {
-      setText(r.time, ' · ' + subDuration(s, now));
+      var st = stampText(s, stampZone);
+      setText(
+        r.time,
+        ' \u00b7 ' + subDuration(s, now) + (st ? ' \u00b7 ' + st : ''),
+      );
     }
     function patchSub(r, s, now) {
       var who = s.type ? 'subagent ' + s.type + ' ' : 'subagent ';
@@ -962,7 +966,7 @@
         );
       } else {
         setText(r.spin, '⏳ ');
-        setText(r.msg, who + 'running');
+        setText(r.msg, who + (s.thinking ? 'thinking' : 'running'));
       }
       patchSubClock(r, s, now);
       // Only a child that is actually running can be stopped, and a row
@@ -1001,9 +1005,13 @@
           r.tools[i] = el('div', 'subtool');
           r.host.appendChild(r.tools[i]);
         }
+        var tst = stampText(t, stampZone);
         setText(
           r.tools[i],
-          '🔧 ' + t.label + (t.status ? '  [' + t.status + ']' : ''),
+          '🔧 ' +
+            t.label +
+            (t.status ? '  [' + t.status + ']' : '') +
+            (tst ? ' \u00b7 ' + tst : ''),
         );
       }
       while (r.tools.length > s.tools.length) {
@@ -2358,5 +2366,10 @@
     };
   }
 
-  globalThis.TranscriptView = { createTranscriptView: createTranscriptView };
+  globalThis.TranscriptView = {
+    createTranscriptView: createTranscriptView,
+    formatStamp: function (ms, zone) {
+      return stampText({ time: ms }, zone || DEFAULT_STAMP_ZONE);
+    },
+  };
 })();

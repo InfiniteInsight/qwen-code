@@ -49,7 +49,18 @@ type Model = {
   appendThought: (t: string, time?: number) => void;
   finishThought: () => void;
   upsertTool: (u: Record<string, unknown>, time?: number) => void;
-  upsertSubagentTool: (u: Record<string, unknown>, parentId: string) => void;
+  setSubagentType: (parentId: string, type: string) => void;
+  appendSubagentThought: (
+    parentId: string,
+    text: string,
+    time?: number,
+  ) => void;
+  appendSubagentText: (parentId: string, text: string, time?: number) => void;
+  upsertSubagentTool: (
+    u: Record<string, unknown>,
+    parentId: string,
+    time?: number,
+  ) => void;
   prependItems: (list: Item[], beforeInsert?: () => void) => number;
   touch: (item: Item) => void;
   search: (q: string) => Array<{ id: number; item: Item }>;
@@ -772,5 +783,47 @@ describe('subagent tool pruning and prepend reader anchoring (#273)', () => {
     tick();
     expect(scroller.querySelector('.turn-acts')).toBeNull();
     expect(scroller.querySelector('.turn-acts-note')).toBeNull();
+  });
+
+  it('renders subagent thinking status, start timestamp, child tool timestamps, and exposes formatStamp (#274)', () => {
+    const tvGlobal = (
+      globalThis as unknown as {
+        TranscriptView: { formatStamp?: (ms: number, zone?: string) => string };
+      }
+    ).TranscriptView;
+    expect(tvGlobal.formatStamp?.(STAMP_START, 'America/New_York')).toBe(
+      'Nov 15, 11:26 AM',
+    );
+    expect(tvGlobal.formatStamp?.(STAMP_START, 'UTC')).toBe('Nov 15, 4:26 PM');
+
+    model.upsertTool(
+      { toolCallId: 'tc-sub-274', title: 'Agent', status: 'in_progress' },
+      STAMP_START,
+    );
+    model.setSubagentType('tc-sub-274', 'Explore');
+    model.appendSubagentThought(
+      'tc-sub-274',
+      'planning route audit',
+      STAMP_START,
+    );
+    tick();
+
+    const headBefore = scroller.querySelector('.subagent .subagent-head');
+    expect(headBefore?.textContent).toContain('subagent Explore thinking');
+    expect(
+      scroller.querySelector('.subagent .subagent-time')?.textContent,
+    ).toContain('Nov 15, 11:26 AM');
+
+    model.upsertSubagentTool(
+      { toolCallId: 'st-274', title: 'Read routes.ts', status: 'completed' },
+      'tc-sub-274',
+      STAMP_END,
+    );
+    tick();
+
+    expect(headBefore?.textContent).toContain('subagent Explore running');
+    expect(
+      scroller.querySelector('.subagent .subtool')?.textContent,
+    ).toBe('🔧 Read routes.ts  [completed] · Nov 15, 11:29 AM');
   });
 });
