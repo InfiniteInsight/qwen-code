@@ -1699,4 +1699,81 @@ describe('TranscriptModel', () => {
       });
     });
   });
+
+  describe('O(1) itemSet membership for upsertTool (#137)', () => {
+    it('keeps itemSet synchronized across push, detach, placeFork, cutAtUserTurn, prependItems, and clear', () => {
+      const { m } = setup();
+      m.addUser('u1');
+      m.upsertTool({ toolCallId: 't1', title: 'Read', status: 'in_progress' });
+      m.appendAssistant('a1');
+      m.placeFork(1);
+
+      m.addUser('u2');
+      m.upsertTool({ toolCallId: 't2', title: 'Edit', status: 'in_progress' });
+      m.appendAssistant('a2');
+      m.placeFork(2);
+
+      // Truncate turn 2: t2 must be dropped and re-addable under the same id.
+      expect(m.cutAtUserTurn(1)).toBe(true);
+      expect(m.items.some((i) => i.toolCallId === 't2')).toBe(false);
+      m.upsertTool({ toolCallId: 't2', title: 'Edit retry', status: 'completed' });
+      expect(m.items.filter((i) => i.toolCallId === 't2')).toHaveLength(1);
+
+      // Adopt a nameless live tool update across prependItems, then update it again.
+      m.clear();
+      expect(m.items).toHaveLength(0);
+      m.upsertTool({ toolCallId: 'split-tool', status: 'completed' });
+      const olderPage = api.replayStoredPage([
+        {
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'user_message_chunk',
+              content: { type: 'text', text: 'earlier' },
+            },
+          },
+        },
+        {
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'split-tool',
+              title: 'Bash',
+              status: 'in_progress',
+            },
+          },
+        },
+      ]);
+      m.prependItems(olderPage);
+      m.upsertTool({
+        toolCallId: 'split-tool',
+        rawOutput: 'done',
+        status: 'completed',
+      });
+      expect(m.items.filter((i) => i.toolCallId === 'split-tool')).toHaveLength(1);
+      expect(m.items.find((i) => i.toolCallId === 'split-tool')?.label).toBe(
+        'Bash',
+      );
+    });
+
+    it('upserts 10,000 distinct tools and 10,000 updates in linear time (#137)', () => {
+      const { m } = setup();
+      const t0 = performance.now();
+      for (let i = 0; i < 10_000; i++) {
+        m.upsertTool({
+          toolCallId: `tool-${i}`,
+          title: 'Read',
+          status: 'in_progress',
+        });
+        m.upsertTool({
+          toolCallId: `tool-${i}`,
+          status: 'completed',
+        });
+      }
+      const elapsedMs = performance.now() - t0;
+      expect(m.items).toHaveLength(10_000);
+      expect(elapsedMs).toBeLessThan(500);
+    });
+  });
 });
