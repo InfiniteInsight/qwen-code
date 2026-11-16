@@ -271,6 +271,22 @@ export interface StubDaemon {
     subagentRef: string;
     message: string;
   }>;
+  /** #267: every POST .../subagents/:subagentRef/pause, in order. */
+  subagentPauses: Array<{
+    sessionId: string;
+    subagentRef: string;
+  }>;
+  /** #267: every POST .../subagents/:subagentRef/resume, in order. */
+  subagentResumes: Array<{
+    sessionId: string;
+    subagentRef: string;
+    message?: string;
+  }>;
+  /** #267: every POST .../subagents/:subagentRef/abandon, in order. */
+  subagentAbandons: Array<{
+    sessionId: string;
+    subagentRef: string;
+  }>;
   /** #132: every POST /sessions/catalog body, in order. */
   catalogRequests: unknown[];
   /**
@@ -924,7 +940,32 @@ export interface StubDaemonOptions {
   workflowActionChanged?: boolean;
   /** Status for POST /session/:id/subagents/:subagentRef/message (default 200). */
   subagentMessageStatus?: number;
-  subagentMessageResult?: unknown;
+  subagentMessageResult?:
+    | unknown
+    | ((args: {
+        sessionId: string;
+        subagentRef: string;
+        message: string;
+      }) => unknown);
+  /** #267: status and body for POST /session/:id/subagents/:subagentRef/pause. */
+  subagentPauseStatus?: number;
+  subagentPauseResult?:
+    | unknown
+    | ((args: { sessionId: string; subagentRef: string }) => unknown);
+  /** #267: status and body for POST /session/:id/subagents/:subagentRef/resume. */
+  subagentResumeStatus?: number;
+  subagentResumeResult?:
+    | unknown
+    | ((args: {
+        sessionId: string;
+        subagentRef: string;
+        message?: string;
+      }) => unknown);
+  /** #267: status and body for POST /session/:id/subagents/:subagentRef/abandon. */
+  subagentAbandonStatus?: number;
+  subagentAbandonResult?:
+    | unknown
+    | ((args: { sessionId: string; subagentRef: string }) => unknown);
   /**
    * #132: the workspaces this daemon has registered, each with what POST
    * /sessions/catalog answers for it: its rows (`DaemonSessionSummary`, any
@@ -1143,6 +1184,9 @@ export async function startStubDaemon(
     taskCancels: [] as StubDaemon['taskCancels'],
     workflowActions: [] as StubDaemon['workflowActions'],
     subagentMessages: [] as StubDaemon['subagentMessages'],
+    subagentPauses: [] as StubDaemon['subagentPauses'],
+    subagentResumes: [] as StubDaemon['subagentResumes'],
+    subagentAbandons: [] as StubDaemon['subagentAbandons'],
     catalogRequests: [] as unknown[],
   };
   const app = express();
@@ -2597,19 +2641,121 @@ export async function startStubDaemon(
     const message = typeof body.message === 'string' ? body.message.trim() : '';
     state.subagentMessages.push({ sessionId, subagentRef, message });
     const status = opts.subagentMessageStatus ?? 200;
+    const given =
+      typeof opts.subagentMessageResult === 'function'
+        ? (
+            opts.subagentMessageResult as (a: {
+              sessionId: string;
+              subagentRef: string;
+              message: string;
+            }) => unknown
+          )({ sessionId, subagentRef, message })
+        : opts.subagentMessageResult;
     if (status !== 200) {
-      res
-        .status(status)
-        .json(opts.subagentMessageResult ?? { error: 'stub error' });
+      res.status(status).json(given ?? { error: 'stub error' });
       return;
     }
     res.status(200).json(
-      opts.subagentMessageResult ?? {
+      given ?? {
         sessionId,
         subagentRef,
         delivered: true,
         action: 'queued',
         status: 'running',
+      },
+    );
+  });
+
+  app.post('/session/:id/subagents/:subagentRef/pause', (req, res) => {
+    const sessionId = String(req.params.id);
+    const subagentRef = String(req.params.subagentRef);
+    state.subagentPauses.push({ sessionId, subagentRef });
+    const status = opts.subagentPauseStatus ?? 200;
+    const given =
+      typeof opts.subagentPauseResult === 'function'
+        ? (
+            opts.subagentPauseResult as (a: {
+              sessionId: string;
+              subagentRef: string;
+            }) => unknown
+          )({ sessionId, subagentRef })
+        : opts.subagentPauseResult;
+    if (status !== 200) {
+      res.status(status).json(given ?? { error: 'stub error' });
+      return;
+    }
+    res.status(200).json(
+      given ?? {
+        sessionId,
+        subagentRef,
+        taskId: subagentRef,
+        outcome: 'paused',
+        status: 'paused',
+        agentId: subagentRef,
+      },
+    );
+  });
+
+  app.post('/session/:id/subagents/:subagentRef/resume', (req, res) => {
+    const sessionId = String(req.params.id);
+    const subagentRef = String(req.params.subagentRef);
+    const body = (req.body ?? {}) as { message?: unknown };
+    const message =
+      typeof body.message === 'string' && body.message.trim().length > 0
+        ? body.message.trim()
+        : undefined;
+    state.subagentResumes.push({ sessionId, subagentRef, message });
+    const status = opts.subagentResumeStatus ?? 200;
+    const given =
+      typeof opts.subagentResumeResult === 'function'
+        ? (
+            opts.subagentResumeResult as (a: {
+              sessionId: string;
+              subagentRef: string;
+              message?: string;
+            }) => unknown
+          )({ sessionId, subagentRef, message })
+        : opts.subagentResumeResult;
+    if (status !== 200) {
+      res.status(status).json(given ?? { error: 'stub error' });
+      return;
+    }
+    res.status(200).json(
+      given ?? {
+        sessionId,
+        subagentRef,
+        taskId: subagentRef,
+        outcome: 'resumed',
+        status: 'running',
+      },
+    );
+  });
+
+  app.post('/session/:id/subagents/:subagentRef/abandon', (req, res) => {
+    const sessionId = String(req.params.id);
+    const subagentRef = String(req.params.subagentRef);
+    state.subagentAbandons.push({ sessionId, subagentRef });
+    const status = opts.subagentAbandonStatus ?? 200;
+    const given =
+      typeof opts.subagentAbandonResult === 'function'
+        ? (
+            opts.subagentAbandonResult as (a: {
+              sessionId: string;
+              subagentRef: string;
+            }) => unknown
+          )({ sessionId, subagentRef })
+        : opts.subagentAbandonResult;
+    if (status !== 200) {
+      res.status(status).json(given ?? { error: 'stub error' });
+      return;
+    }
+    res.status(200).json(
+      given ?? {
+        sessionId,
+        subagentRef,
+        taskId: subagentRef,
+        outcome: 'abandoned',
+        status: 'cancelled',
       },
     );
   });
@@ -5109,6 +5255,15 @@ export async function startStubDaemon(
     },
     get subagentMessages() {
       return state.subagentMessages;
+    },
+    get subagentPauses() {
+      return state.subagentPauses;
+    },
+    get subagentResumes() {
+      return state.subagentResumes;
+    },
+    get subagentAbandons() {
+      return state.subagentAbandons;
     },
     get catalogRequests() {
       return state.catalogRequests;

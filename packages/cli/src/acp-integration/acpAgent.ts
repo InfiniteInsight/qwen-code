@@ -429,6 +429,7 @@ import {
   type ServeStatus,
   type ServeStatusCell,
   type ServeSubagentAbandonResult,
+  type ServeSubagentPauseResult,
   type ServeSubagentResumeResult,
   type ServeWorkspaceMcpServerStatus,
   type ServeWorkspaceMcpStatus,
@@ -1050,6 +1051,16 @@ function readSubagentControlParams(params: Record<string, unknown>): {
     throw RequestError.invalidParams(undefined, 'Invalid or missing taskId');
   }
   return { sessionId, taskId };
+}
+
+function findSubagentTask<T extends { id: string; toolUseId?: string }>(
+  registry: { get(id: string): T | undefined; getAll(): T[] },
+  taskId: string,
+): T | undefined {
+  return (
+    registry.get(taskId) ??
+    registry.getAll().find((t) => t.toolUseId === taskId)
+  );
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -13887,6 +13898,37 @@ class QwenAgent implements Agent {
           status: currentTask.status,
         };
       }
+      case SERVE_CONTROL_EXT_METHODS.sessionTaskPause: {
+        const { sessionId, taskId } = readSubagentControlParams(params);
+        debugLogger.info(
+          `sessionTaskPause requested sessionId=${sessionId} taskId=${taskId}`,
+        );
+        const config = this.sessionOrThrow(sessionId).getConfig();
+        const registry = config.getBackgroundTaskRegistry();
+        const agentId = findSubagentTask(registry, taskId)?.id ?? taskId;
+        const outcome = config.pauseBackgroundAgentWithOutcome(agentId);
+        let result: ServeSubagentPauseResult;
+        if (outcome.outcome === 'paused') {
+          result = {
+            outcome: 'paused',
+            status: 'paused',
+            agentId: outcome.agentId,
+          };
+        } else {
+          const status = registry.get(agentId)?.status;
+          result = {
+            outcome: 'refused',
+            code: outcome.code,
+            reason: outcome.reason,
+            ...(status ? { status } : {}),
+          };
+        }
+        debugLogger.info(
+          `sessionTaskPause ${result.outcome} sessionId=${sessionId} taskId=${agentId}` +
+            (result.outcome === 'refused' ? ` code=${result.code}` : ''),
+        );
+        return result;
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionTaskResume: {
         const { sessionId, taskId } = readSubagentControlParams(params);
         const rawMessage = params['message'];
@@ -13902,13 +13944,10 @@ class QwenAgent implements Agent {
         );
         const config = this.sessionOrThrow(sessionId).getConfig();
         const registry = config.getBackgroundTaskRegistry();
-        // Same lookup as cancel and message: the agent id, or the tool call
-        // that launched it. An unknown id goes to the service, which answers
-        // agent_not_found.
-        const agentId =
-          registry.get(taskId)?.id ??
-          registry.getAll().find((t) => t.toolUseId === taskId)?.id ??
-          taskId;
+        // Same lookup as cancel, pause, and message: the agent id, or the tool
+        // call that launched it. An unknown id goes to the service, which
+        // answers agent_not_found.
+        const agentId = findSubagentTask(registry, taskId)?.id ?? taskId;
         const outcome = await config.resumeBackgroundAgentWithOutcome(
           agentId,
           message,
@@ -13938,9 +13977,7 @@ class QwenAgent implements Agent {
         );
         const config = this.sessionOrThrow(sessionId).getConfig();
         const registry = config.getBackgroundTaskRegistry();
-        const task =
-          registry.get(taskId) ??
-          registry.getAll().find((t) => t.toolUseId === taskId);
+        const task = findSubagentTask(registry, taskId);
         let result: ServeSubagentAbandonResult;
         if (!task) {
           // The roster also shows an interrupted run that was never restored,

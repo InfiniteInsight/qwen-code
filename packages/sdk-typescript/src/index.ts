@@ -258,6 +258,8 @@ export {
   type DaemonSessionTurnIndexPage,
   type DaemonSubagentAbandonResult,
   type DaemonSubagentControlRefusalCode,
+  type DaemonSubagentPauseRefusalCode,
+  type DaemonSubagentPauseResult,
   type DaemonSubagentResumeResult,
   type DaemonSessionTurnIndexPageOptions,
   type DaemonSessionListPage,

@@ -76,11 +76,12 @@ export function createSubagentMessageRoute(
       action: done.delivered ? 'subagent_messaged' : 'subagent_message_failed',
       actorTokenId,
       target,
-      ...(done.action || done.reason
+      ...(done.action || done.reason || done.code
         ? {
             detail: {
               ...(done.action ? { deliveryAction: done.action } : {}),
               ...(done.reason ? { reason: done.reason } : {}),
+              ...(!done.delivered && done.code ? { code: done.code } : {}),
             },
           }
         : {}),
@@ -93,6 +94,8 @@ export function createSubagentMessageRoute(
       ...(done.action ? { action: done.action } : {}),
       ...(done.status ? { status: done.status } : {}),
       ...(done.reason ? { reason: done.reason } : {}),
+      ...(done.code !== undefined ? { code: done.code } : {}),
+      ...(done.detail !== undefined ? { detail: done.detail } : {}),
     });
   };
 }

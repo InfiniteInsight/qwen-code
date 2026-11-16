@@ -191,6 +191,9 @@ import { createSessionEndRoute } from './routes/sessionEnd.js';
 import { createSessionCancelRoute } from './routes/sessionCancel.js';
 import { createSubagentCancelRoute } from './routes/subagentCancel.js';
 import { createSubagentMessageRoute } from './routes/subagentMessage.js';
+import { createSubagentPauseRoute } from './routes/subagentPause.js';
+import { createSubagentResumeRoute } from './routes/subagentResume.js';
+import { createSubagentAbandonRoute } from './routes/subagentAbandon.js';
 import { createSessionTaskCancelRoute } from './routes/sessionTaskCancel.js';
 import { createSessionWorkflowActionRoute } from './routes/sessionWorkflowAction.js';
 import { createSessionRenameRoute } from './routes/sessionRename.js';
@@ -1323,9 +1326,38 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(WRITE, audit),
     recordActivity(workingDevice),
     enforceSessionLock(audit),
-    subActorBan, // banned chat user → 403
+    subActorBan, // banned chat user -> 403
     subActorRateLimit, // bridge fan-in: cap messages per chat user
     createSubagentMessageRoute(deps.daemon, audit),
+  );
+  // #267: pause, resume, and abandon ONE background subagent. Pause and abandon
+  // stop or discard work without running a model turn, so they omit
+  // subActorRateLimit like /cancel; resume starts a turn and optionally injects
+  // an instruction, so it carries subActorRateLimit like /message.
+  app.post(
+    '/session/:id/subagents/:subagentRef/pause',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan,
+    createSubagentPauseRoute(deps.daemon, audit),
+  );
+  app.post(
+    '/session/:id/subagents/:subagentRef/resume',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan,
+    subActorRateLimit,
+    createSubagentResumeRoute(deps.daemon, audit),
+  );
+  app.post(
+    '/session/:id/subagents/:subagentRef/abandon',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan,
+    createSubagentAbandonRoute(deps.daemon, audit),
   );
   // POST /session/:id/tasks/:taskId/cancel — write-scope; stops ONE run (an
   // agent, shell, monitor or workflow task) and leaves the session and every

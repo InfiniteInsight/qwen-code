@@ -13,6 +13,8 @@ import type {
 import type {
   ServeSubagentAbandonResult,
   ServeSubagentControlRefusalCode,
+  ServeSubagentPauseRefusalCode,
+  ServeSubagentPauseResult,
   ServeSubagentResumeResult,
 } from '@qwen-code/acp-bridge/status';
 import type {
@@ -22,6 +24,8 @@ import type {
   DaemonPendingUserQuestionInteraction,
   DaemonSubagentAbandonOutcome,
   DaemonSubagentControlRefusalCode,
+  DaemonSubagentPauseOutcome,
+  DaemonSubagentPauseRefusalCode,
   DaemonSubagentResumeOutcome,
 } from './types.js';
 
@@ -70,6 +74,12 @@ type SameUnion<A, B> = [A] extends [B]
     : false
   : false;
 
+type SubagentPauseRefusalCodeStaysInSync = Assert<
+  SameUnion<ServeSubagentPauseRefusalCode, DaemonSubagentPauseRefusalCode>
+>;
+type SubagentPauseOutcomeStaysInSync = Assert<
+  SameUnion<ServeSubagentPauseResult, DaemonSubagentPauseOutcome>
+>;
 type SubagentRefusalCodeStaysInSync = Assert<
   SameUnion<ServeSubagentControlRefusalCode, DaemonSubagentControlRefusalCode>
 >;
@@ -80,9 +90,11 @@ type SubagentAbandonOutcomeStaysInSync = Assert<
   SameUnion<ServeSubagentAbandonResult, DaemonSubagentAbandonOutcome>
 >;
 
-/** Compile-time assertion for bridge/SDK subagent resume and abandon (#259). */
+/** Compile-time assertion for bridge/SDK subagent pause, resume, and abandon (#259, #267). */
 export const subagentControlWireTypesInSync: [
+  SubagentPauseRefusalCodeStaysInSync,
+  SubagentPauseOutcomeStaysInSync,
   SubagentRefusalCodeStaysInSync,
   SubagentResumeOutcomeStaysInSync,
   SubagentAbandonOutcomeStaysInSync,
-] = [true, true, true];
+] = [true, true, true, true, true];

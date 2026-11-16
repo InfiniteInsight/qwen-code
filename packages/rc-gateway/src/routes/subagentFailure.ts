@@ -4,12 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { Response } from 'express';
 import {
   isSessionLevelNotFound,
   isSubagentSessionNotFound,
 } from '@qwen-code/sdk/daemon';
 import { UnknownSessionError } from '../daemonPool.js';
 import { asDaemonHttpError, daemonErrorBody } from '../daemonHttpError.js';
+import type { AuditAction, AuditRecorder } from '../auditLog.js';
 
 /**
  * How a failed subagent call must be answered, and why the three answers are
@@ -88,4 +90,98 @@ export function classifySubagentFailure(
   if (isSubagentSessionNotFound(err, subagentRef)) return 'subagent_not_found';
   if (isSessionLevelNotFound(err)) return 'session_unreachable';
   return 'daemon_unavailable';
+}
+
+/**
+ * Shared error mapping for `/subagents/:subagentRef/{pause,resume,abandon}`
+ * (#267):
+ * - 404 with a daemon error code (or UnknownSessionError) -> 404 `not_found`
+ * - 409 -> 409 with the daemon's error code (defaulting to `conflict`)
+ * - 501, or bare 404 with no code (older daemon missing the route) -> 501 `unsupported`
+ * - any other daemon failure -> 502 `daemon_unavailable` without echoing host paths
+ */
+export function sendSubagentControlError(opts: {
+  res: Response;
+  err: unknown;
+  op: 'pause' | 'resume' | 'abandon';
+  auditAction: AuditAction;
+  actorTokenId: string | undefined;
+  target: string;
+  audit?: AuditRecorder;
+}): void {
+  const { res, err, op, auditAction, actorTokenId, target, audit } = opts;
+  const http = asDaemonHttpError(err);
+  const body = daemonErrorBody(err);
+  const bodyCode =
+    typeof body?.['code'] === 'string' ? body['code'] : undefined;
+
+  if (err instanceof UnknownSessionError) {
+    void audit?.record({
+      action: auditAction,
+      actorTokenId,
+      target,
+      detail: { code: 'not_found', reason: 'session or subagent not found' },
+    });
+    res
+      .status(404)
+      .json({ error: 'session or subagent not found', code: 'not_found' });
+    return;
+  }
+
+  if (http !== undefined) {
+    if (http.status === 501 || (http.status === 404 && bodyCode === undefined)) {
+      void audit?.record({
+        action: auditAction,
+        actorTokenId,
+        target,
+        detail: {
+          code: 'unsupported',
+          reason: 'daemon does not support subagent lifecycle controls',
+        },
+      });
+      res.status(501).json({
+        error: 'daemon does not support subagent lifecycle controls',
+        code: 'unsupported',
+      });
+      return;
+    }
+
+    if (http.status === 404) {
+      void audit?.record({
+        action: auditAction,
+        actorTokenId,
+        target,
+        detail: { code: 'not_found', reason: 'session or subagent not found' },
+      });
+      res
+        .status(404)
+        .json({ error: 'session or subagent not found', code: 'not_found' });
+      return;
+    }
+
+    if (http.status === 409) {
+      const code = bodyCode ?? 'conflict';
+      const rawError =
+        typeof body?.['error'] === 'string' && !body['error'].includes('/')
+          ? body['error']
+          : 'subagent control conflict';
+      void audit?.record({
+        action: auditAction,
+        actorTokenId,
+        target,
+        detail: { code, reason: rawError },
+      });
+      res.status(409).json({ error: rawError, code });
+      return;
+    }
+  }
+
+  const errorMessage = `daemon subagent ${op} failed`;
+  void audit?.record({
+    action: auditAction,
+    actorTokenId,
+    target,
+    detail: { code: 'daemon_unavailable', reason: errorMessage },
+  });
+  res.status(502).json({ error: errorMessage, code: 'daemon_unavailable' });
 }

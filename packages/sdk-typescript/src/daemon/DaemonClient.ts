@@ -71,6 +71,7 @@ import type {
   DaemonSessionTurnIndexPageOptions,
   SideTaskSessionRequest,
   DaemonSubagentAbandonResult,
+  DaemonSubagentPauseResult,
   DaemonSubagentResumeResult,
   DaemonSubagentSessionResolution,
   DaemonSessionGroup,
@@ -3737,6 +3738,24 @@ export class DaemonClient {
       `/session/${urlEncode(sessionId)}/subagents/${urlEncode(subagentRef)}/message`,
       'POST /session/:id/subagents/:subagentRef/message',
       { clientId, mode: 'rest', method: 'POST', body: { message } },
+    );
+  }
+
+  /**
+   * Pause ONE running background subagent cleanly without emitting a terminal
+   * task-notification. Wraps `POST /session/:id/subagents/:subagentRef/pause`;
+   * a refusal is answered with its `code` and `reason`, an unknown ref is a
+   * 404 `DaemonHttpError`.
+   */
+  async pauseSubagentSession(
+    sessionId: string,
+    subagentRef: string,
+    clientId?: string,
+  ): Promise<DaemonSubagentPauseResult> {
+    return await this.jsonRequest<DaemonSubagentPauseResult>(
+      `/session/${urlEncode(sessionId)}/subagents/${urlEncode(subagentRef)}/pause`,
+      'POST /session/:id/subagents/:subagentRef/pause',
+      { clientId, mode: 'rest', method: 'POST' },
     );
   }
 
@@ -8584,6 +8603,14 @@ export class WorkspaceDaemonClient {
       message,
       clientId,
     );
+  }
+
+  pauseSubagentSession(
+    sessionId: string,
+    subagentRef: string,
+    clientId?: string,
+  ): Promise<DaemonSubagentPauseResult> {
+    return this.client.pauseSubagentSession(sessionId, subagentRef, clientId);
   }
 
   resumeSubagentSession(

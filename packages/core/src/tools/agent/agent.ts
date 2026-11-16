@@ -174,7 +174,7 @@ const EXTERNAL_MID_TURN_INPUT_NOTICE =
 
 function persistBackgroundCancellation(
   metaPath: string,
-  persistedStatus: 'running' | 'cancelled',
+  persistedStatus: 'running' | 'paused' | 'cancelled',
   sessionWorkflow: boolean,
   stats?: {
     totalTokens: number;
@@ -3774,6 +3774,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               prompt: this.params.prompt,
               outputFile: jsonlPath,
               metaPath,
+              isolation: executionEnvironment
+                ? 'container'
+                : this.params.isolation,
+              executionBackend: this.executionBackend,
+              executor: subagentConfig.executor?.kind,
               // Nested-agent lineage (mirrors the meta sidecar); register()
               // resolves the parent's display name from parentAgentId.
               parentAgentId: backgroundOwnerId,
@@ -3900,6 +3905,19 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           depth: launchDepth,
           model: subagentModelId,
         });
+        const tracksTurnOwnership =
+          registry.get(hookOpts.agentId)?.abortController === bgAbortController;
+        const ownsActiveTurn = (turnAbortController: AbortController) => {
+          const cur = registry.get(hookOpts.agentId);
+          if (!tracksTurnOwnership) {
+            return cur?.status !== 'paused';
+          }
+          return Boolean(
+            cur &&
+              cur.abortController === turnAbortController &&
+              cur.status !== 'paused',
+          );
+        };
 
         this.updateDisplay({ subagentSessionReady: true }, updateOutput);
 
@@ -4221,31 +4239,33 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               }
 
               if (terminateMode === AgentTerminateMode.GOAL) {
-                keepResident =
-                  residentRegistered && !needsAutoPermissionLease();
-                if (!keepResident) {
-                  registry.unregisterResidentAgent(
+                if (ownsActiveTurn(turnAbortController)) {
+                  keepResident =
+                    residentRegistered && !needsAutoPermissionLease();
+                  if (!keepResident) {
+                    registry.unregisterResidentAgent(
+                      hookOpts.agentId,
+                      residentController,
+                    );
+                    residentRegistered = false;
+                  }
+                  patchAgentMeta(metaPath, {
+                    status: 'completed',
+                    lastUpdatedAt: new Date().toISOString(),
+                    lastError: undefined,
+                    ...(sessionWorkflowAgent
+                      ? getAgentMetaTerminalSummary(
+                          completionStats,
+                          registry.get(hookOpts.agentId)?.recentActivities,
+                        )
+                      : {}),
+                  });
+                  registry.complete(
                     hookOpts.agentId,
-                    residentController,
+                    finalText + wtSuffix + externalSuffix,
+                    completionStats,
                   );
-                  residentRegistered = false;
                 }
-                patchAgentMeta(metaPath, {
-                  status: 'completed',
-                  lastUpdatedAt: new Date().toISOString(),
-                  lastError: undefined,
-                  ...(sessionWorkflowAgent
-                    ? getAgentMetaTerminalSummary(
-                        completionStats,
-                        registry.get(hookOpts.agentId)?.recentActivities,
-                      )
-                    : {}),
-                });
-                registry.complete(
-                  hookOpts.agentId,
-                  finalText + wtSuffix + externalSuffix,
-                  completionStats,
-                );
               } else if (
                 terminateMode === AgentTerminateMode.CANCELLED ||
                 terminateMode === AgentTerminateMode.SHUTDOWN
@@ -4255,37 +4275,45 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 // so dashboards don't see span=cancelled / registry=failed
                 // mismatch on graceful arena/team-session shutdown.
                 // wenshao @ #4410.
-                registry.finalizeCancelled(
-                  hookOpts.agentId,
-                  finalText + wtSuffix + externalSuffix,
-                  completionStats,
-                );
-                persistBackgroundCancellation(
-                  metaPath,
-                  registry.get(hookOpts.agentId)?.persistedCancellationStatus ??
-                    'cancelled',
-                  sessionWorkflowAgent,
-                  completionStats,
-                  registry.get(hookOpts.agentId)?.recentActivities,
-                );
+                if (ownsActiveTurn(turnAbortController)) {
+                  registry.finalizeCancelled(
+                    hookOpts.agentId,
+                    finalText + wtSuffix + externalSuffix,
+                    completionStats,
+                  );
+                  persistBackgroundCancellation(
+                    metaPath,
+                    registry.get(hookOpts.agentId)
+                      ?.persistedCancellationStatus ?? 'cancelled',
+                    sessionWorkflowAgent,
+                    completionStats,
+                    registry.get(hookOpts.agentId)?.recentActivities,
+                  );
+                }
               } else {
-                const failureText =
-                  (finalText ||
-                    `Agent terminated with mode: ${terminateMode}`) +
-                  wtSuffix +
-                  externalSuffix;
-                registry.fail(hookOpts.agentId, failureText, completionStats);
-                patchAgentMeta(metaPath, {
-                  status: 'failed',
-                  lastUpdatedAt: new Date().toISOString(),
-                  lastError: failureText,
-                  ...(sessionWorkflowAgent
-                    ? getAgentMetaTerminalSummary(
-                        completionStats,
-                        registry.get(hookOpts.agentId)?.recentActivities,
-                      )
-                    : {}),
-                });
+                if (ownsActiveTurn(turnAbortController)) {
+                  const failureText =
+                    (finalText ||
+                      `Agent terminated with mode: ${terminateMode}`) +
+                    wtSuffix +
+                    externalSuffix;
+                  registry.fail(
+                    hookOpts.agentId,
+                    failureText,
+                    completionStats,
+                  );
+                  patchAgentMeta(metaPath, {
+                    status: 'failed',
+                    lastUpdatedAt: new Date().toISOString(),
+                    lastError: failureText,
+                    ...(sessionWorkflowAgent
+                      ? getAgentMetaTerminalSummary(
+                          completionStats,
+                          registry.get(hookOpts.agentId)?.recentActivities,
+                        )
+                      : {}),
+                  });
+                }
               }
               break;
             }
@@ -4329,35 +4357,37 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // If the error came from a cancellation, preserve the cancelled
             // status so the model's notification matches what task_stop
             // requested rather than reporting it as a generic failure.
-            if (turnAbortController.signal.aborted) {
-              const completionStats = getCompletionStats();
-              registry.finalizeCancelled(
-                hookOpts.agentId,
-                errorMsg,
-                completionStats,
-              );
-              persistBackgroundCancellation(
-                metaPath,
-                registry.get(hookOpts.agentId)?.persistedCancellationStatus ??
-                  'cancelled',
-                sessionWorkflowAgent,
-                completionStats,
-                registry.get(hookOpts.agentId)?.recentActivities,
-              );
-            } else {
-              const completionStats = getCompletionStats();
-              registry.fail(hookOpts.agentId, errorMsg, completionStats);
-              patchAgentMeta(metaPath, {
-                status: 'failed',
-                lastUpdatedAt: new Date().toISOString(),
-                lastError: errorMsg,
-                ...(sessionWorkflowAgent
-                  ? getAgentMetaTerminalSummary(
-                      completionStats,
-                      registry.get(hookOpts.agentId)?.recentActivities,
-                    )
-                  : {}),
-              });
+            if (ownsActiveTurn(turnAbortController)) {
+              if (turnAbortController.signal.aborted) {
+                const completionStats = getCompletionStats();
+                registry.finalizeCancelled(
+                  hookOpts.agentId,
+                  errorMsg,
+                  completionStats,
+                );
+                persistBackgroundCancellation(
+                  metaPath,
+                  registry.get(hookOpts.agentId)?.persistedCancellationStatus ??
+                    'cancelled',
+                  sessionWorkflowAgent,
+                  completionStats,
+                  registry.get(hookOpts.agentId)?.recentActivities,
+                );
+              } else {
+                const completionStats = getCompletionStats();
+                registry.fail(hookOpts.agentId, errorMsg, completionStats);
+                patchAgentMeta(metaPath, {
+                  status: 'failed',
+                  lastUpdatedAt: new Date().toISOString(),
+                  lastError: errorMsg,
+                  ...(sessionWorkflowAgent
+                    ? getAgentMetaTerminalSummary(
+                        completionStats,
+                        registry.get(hookOpts.agentId)?.recentActivities,
+                      )
+                    : {}),
+                });
+              }
             }
           } finally {
             turnRunning = false;
@@ -4479,6 +4509,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   true,
                 );
               });
+            registry.trackAgentTurn?.(
+              hookOpts.agentId,
+              nextAbortController,
+              currentTurnPromise,
+            );
             currentTurnPromise.catch(reportUnexpectedBackgroundError);
             return 'continued';
           },
@@ -4495,6 +4530,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           contextState,
           bgAbortController,
           false,
+        );
+        registry.trackAgentTurn?.(
+          hookOpts.agentId,
+          bgAbortController,
+          currentTurnPromise,
         );
         currentTurnPromise.catch(reportUnexpectedBackgroundError);
 

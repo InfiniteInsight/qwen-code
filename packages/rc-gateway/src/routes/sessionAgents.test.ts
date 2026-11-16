@@ -229,6 +229,33 @@ describe('GET /session/:id/agents (#110)', () => {
     expect(stub?.lastAgentsSessionId).toBe(SID);
   });
 
+  it('forwards canPause and pauseBlockedReason on agent tasks (#267)', async () => {
+    const rosterWithPauseFields = {
+      ...ROSTER,
+      tasks: [
+        {
+          ...ROSTER.tasks[0],
+          isBackgrounded: true,
+          canPause: true,
+        },
+        {
+          ...ROSTER.tasks[0],
+          id: 'agent-wt',
+          isBackgrounded: true,
+          canPause: false,
+          pauseBlockedReason:
+            'Background task worktree isolation cannot be reconstructed after session restore.',
+        },
+      ],
+    };
+    const base = await mountReal({
+      sessionAgentsResult: rosterWithPauseFields,
+    });
+    const out = await get(`${base}/session/${SID}/agents`);
+    expect(out.status).toBe(200);
+    expect(out.body).toEqual(rosterWithPauseFields);
+  });
+
   it('an empty roster is an answer, not a failure', async () => {
     const base = await mountReal();
     const out = await get(`${base}/session/${SID}/agents`);

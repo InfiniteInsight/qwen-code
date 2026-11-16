@@ -6,6 +6,7 @@
 
 import {
   buildBackgroundEntryLabel,
+  CONTAINER_EXECUTION_BLOCKED_REASON,
   getAgentMetaTerminalSummary,
   getSubagentSessionDir,
   MAX_AGENT_TRACE_NODES,
@@ -14,6 +15,7 @@ import {
   readTranscriptMessagesSync,
   sanitizeFilenameComponent,
   snapshotArgsUnavailable,
+  WORKTREE_ISOLATION_BLOCKED_REASON,
   type AgentMeta,
   type AgentTask,
   type BackgroundAgentMessage,
@@ -143,10 +145,40 @@ function findLatestAssistantContent(
   return undefined;
 }
 
+function computePauseBlockedReason(entry: AgentTask): string | undefined {
+  if (entry.status !== 'running' || entry.isBackgrounded !== true) {
+    return undefined;
+  }
+  if (entry.resumeBlockedReason) {
+    return entry.resumeBlockedReason;
+  }
+  if (entry.isolation === 'worktree') {
+    return WORKTREE_ISOLATION_BLOCKED_REASON;
+  }
+  if (
+    entry.isolation === 'container' ||
+    entry.executionBackend !== undefined
+  ) {
+    return CONTAINER_EXECUTION_BLOCKED_REASON;
+  }
+  if (entry.executor !== undefined) {
+    return `External executor "${entry.executor}" background runs cannot be paused and resumed.`;
+  }
+  if (!entry.metaPath) {
+    return `Background agent "${entry.id}" has no metadata sidecar path and cannot be paused safely.`;
+  }
+  return undefined;
+}
+
 function serializeAgentTask(
   entry: AgentTask,
   now: number,
 ): ServeSessionAgentTaskStatus {
+  const pauseBlockedReason = computePauseBlockedReason(entry);
+  const canPause =
+    entry.status === 'running' &&
+    entry.isBackgrounded === true &&
+    !pauseBlockedReason;
   const diskTranscript =
     !entry.messages?.length && entry.outputFile
       ? readTranscriptMessagesSync(entry.outputFile, entry.status === 'running')
@@ -212,6 +244,8 @@ function serializeAgentTask(
     ...optionalField('subagentType', entry.subagentType),
     ...optionalField('model', entry.model),
     isBackgrounded: entry.isBackgrounded,
+    canPause,
+    ...optionalField('pauseBlockedReason', pauseBlockedReason),
     // Nested-agent lineage for client-side tree rendering. AgentTask uses
     // `null` parentAgentId for top-level launches — normalize to absent.
     ...optionalField('parentAgentId', entry.parentAgentId ?? undefined),

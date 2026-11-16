@@ -225,6 +225,12 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionTaskCancel: 'qwen/control/session/task/cancel',
   sessionTaskMessage: 'qwen/control/session/task/message',
   /**
+   * Pause ONE running background subagent cleanly without emitting a terminal
+   * task-notification. Params: `{ sessionId, taskId }`; result:
+   * {@link ServeSubagentPauseResult}.
+   */
+  sessionTaskPause: 'qwen/control/session/task/pause',
+  /**
    * Resume ONE paused subagent through the child's own resume service.
    * Params: `{ sessionId, taskId, message? }`, where `message` is the first
    * continuation instruction; result: {@link ServeSubagentResumeResult}.
@@ -882,6 +888,8 @@ export interface ServeSessionAgentTaskStatus {
    */
   model?: string;
   isBackgrounded: boolean;
+  canPause?: boolean;
+  pauseBlockedReason?: string;
   error?: string;
   resumeBlockedReason?: string;
   stats?: { totalTokens: number; toolUses: number; durationMs: number };
@@ -1211,6 +1219,29 @@ export type ServeSubagentControlRefusalCode =
   | 'capacity_full'
   | 'resume_failed'
   | 'unsupported';
+
+export type ServeSubagentPauseRefusalCode =
+  | 'agent_not_found'
+  | 'not_backgrounded'
+  | 'not_running'
+  | 'metadata_missing'
+  | 'metadata_unreadable'
+  | 'pause_blocked'
+  | 'unsupported';
+
+/**
+ * Result of {@link SERVE_CONTROL_EXT_METHODS.sessionTaskPause}: the background
+ * agent is now paused, or the refusal with its code and a reason naming the
+ * cause (#267, #211).
+ */
+export type ServeSubagentPauseResult =
+  | { outcome: 'paused'; status: 'paused'; agentId?: string }
+  | {
+      outcome: 'refused';
+      code: ServeSubagentPauseRefusalCode;
+      reason: string;
+      status?: string;
+    };
 
 /**
  * Result of {@link SERVE_CONTROL_EXT_METHODS.sessionTaskResume}: the agent is

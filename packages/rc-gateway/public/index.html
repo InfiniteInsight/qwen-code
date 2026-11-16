@@ -3541,10 +3541,16 @@
       #agents-foot[hidden] {
         display: none;
       }
-      #agent-msg-row,
-      #agent-foot-bar {
+      #agent-msg-row {
         display: flex;
         align-items: center;
+        gap: 8px;
+      }
+      #agent-foot-bar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: flex-end;
         gap: 8px;
       }
       #agent-msg-row[hidden],
@@ -3555,34 +3561,95 @@
         flex: 1 1 auto;
         min-width: 0;
         min-height: 44px;
+        box-sizing: border-box;
+        padding: 0 12px;
+        border: 1px solid var(--g1-edge);
+        border-radius: 10px;
+        background: var(--g1-raise);
+        color: var(--g1-ink-hi);
+        font-size: 16px;
       }
-      #agent-send {
+      #agent-send,
+      #agent-pause,
+      #agent-resume,
+      #agents-sheet .ag-pause,
+      #agents-sheet .ag-resume {
         flex: none;
-        min-width: 64px;
+        min-width: 60px;
         min-height: 44px;
+        padding: 0 12px;
+        border: 1px solid var(--g1-edge);
+        border-radius: 10px;
+        background: var(--g1-raise);
+        color: var(--g1-ink-hi);
+        font-size: 14px;
+        font-weight: 600;
       }
       #agent-stop-note {
-        flex: 1 1 auto;
+        flex: 1 1 140px;
         min-width: 0;
         color: var(--g1-ink-mid);
         font-size: 13px;
         overflow-wrap: anywhere;
       }
+      #agent-stop-note:empty {
+        display: none;
+      }
+      #agent-abandon,
       #agent-stop,
+      #agents-sheet .ag-abandon,
       #agents-sheet .ag-stop {
         flex: none;
-        min-width: 64px;
+        min-width: 60px;
         min-height: 44px;
-        padding: 0 16px;
+        padding: 0 12px;
         border: 1px solid var(--g1-edge);
         border-radius: 10px;
         background: var(--g1-raise);
         color: #ff7b72;
-        font-size: 15px;
+        font-size: 14px;
         font-weight: 600;
       }
+      #agent-send[hidden],
+      #agent-pause[hidden],
+      #agent-resume[hidden],
+      #agent-abandon[hidden],
       #agent-stop[hidden],
+      #agents-sheet .ag-pause[hidden],
+      #agents-sheet .ag-resume[hidden],
+      #agents-sheet .ag-abandon[hidden],
       #agents-sheet .ag-stop[hidden] {
+        display: none;
+      }
+      #agent-msg:disabled,
+      #agent-send:disabled,
+      #agent-pause:disabled,
+      #agent-resume:disabled,
+      #agent-abandon:disabled,
+      #agent-stop:disabled,
+      #agents-sheet .ag-pause:disabled,
+      #agents-sheet .ag-resume:disabled,
+      #agents-sheet .ag-abandon:disabled,
+      #agents-sheet .ag-stop:disabled {
+        opacity: 0.5;
+      }
+      #agents-sheet .ag-actions {
+        flex: none;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 6px;
+        padding: 6px 0;
+      }
+      #agents-sheet .ag-note {
+        max-width: 100%;
+        color: var(--g1-warn);
+        font-size: 13px;
+        white-space: normal;
+        overflow-wrap: anywhere;
+      }
+      #agents-sheet .ag-note:empty {
         display: none;
       }
       #agents-sheet .ag-grp {
@@ -5639,6 +5706,9 @@
             </div>
             <div id="agent-foot-bar" hidden>
               <span id="agent-stop-note"></span>
+              <button id="agent-pause" type="button" hidden>Pause</button>
+              <button id="agent-resume" type="button" hidden>Resume</button>
+              <button id="agent-abandon" type="button" hidden>Abandon</button>
               <button id="agent-stop" type="button">Stop</button>
             </div>
           </div>
@@ -16110,6 +16180,8 @@
         // ref -> { busy, note } for a sent message, kept per agent across
         // roster polls and trace redraws.
         msgs: new Map(),
+        // ref -> { busy, note } for pause, resume, and abandon actions (#267).
+        ctrls: new Map(),
         drafts: new Map(),
         // parent tool call id -> the tool row whose child frames the model
         // keeps, for every Agent row on the page, running or settled.
@@ -16151,6 +16223,17 @@
       }
       function agentLineageOn() {
         return agentsOn() && daemonHasFeature('session_agent_trace');
+      }
+      function subagentControlsOn() {
+        if (!agentsOn() || !caps) return false;
+        if (caps.subagentControls === false) return false;
+        const rcOn = !!(
+          caps.remoteControl && caps.remoteControl.subagentControls === true
+        );
+        return (
+          (rcOn || caps.subagentControls === true) &&
+          daemonHasFeature('session_subagent_controls')
+        );
       }
       // A reader's token cannot stop anything; an old gateway does not say,
       // and then the button is offered and the gateway's refusal is printed.
@@ -16424,6 +16507,7 @@
         agentsState.reading = false;
         agentsState.stops.clear();
         agentsState.msgs.clear();
+        agentsState.ctrls.clear();
         agentsState.drafts.clear();
         agentsState.liveSubs.clear();
         agentsState.wasLive = false;
@@ -16636,6 +16720,20 @@
         const m = agentsState.msgs.get(ref);
         return !!(m && m.busy);
       }
+      function agentCtrlNote(ref) {
+        const c = agentsState.ctrls.get(ref);
+        return c ? c.note : '';
+      }
+      function agentCtrlBusy(ref) {
+        const c = agentsState.ctrls.get(ref);
+        return !!(c && c.busy);
+      }
+      function agentAnyBusy(ref) {
+        return !!(
+          ref &&
+          (agentStopBusy(ref) || agentMsgBusy(ref) || agentCtrlBusy(ref))
+        );
+      }
       function agentLine1(v) {
         const l1 = agentEl('span', 'ag-l1');
         const dot = agentEl('span', 'ag-dot');
@@ -16703,15 +16801,64 @@
             open.appendChild(
               agentEl('span', 'ag-l3', note ? note : agentFacts(v)),
             );
+            const ctrlNote =
+              agentCtrlNote(v.ref) ||
+              (v.state === 'paused' && v.row
+                ? strOr(v.row.resumeBlockedReason, '')
+                : '');
+            if (ctrlNote) {
+              open.appendChild(agentEl('span', 'ag-note', ctrlNote));
+            }
             row.appendChild(open);
+            const ctrlsOn = subagentControlsOn();
             if (v.running && v.ref && agentsWritable()) {
+              const actions = agentEl('div', 'ag-actions');
+              const canPause = !!(
+                ctrlsOn &&
+                v.row &&
+                v.row.isBackgrounded &&
+                v.row.canPause !== false &&
+                !v.row.pauseBlockedReason
+              );
+              if (canPause) {
+                const pause = agentEl('button', 'ag-pause', 'Pause');
+                pause.type = 'button';
+                pause.dataset.ref = v.ref;
+                pause.disabled = agentAnyBusy(v.ref);
+                pause.setAttribute('aria-label', 'Pause ' + v.name);
+                actions.appendChild(pause);
+              }
               const stop = agentEl('button', 'ag-stop', 'Stop');
               stop.type = 'button';
               stop.dataset.ref = v.ref;
               stop.dataset.name = v.name;
-              stop.disabled = agentStopBusy(v.ref);
+              stop.disabled = agentAnyBusy(v.ref);
               stop.setAttribute('aria-label', 'Stop ' + v.name);
-              row.appendChild(stop);
+              actions.appendChild(stop);
+              row.appendChild(actions);
+            } else if (
+              v.state === 'paused' &&
+              v.ref &&
+              agentsWritable() &&
+              ctrlsOn
+            ) {
+              const actions = agentEl('div', 'ag-actions');
+              const resume = agentEl('button', 'ag-resume', 'Resume');
+              resume.type = 'button';
+              resume.dataset.ref = v.ref;
+              resume.disabled = !!(
+                (v.row && strOr(v.row.resumeBlockedReason, '')) ||
+                agentAnyBusy(v.ref)
+              );
+              resume.setAttribute('aria-label', 'Resume ' + v.name);
+              actions.appendChild(resume);
+              const abandon = agentEl('button', 'ag-abandon', 'Abandon');
+              abandon.type = 'button';
+              abandon.dataset.ref = v.ref;
+              abandon.disabled = agentAnyBusy(v.ref);
+              abandon.setAttribute('aria-label', 'Abandon ' + v.name);
+              actions.appendChild(abandon);
+              row.appendChild(actions);
             }
             body.appendChild(row);
           }
@@ -17025,7 +17172,16 @@
           : null;
         const hadSel = had
           ? had.dataset.ref
-            ? '.ag-stop[data-ref="' + CSS.escape(had.dataset.ref) + '"]'
+            ? (had.classList.contains('ag-pause')
+                ? '.ag-pause'
+                : had.classList.contains('ag-resume')
+                  ? '.ag-resume'
+                  : had.classList.contains('ag-abandon')
+                    ? '.ag-abandon'
+                    : '.ag-stop') +
+              '[data-ref="' +
+              CSS.escape(had.dataset.ref) +
+              '"]'
             : had.dataset.key
               ? '.ag-open[data-key="' + CSS.escape(had.dataset.key) + '"]'
               : had.dataset.expand
@@ -17050,18 +17206,51 @@
         const msgInput = $('agent-msg');
         const msgSend = $('agent-send');
         const footBar = $('agent-foot-bar');
-        const stoppable = !!(v && v.running && v.ref && agentsWritable());
-        const messageable = !!(
+        const ctrlsOn = subagentControlsOn();
+        const writable = !!(v && v.ref && agentsWritable());
+        const stoppable = !!(writable && v.running);
+        const pausable = !!(
+          writable &&
+          ctrlsOn &&
+          v.running &&
+          v.row &&
+          v.row.isBackgrounded &&
+          v.row.canPause !== false &&
+          !v.row.pauseBlockedReason
+        );
+        const pausedManaged = !!(writable && ctrlsOn && v.state === 'paused');
+        const resumeBlocked = !!(
           v &&
-          v.ref &&
-          !(v.row && !v.running && v.row.resumeBlockedReason) &&
+          v.row &&
+          strOr(v.row.resumeBlockedReason, '')
+        );
+        const messageable = !!(
+          writable &&
+          !(v.row && !v.running && resumeBlocked) &&
           (v.running ||
             v.state === 'paused' ||
-            (v.state === 'completed' && v.row && v.row.isBackgrounded)) &&
-          agentsWritable()
+            (v.state === 'completed' && v.row && v.row.isBackgrounded))
         );
-        const note = v ? agentStopNote(v.ref) || agentMsgNote(v.ref) : '';
-        foot.hidden = !(trace && v && (stoppable || messageable || note));
+        const pauseBlockedText =
+          v &&
+          v.running &&
+          v.row &&
+          v.row.isBackgrounded &&
+          v.row.canPause === false
+            ? strOr(v.row.pauseBlockedReason, '')
+            : '';
+        const blockedNote =
+          v && v.state === 'paused' && v.row
+            ? strOr(v.row.resumeBlockedReason, '')
+            : pauseBlockedText;
+        const actionNote = v
+          ? agentCtrlNote(v.ref) ||
+            agentStopNote(v.ref) ||
+            agentMsgNote(v.ref)
+          : '';
+        const note = actionNote || blockedNote;
+        const hasFootButtons = stoppable || pausable || pausedManaged;
+        foot.hidden = !(trace && v && (hasFootButtons || messageable || note));
         if (msgRow) msgRow.hidden = !(trace && v && messageable);
         if (msgInput) {
           const ref = v && v.ref ? v.ref : null;
@@ -17069,21 +17258,38 @@
             agentSheet.msgRef = ref;
             msgInput.value = (ref && agentsState.drafts.get(ref)) || '';
           }
-          const busy = !!(ref && agentMsgBusy(ref));
+          const busy = !!(ref && agentAnyBusy(ref));
           msgInput.disabled = busy;
           const ph =
             v && v.state === 'paused'
-              ? 'Message to resume ' + (v.name || 'this agent')
+              ? ctrlsOn
+                ? 'Optional message to resume with...'
+                : 'Message to resume ' + (v.name || 'this agent')
               : v && v.state === 'completed'
                 ? 'Message to continue ' + (v.name || 'this agent')
                 : 'Message ' + ((v && v.name) || 'this agent');
           msgInput.placeholder = ph;
           msgInput.setAttribute('aria-label', ph);
-          if (msgSend) msgSend.disabled = busy;
+          if (msgSend) {
+            msgSend.hidden = pausedManaged;
+            msgSend.disabled = busy;
+          }
         }
-        if (footBar) footBar.hidden = !(trace && v && (stoppable || note));
+        if (footBar) {
+          footBar.hidden = !(trace && v && (hasFootButtons || note));
+        }
+        const busyNow = !!(v && agentAnyBusy(v.ref));
+        $('agent-pause').hidden = !pausable;
+        $('agent-pause').disabled = busyNow;
+        $('agent-resume').hidden = !pausedManaged;
+        $('agent-resume').disabled = !!(
+          pausedManaged &&
+          (resumeBlocked || busyNow)
+        );
+        $('agent-abandon').hidden = !pausedManaged;
+        $('agent-abandon').disabled = busyNow;
         $('agent-stop').hidden = !stoppable;
-        $('agent-stop').disabled = !!(v && agentStopBusy(v.ref));
+        $('agent-stop').disabled = busyNow;
         h1Text($('agent-stop-note'), note);
         if (trace && (fresh || (atEnd && v && v.running))) {
           body.scrollTop = body.scrollHeight;
@@ -17299,6 +17505,15 @@
           }
         }
         const act = r.body && r.body.action;
+        const failDetail =
+          r.body &&
+          (strOr(r.body.detail, '') ||
+            strOr(r.body.error, '') ||
+            (r.body.code && r.body.reason
+              ? r.body.reason + ' (' + r.body.code + ')'
+              : strOr(r.body.reason, '')
+                ? 'the daemon did not deliver it (' + r.body.reason + ')'
+                : strOr(r.body.code, '')));
         setAgentMsg(
           ref,
           false,
@@ -17310,10 +17525,167 @@
                 : act === 'continued'
                   ? 'continued'
                   : 'sent'
-              : 'the daemon did not deliver it' +
-                (r.body && r.body.reason ? ' (' + r.body.reason + ')' : ''),
+              : failDetail || 'the daemon did not deliver it',
         );
         agentsSchedule(400);
+      }
+
+      function setAgentCtrl(ref, busy, note) {
+        agentsState.ctrls.set(ref, { busy, note });
+        renderAgents();
+      }
+      async function pauseAgent(ref) {
+        const sid = watchedSessionId;
+        if (!sid || !ref || agentAnyBusy(ref)) return;
+        setAgentCtrl(ref, true, 'pausing...');
+        const r = await rcCall(
+          '/session/' +
+            encodeURIComponent(sid) +
+            '/subagents/' +
+            encodeURIComponent(ref) +
+            '/pause',
+          { method: 'POST', body: '{}' },
+        );
+        if (sid !== watchedSessionId) return;
+        if (!r.ok) {
+          setAgentCtrl(ref, false, 'pause failed: ' + rcDetail(r));
+          agentsSchedule(200);
+          return;
+        }
+        const outcome = r.body && r.body.outcome;
+        if (outcome === 'paused') {
+          agentsState.stops.delete(ref);
+          agentsState.msgs.delete(ref);
+          const vNow = agentFind(ref);
+          if (vNow && vNow.row) {
+            vNow.row.status = 'paused';
+            vNow.row.canPause = false;
+            vNow.row.endTime = Date.now();
+          }
+          setAgentCtrl(ref, false, '');
+          agentsSchedule(100);
+          return;
+        }
+        const why =
+          (r.body &&
+            (strOr(r.body.reason, '') ||
+              strOr(r.body.detail, '') ||
+              strOr(r.body.code, ''))) ||
+          (outcome === 'already_settled'
+            ? 'agent already settled (' +
+              ((r.body && strOr(r.body.status, '')) || 'done') +
+              ')'
+            : 'the daemon refused to pause it');
+        setAgentCtrl(ref, false, why);
+        agentsSchedule(200);
+      }
+      async function resumeAgent(ref, fromInput) {
+        const sid = watchedSessionId;
+        if (!sid || !ref || agentAnyBusy(ref)) return;
+        const input = $('agent-msg');
+        const text =
+          fromInput && input && agentSheet.msgRef === ref
+            ? input.value.trim()
+            : '';
+        const payload = text ? { message: text } : {};
+        setAgentCtrl(ref, true, 'resuming...');
+        const r = await rcCall(
+          '/session/' +
+            encodeURIComponent(sid) +
+            '/subagents/' +
+            encodeURIComponent(ref) +
+            '/resume',
+          { method: 'POST', body: JSON.stringify(payload) },
+        );
+        if (sid !== watchedSessionId) return;
+        if (!r.ok) {
+          setAgentCtrl(ref, false, 'resume failed: ' + rcDetail(r));
+          agentsSchedule(200);
+          return;
+        }
+        const outcome = r.body && r.body.outcome;
+        if (outcome === 'resumed') {
+          agentsState.drafts.delete(ref);
+          agentsState.stops.delete(ref);
+          agentsState.msgs.delete(ref);
+          if (input && agentSheet.msgRef === ref) input.value = '';
+          const vNow = agentFind(ref);
+          if (vNow && vNow.item && vNow.item.sub) {
+            vNow.item.sub.done = false;
+            vNow.item.sub.endedAt = null;
+          }
+          if (vNow && vNow.row) {
+            vNow.row.status = 'running';
+            vNow.row.canPause = true;
+            delete vNow.row.endTime;
+            if (text) {
+              if (!Array.isArray(vNow.row.messages)) vNow.row.messages = [];
+              vNow.row.messages.push({
+                role: 'user',
+                content: text,
+                timestamp: Date.now(),
+              });
+            }
+          }
+          setAgentCtrl(ref, false, '');
+          agentsSchedule(100);
+          return;
+        }
+        const why =
+          (r.body &&
+            (strOr(r.body.reason, '') ||
+              strOr(r.body.detail, '') ||
+              strOr(r.body.code, ''))) ||
+          'the daemon refused to resume it';
+        setAgentCtrl(ref, false, why);
+        agentsSchedule(200);
+      }
+      async function abandonAgent(ref) {
+        const sid = watchedSessionId;
+        if (!sid || !ref || agentAnyBusy(ref)) return;
+        setAgentCtrl(ref, true, 'abandoning...');
+        const r = await rcCall(
+          '/session/' +
+            encodeURIComponent(sid) +
+            '/subagents/' +
+            encodeURIComponent(ref) +
+            '/abandon',
+          { method: 'POST', body: '{}' },
+        );
+        if (sid !== watchedSessionId) return;
+        if (!r.ok) {
+          setAgentCtrl(ref, false, 'abandon failed: ' + rcDetail(r));
+          agentsSchedule(200);
+          return;
+        }
+        const outcome = r.body && r.body.outcome;
+        if (outcome === 'abandoned') {
+          agentsState.ctrls.delete(ref);
+          agentsState.stops.delete(ref);
+          agentsState.msgs.delete(ref);
+          agentsState.drafts.delete(ref);
+          if (Array.isArray(agentsState.rows)) {
+            agentsState.rows = agentsState.rows.filter(
+              (row) => agentRef(row) !== ref && row.id !== ref,
+            );
+          }
+          if (agentSheet.view === 'trace' && agentSheet.key === ref) {
+            agentSheet.view = 'list';
+            agentSheet.key = null;
+          }
+          renderAgentsChrome();
+          if (agentSheet.open) renderAgentSheet();
+          agentsSchedule(100);
+          return;
+        }
+        const why =
+          (r.body &&
+            (strOr(r.body.reason, '') ||
+              strOr(r.body.detail, '') ||
+              strOr(r.body.code, ''))) ||
+          'the daemon did not abandon it';
+        setAgentCtrl(ref, false, why);
+        agentsSchedule(200);
       }
 
       $('agents-sheet').addEventListener('pointerdown', () => {
@@ -17340,6 +17712,18 @@
         renderAgentSheet();
         $('agents-close').focus({ preventScroll: true });
       });
+      $('agent-pause').addEventListener('click', () => {
+        const v = agentFind(agentSheet.key);
+        if (v && v.ref) void pauseAgent(v.ref);
+      });
+      $('agent-resume').addEventListener('click', () => {
+        const v = agentFind(agentSheet.key);
+        if (v && v.ref) void resumeAgent(v.ref, true);
+      });
+      $('agent-abandon').addEventListener('click', () => {
+        const v = agentFind(agentSheet.key);
+        if (v && v.ref) void abandonAgent(v.ref);
+      });
       $('agent-stop').addEventListener('click', () => {
         const v = agentFind(agentSheet.key);
         if (v) void stopAgent(v.ref, v.name);
@@ -17357,7 +17741,12 @@
         if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
           e.preventDefault();
           const v = agentFind(agentSheet.key);
-          if (v && v.ref) void sendAgentMessage(v.ref);
+          if (!v || !v.ref) return;
+          if (v.state === 'paused' && subagentControlsOn()) {
+            void resumeAgent(v.ref, true);
+          } else {
+            void sendAgentMessage(v.ref);
+          }
         }
       });
       $('agents-sheet').addEventListener('click', (e) => {
@@ -17367,6 +17756,18 @@
         if (t.dataset.expand) {
           agentSheet.expanded.add(t.dataset.expand);
           renderAgentSheet();
+          return;
+        }
+        if (t.classList.contains('ag-pause') && t.dataset.ref) {
+          void pauseAgent(t.dataset.ref);
+          return;
+        }
+        if (t.classList.contains('ag-resume') && t.dataset.ref) {
+          void resumeAgent(t.dataset.ref, false);
+          return;
+        }
+        if (t.classList.contains('ag-abandon') && t.dataset.ref) {
+          void abandonAgent(t.dataset.ref);
           return;
         }
         if (t.classList.contains('ag-stop') && t.dataset.ref) {

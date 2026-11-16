@@ -688,6 +688,10 @@ export * from './skills/bundled/loop/loop-task-file.js';
 export * from './skills/bundled/loop/loop-tick-resolver.js';
 export * from './subagents/index.js';
 export * from './agents/index.js';
+export type {
+  PauseBackgroundAgentOutcome,
+  PauseBackgroundAgentRefusalCode,
+} from './agents/background-agent-resume.js';
 
 // ============================================================================
 // Follow-up Suggestions
