@@ -1639,4 +1639,64 @@ describe('TranscriptModel', () => {
       expect(replayed[0].sub?.tools[0]?.time).toBe(1_700_000_106_000);
     });
   });
+
+  describe('unsettled subagent tracking (#136)', () => {
+    it('settleAllSubagents and failTurn touch only unsettled subagents rather than sweeping every tool in toolIndex', () => {
+      const { m, events } = setup();
+      for (let i = 0; i < 6_000; i++) {
+        m.upsertTool({
+          toolCallId: `plain-${i}`,
+          title: 'Read',
+          status: 'completed',
+        });
+      }
+      // Plant two subagents: one already finished, one still unsettled.
+      m.upsertTool({
+        toolCallId: 'sub-finished',
+        title: 'Agent',
+        status: 'in_progress',
+      });
+      m.appendSubagentText('sub-finished', 'done early');
+      m.finishSubagent('sub-finished', 'completed');
+
+      m.upsertTool({
+        toolCallId: 'sub-open',
+        title: 'Agent',
+        status: 'in_progress',
+      });
+      m.appendSubagentText('sub-open', 'still running');
+
+      events.length = 0;
+      const t0 = performance.now();
+      m.settleAllSubagents();
+      for (let turn = 0; turn < 2_000; turn++) {
+        m.settleAllSubagents();
+      }
+      const elapsedMs = performance.now() - t0;
+
+      // Only the single unsettled subagent emitted an update across 2,001 sweeps.
+      expect(events).toEqual(['update']);
+      const openItem = m.items.find((it) => it.toolCallId === 'sub-open');
+      expect(openItem?.sub).toMatchObject({
+        done: true,
+        failed: false,
+        settledBySweep: true,
+      });
+      expect(elapsedMs).toBeLessThan(100);
+
+      // Verify failTurn settles a newly opened subagent (including orphan-adopted).
+      const orphanModel = api.createTranscriptModel({ keepOrphans: true });
+      orphanModel.appendSubagentText('sub-orphan', 'before parent');
+      orphanModel.upsertTool({
+        toolCallId: 'sub-orphan',
+        title: 'Agent',
+        status: 'in_progress',
+      });
+      orphanModel.failTurn('stream dropped', 'err-1');
+      expect(orphanModel.items[0]?.sub).toMatchObject({
+        done: true,
+        failed: true,
+      });
+    });
+  });
 });
