@@ -17,13 +17,13 @@ import type { AuditAction, AuditRecorder } from '../auditLog.js';
  * How a failed subagent call must be answered, and why the three answers are
  * not interchangeable:
  *
- * - `subagent_not_found` — the child this request named is gone. The row was
+ * - `subagent_not_found` - the child this request named is gone. The row was
  *   already settled when it was pressed, which is the common case, so the UI
  *   can act on it (grey the button, drop the row).
- * - `session_unreachable` — the PARENT could not be reached. A multi-workspace
+ * - `session_unreachable` - the PARENT could not be reached. A multi-workspace
  *   daemon answers the same 404 while the owning runtime is merely not active,
  *   which is reversible, so the UI should retry rather than delete the row.
- * - `daemon_unavailable` — anything else. Genuinely the gateway's problem.
+ * - `daemon_unavailable` - anything else. Genuinely the gateway's problem.
  *
  * Telling an operator to wait for something that will never come back, or to
  * delete a row that would have answered on a retry, are the two failures this

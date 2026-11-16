@@ -59,7 +59,7 @@ describe('writeBootstrapCode', () => {
     expect(st.mode & 0o777).toBe(0o600);
   });
 
-  it('returns only the path — never the code', () => {
+  it('returns only the path - never the code', () => {
     const base = mkTmp();
     dirs.push(base);
     const code = 'SUPERSECRETCODE';
@@ -86,7 +86,7 @@ describe('writeBootstrapCode', () => {
   it('is idempotent when the directory already exists', () => {
     const base = mkTmp();
     dirs.push(base);
-    // base already exists — must not throw
+    // base already exists - must not throw
     expect(() => writeBootstrapCode(base, 'ANYCODE')).not.toThrow();
   });
 });
@@ -98,7 +98,7 @@ describe('displayHint', () => {
   });
 
   it('NEVER contains the bootstrap code (security invariant)', () => {
-    // displayHint only receives the path — this test documents that any code
+    // displayHint only receives the path - this test documents that any code
     // value passed by mistake is absent from the output.
     const secretCode = 'SUPER_SECRET_CODE_XYZ';
     const path = '/home/user/.qwen/rc/owner-bootstrap.code';

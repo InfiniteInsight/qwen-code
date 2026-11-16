@@ -30,7 +30,7 @@ import { type PromptQueue, QueueTimeoutError } from './promptQueue.js';
  * Lean per design D5: split on `,`, trim each candidate, strip an optional `W/`
  * weak-validator prefix and surrounding double-quotes, then compare to the hex.
  * `If-None-Match: *` is intentionally NOT honored (a polling cache never sends
- * it). An array-valued header (duplicate header — not expected here) is joined.
+ * it). An array-valued header (duplicate header - not expected here) is joined.
  */
 export function ifNoneMatchSatisfied(
   header: string | string[] | undefined,
@@ -64,7 +64,7 @@ export function mapDeclaredScope(scope: CommandScope): RcScope {
 }
 
 /**
- * GET /rc/commands — list declared command metadata. Commands above the
+ * GET /rc/commands - list declared command metadata. Commands above the
  * caller's scope are listed (not hidden) with `invocableByYou:false` so a
  * palette can gray them out. `invocableByYou` mirrors the invoke gate exactly:
  * caller has WRITE ∧ caller has mapped(declared scope) ∧ command has no tool.
@@ -88,7 +88,7 @@ export function createListCommandsRoute(loader: CommandLoader): RequestHandler {
     // Strong validator = hash of the exact bytes we'd return (design D1/D2):
     // `invocableByYou` is already inside `commands`, so the revision auto-folds
     // caller scope. Set the header BEFORE the conditional check so a 304 also
-    // carries it (D4). A 304 still pays the `load()` above — it saves only the
+    // carries it (D4). A 304 still pays the `load()` above - it saves only the
     // body serialization + transfer (D6).
     const body = { v: 1, commands };
     const revision = createHash('sha256')
@@ -104,7 +104,7 @@ export function createListCommandsRoute(loader: CommandLoader): RequestHandler {
 }
 
 /**
- * POST /session/:id/command/:name — resolve a command's body template and
+ * POST /session/:id/command/:name - resolve a command's body template and
  * post it as a normal session prompt via `daemon.prompt()`. Mounted behind the
  * session pipeline (requireScope(WRITE) → recordActivity → enforceSessionLock).
  *

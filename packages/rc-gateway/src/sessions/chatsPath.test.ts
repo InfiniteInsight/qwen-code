@@ -84,7 +84,7 @@ describe('resolveChatsDir', () => {
     );
   });
 
-  it('dashes every non-alphanumeric char — the cycle-19 divergence (regression)', () => {
+  it('dashes every non-alphanumeric char - the cycle-19 divergence (regression)', () => {
     // This is the case the cycle-23 unification exists to fix. Cycle-19's
     // search resolver used `replace(/[/.]/g,'-')`, which KEPT the underscore →
     // `-home-u-my_proj` → a dir the daemon never wrote → search silently

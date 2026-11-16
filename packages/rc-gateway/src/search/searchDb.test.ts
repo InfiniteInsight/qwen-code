@@ -156,7 +156,7 @@ describe('SearchDb.upsertDocument', () => {
 
   it('is keyed on (session_id, event_id): a second upsert replaces, not duplicates', () => {
     db.upsertDocument(doc({ body: 'first body' }));
-    db.upsertDocument(doc({ body: 'second body — same key' }));
+    db.upsertDocument(doc({ body: 'second body - same key' }));
     expect(db.count()).toBe(1);
     // The latest write wins (ON CONFLICT DO UPDATE): the body is replaced and
     // the old text is no longer findable through the FTS table.

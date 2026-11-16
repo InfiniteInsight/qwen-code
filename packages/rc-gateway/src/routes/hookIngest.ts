@@ -53,7 +53,7 @@ class TokenBucket {
 }
 
 /**
- * POST /rc/hooks/ingest — read-only hook mirror (design: "Hook event
+ * POST /rc/hooks/ingest - read-only hook mirror (design: "Hook event
  * mirror"). MUST be mounted BEFORE bearerResolve: the ingest token is not
  * a TokenStore token (same early-mount reason as POST /rc/pair/redeem).
  *
@@ -62,7 +62,7 @@ class TokenBucket {
  * (`hook_ingest_rejected`) and NEVER mirrored. Overflow DROPS instead of
  * 429-ing (a hook runner must never enter a retry loop); the dropped count
  * is surfaced as `dropped: n` on the NEXT mirrored frame. Frames go to the
- * OWNER events stream only — hook payloads carry tool arguments, too
+ * OWNER events stream only - hook payloads carry tool arguments, too
  * sensitive for read-scope session streams.
  */
 export function createHookIngestRoute(deps: HookIngestDeps): RequestHandler {

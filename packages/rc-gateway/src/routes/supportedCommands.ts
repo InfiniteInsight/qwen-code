@@ -18,7 +18,7 @@ import {
 import { type PromptQueue, QueueTimeoutError } from './promptQueue.js';
 
 /**
- * GET /session/:id/supported-commands — relay the daemon's per-session slash
+ * GET /session/:id/supported-commands - relay the daemon's per-session slash
  * command list so the web UI's Commands panel can show what the WATCHED
  * session actually supports, next to the gateway's own file-defined commands
  * (GET /rc/commands). The payload is the daemon's
@@ -26,7 +26,7 @@ import { type PromptQueue, QueueTimeoutError } from './promptQueue.js';
  * with `name`, optional `description`, `input.hint`, and `_meta.sourceLabel`
  * like `Built-in` / `Skill` / `MCP: <server>`) plus `availableSkills`.
  *
- * Read-scoped, bare namespace (transparent-proxy topology — 1:1 with the
+ * Read-scoped, bare namespace (transparent-proxy topology - 1:1 with the
  * daemon's own GET /session/:id/supported-commands) plus ONE gateway-added
  * field, `invocableByYou`, because the daemon's payload has no such thing and
  * the caller cannot derive it: the token's scopes are shown at pair time and
@@ -46,7 +46,7 @@ export function createSupportedCommandsRoute(
 ): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;
-    // Reject a malformed/path-traversal-shaped id before any daemon call —
+    // Reject a malformed/path-traversal-shaped id before any daemon call -
     // mirrors the sibling session routes (context, status).
     if (!isValidSessionId(sessionId)) {
       res
@@ -75,7 +75,7 @@ export function createSupportedCommandsRoute(
 }
 
 /**
- * POST /session/:id/supported-commands/:name — run one of the WATCHED
+ * POST /session/:id/supported-commands/:name - run one of the WATCHED
  * session's own slash commands by posting `/name` (plus optional `args`) as
  * that session's prompt text. The daemon interprets leading-slash text on the
  * prompt path itself, so no new daemon capability is needed here; what this
@@ -91,7 +91,7 @@ export function createSupportedCommandsRoute(
  * looking like a command. A throw from the list read is refused the same way
  * (fail-closed), matching the review saga's skill guard.
  *
- * Body: `{ args?: string }` — the literal text placed after a single space
+ * Body: `{ args?: string }` - the literal text placed after a single space
  * following the name, exactly as it would have been typed. Not re-tokenized or
  * re-quoted: the daemon's own parser sees whatever the caller wrote.
  *
@@ -99,7 +99,7 @@ export function createSupportedCommandsRoute(
  * enforceSessionLock). WRITE, not SESSION_READ, because these commands mutate
  * session state (`/clear` drops history, `/model` switches the model).
  *
- * The `args` text is NEVER audited — same rule as the prompt route. The audit
+ * The `args` text is NEVER audited - same rule as the prompt route. The audit
  * record carries the command name and the turn's stopReason only.
  *
  * The turn is BOUNDED by `promptTimeoutMs`, the composer route's own knob. It

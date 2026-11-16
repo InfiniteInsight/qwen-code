@@ -10,7 +10,7 @@ import { isSessionLevelGone } from '../daemonHttpError.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
 
 /**
- * GET /session/:id/stats — relay the daemon's roll-up of one conversation:
+ * GET /session/:id/stats - relay the daemon's roll-up of one conversation:
  * how long it ran, how many prompts it took, what each model spent, which
  * tools were called, and how many lines were written.
  *

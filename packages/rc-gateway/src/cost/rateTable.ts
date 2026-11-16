@@ -8,12 +8,12 @@
  * Rate-table layer for cost tracking (`add-cost-tracking`: "Rate table format and
  * reload" + the pricing half of "Ingest priced rows"). Pure parsing + cost
  * computation, plus a thin hot-reloader built on the shared
- * {@link DebouncedReloader} — so the bug-prone money math and the parse-failure /
+ * {@link DebouncedReloader} - so the bug-prone money math and the parse-failure /
  * lookup-miss semantics are unit-tested without a daemon, a SQLite store, or fs.
  *
  * The table maps `(modelServiceId, modelId)` to per-million-token cent prices.
  * `computeCostCents` returns `null` (NOT 0) on a lookup miss so the ingester can
- * record `cost_cents = NULL` and audit `rate_table_miss` — an unpriced model must
+ * record `cost_cents = NULL` and audit `rate_table_miss` - an unpriced model must
  * be visibly unpriced, never silently free.
  */
 
@@ -49,7 +49,7 @@ export interface UsageTokens {
   cached: number;
 }
 
-/** `~/.qwen/rc/model-rates.yaml` — the operator-managed rate table path. */
+/** `~/.qwen/rc/model-rates.yaml` - the operator-managed rate table path. */
 export function rateTablePath(home: string = homedir()): string {
   return join(home, '.qwen', 'rc', 'model-rates.yaml');
 }

@@ -32,7 +32,7 @@ export const SHARE: RcScope = 'share';
  * `subActor` identity (the underlying human) in audit/SSE. Functionally a bridge
  * needs to read a session's stream, vote, and prompt, so a bridge token is
  * issued the CONCRETE bundle `{bridge, session:read, approve, write}` (see
- * {@link expandScopes}) rather than relying on a runtime implication hierarchy —
+ * {@link expandScopes}) rather than relying on a runtime implication hierarchy -
  * the gateway's scope checks are a deliberately FLAT `includes()` set, and not
  * every check funnels through one place (the notifier gates on `scopesFor`
  * directly), so the safe move is to materialize the bundle at issue time. The
@@ -53,7 +53,7 @@ export const KNOWN_SCOPES: readonly RcScope[] = [
 /**
  * Direct scope implications (transitive closure is computed in {@link hasScope}).
  * Hierarchy: `owner ⊃ {write, approve, session:read}`, `write ⊃ session:read`,
- * `approve ⊃ session:read`. `write` does NOT imply `approve` and vice-versa —
+ * `approve ⊃ session:read`. `write` does NOT imply `approve` and vice-versa -
  * sending a prompt and voting on a permission are independent authorities.
  * `bridge` and `share` are marker scopes; they carry no functional implications
  * (a `bridge` token's concrete bundle is materialized at issue time by

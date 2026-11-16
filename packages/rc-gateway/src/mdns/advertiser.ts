@@ -7,7 +7,7 @@
 /**
  * Thin wrapper around the optional `bonjour-service` library (add-mdns-discovery
  * D1). The bonjour instance is INJECTED via a factory so the publish/Goodbye
- * lifecycle is unit-tested against a fake — the live multicast publish is a
+ * lifecycle is unit-tested against a fake - the live multicast publish is a
  * verification ceiling (needs a real LAN socket, frequently broken under WSL2).
  *
  * Goodbye (design D4): on shutdown we call `unpublishAll` (which sends Goodbye

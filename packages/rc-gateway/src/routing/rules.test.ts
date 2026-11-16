@@ -280,7 +280,7 @@ rules:
 
   it('an explicit empty-string id still suppresses (reported as <unnamed>)', () => {
     // Regression: `id: ""` must not make firstDrop return a falsy '' that the
-    // notifier's truthiness gate would skip — it must still suppress.
+    // notifier's truthiness gate would skip - it must still suppress.
     const m = matcher(`
 rules:
   - id: ""

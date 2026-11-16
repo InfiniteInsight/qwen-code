@@ -33,7 +33,7 @@ export interface UsageRouteDeps {
 }
 
 /**
- * GET /rc/usage?since=&until=&group_by=&format= — aggregated usage rows.
+ * GET /rc/usage?since=&until=&group_by=&format= - aggregated usage rows.
  *
  * Scope filtering (spec): an `owner` token sees all rows; every lesser scope
  * (write/approve/read/bridge) sees only rows attributed to its own token id. The

@@ -106,7 +106,7 @@ export function parseSearchArgs(
  * Machine-readable rendering of search results for `--json`: a single stable
  * JSON object `{ hits, truncated }` where each hit carries
  * `{ sessionId, eventId, kind, ts, snippet }` (the same SearchHit fields the
- * route returns). Pure — no trailing newline, the CLI adds one via console.log.
+ * route returns). Pure - no trailing newline, the CLI adds one via console.log.
  */
 export function formatSearchResultsJson(result: SearchResult): string {
   return JSON.stringify({ hits: result.hits, truncated: result.truncated });
@@ -114,7 +114,7 @@ export function formatSearchResultsJson(result: SearchResult): string {
 
 /**
  * `GET /rc/search` query string for daemon-mode search (task 1.4). The route
- * reads `q`, `kind`, `sessionId`, `limit`, `since`, `until` (ISO-8601 — the
+ * reads `q`, `kind`, `sessionId`, `limit`, `since`, `until` (ISO-8601 - the
  * local CLI keeps epoch ms, so convert here) and `rank=bm25`. `--cwd` has no
  * remote meaning (the daemon searches ITS workspace) and is intentionally
  * NOT sent.
@@ -138,7 +138,7 @@ export function buildSearchApiQuery(parsed: ParsedSearchArgs): string {
 /**
  * Coerce a `GET /rc/search` JSON body into the local SearchResult shape.
  * The route answers `{hits, truncated, elapsedMs, mode}`; a foreign daemon
- * may differ — an empty result beats a crash.
+ * may differ - an empty result beats a crash.
  */
 export function searchFromApiResponse(body: unknown): SearchResult {
   const obj =

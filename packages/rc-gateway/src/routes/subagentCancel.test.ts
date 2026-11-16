@@ -85,7 +85,7 @@ function childGone(ref: string) {
  * The daemon's child-gone 404 EXACTLY as it sends it: copied from
  * `packages/cli/src/serve/routes/session.ts:5538-5544`, where the key naming
  * the child is `subagentRef`. Nothing in `packages/cli/src/serve/` ever puts
- * `toolCallId` in an error body, so this — not the invented shape below — is
+ * `toolCallId` in an error body, so this - not the invented shape below - is
  * what the route really has to classify.
  */
 function childGoneAsTheDaemonSendsIt(ref: string) {

@@ -106,7 +106,7 @@ function contextRead(
   };
 }
 /**
- * GET /rc/workspace/memory — the workspace's context files (QWEN.md and friends).
+ * GET /rc/workspace/memory - the workspace's context files (QWEN.md and friends).
  * WRITE floor.
  *
  * WRITE for the same reason as its siblings: each entry is a `path` on the host
@@ -138,7 +138,7 @@ export function createWorkspaceMemoryRoute(
 }
 
 /**
- * GET /rc/workspace/agents — the workspace's subagent definitions. WRITE floor.
+ * GET /rc/workspace/agents - the workspace's subagent definitions. WRITE floor.
  *
  * `DaemonWorkspaceAgentSummary`
  * (packages/sdk-typescript/src/daemon/types.ts:2948) carries `filePath`, a host

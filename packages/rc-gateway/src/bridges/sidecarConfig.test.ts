@@ -33,7 +33,7 @@ const fullMatrix: Env = {
   QWEN_BRIDGE_TOKEN: 'qwk_tok',
 };
 
-describe('resolveSidecarConfig — telegram', () => {
+describe('resolveSidecarConfig - telegram', () => {
   it('resolves a full env with gatewayUrl + default stateDir', () => {
     const cfg = resolveSidecarConfig('telegram', fullTelegram, HOME);
     expect(cfg).toMatchObject({
@@ -63,7 +63,7 @@ describe('resolveSidecarConfig — telegram', () => {
   });
 });
 
-describe('resolveSidecarConfig — discord', () => {
+describe('resolveSidecarConfig - discord', () => {
   it('resolves app id and optional guild id', () => {
     const cfg = resolveSidecarConfig(
       'discord',
@@ -99,7 +99,7 @@ describe('resolveSidecarConfig — discord', () => {
   });
 });
 
-describe('resolveSidecarConfig — matrix', () => {
+describe('resolveSidecarConfig - matrix', () => {
   it('resolves homeserver/user/token + default command prefix', () => {
     const cfg = resolveSidecarConfig('matrix', fullMatrix, HOME);
     expect(cfg).toMatchObject({
@@ -140,7 +140,7 @@ describe('resolveSidecarConfig — matrix', () => {
   });
 });
 
-describe('resolveSidecarConfig — shared vars', () => {
+describe('resolveSidecarConfig - shared vars', () => {
   it('fails fast on a missing daemon URL (all creds present)', () => {
     const env = { ...fullTelegram, QWEN_DAEMON_URL: undefined };
     expect(() => resolveSidecarConfig('telegram', env, HOME)).toThrow(

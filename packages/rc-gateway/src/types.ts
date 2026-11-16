@@ -34,7 +34,7 @@ declare global {
         /**
          * Underlying-human identity asserted by a BRIDGE token via the
          * `X-RC-SubActor` header (e.g. `telegram:alice`). Set by `resolveSubActor`
-         * ONLY when the token holds the `bridge` scope and the value is valid —
+         * ONLY when the token holds the `bridge` scope and the value is valid -
          * a non-bridge token can never assert one (no audit-attribution spoofing).
          */
         subActor?: string;

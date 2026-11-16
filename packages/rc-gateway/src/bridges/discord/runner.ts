@@ -27,7 +27,7 @@ import { SubscriptionCursors } from '../sessionCursors.js';
 
 /**
  * The injected inbound transport. The runner only needs "start the gateway and
- * push normalized events back to me" — the concrete `DiscordGateway` (which
+ * push normalized events back to me" - the concrete `DiscordGateway` (which
  * imports discord.js) implements this, so the runner's outbound/SSE logic stays
  * unit-testable without a live socket or the discord.js dependency.
  */
@@ -86,7 +86,7 @@ interface SentRequest {
  * session renders permission_request frames into channel messages (edited to
  * disable the buttons when resolved) AND streams session_update prose into the
  * channel via the {@link StreamRouter} (buffered, ≤2000-char safe-split, with
- * threads on long turns). It holds NO gateway internals — every
+ * threads on long turns). It holds NO gateway internals - every
  * daemon interaction goes through the injected {@link BridgeClient} over the
  * loopback HTTP+SSE contract, so the whole bridge moves to a separate process by
  * changing only config. Local ban cache mirrors gateway 403s.
@@ -94,7 +94,7 @@ interface SentRequest {
  * VERIFICATION CEILING: the outbound paths (deliverEvent render→send→edit) and
  * subscription reconciliation ARE unit-tested with fakes. The live discord.js
  * gateway connection (heartbeat, IDENTIFY, RESUME, INTERACTION_CREATE delivery)
- * is delegated to discord.js and is NOT exercised here — there is no real Discord
+ * is delegated to discord.js and is NOT exercised here - there is no real Discord
  * to test against in this environment.
  */
 /** This bridge's stable id (registration + invite-redeem route path). */
@@ -175,7 +175,7 @@ export class DiscordBridge {
         ? 'discord bridge: registered with the gateway'
         : `discord bridge: registration returned ${reg.status} (continuing)`,
     );
-    // The heartbeat loop uses its OWN (abort-aware) timer, not cfg.sleep — keeping
+    // The heartbeat loop uses its OWN (abort-aware) timer, not cfg.sleep - keeping
     // it independent of the SSE reconnect-backoff sleep.
     void runHeartbeatLoop({
       heartbeat: (id) => this.cfg.client.heartbeat(id),
@@ -224,7 +224,7 @@ export class DiscordBridge {
   /**
    * Start a self-healing SSE echo loop for every bound session not already
    * watched. Unlike Telegram (whose poll loop re-reconciles every tick so a
-   * dropped stream self-heals), Discord's inbound is push — so each session needs
+   * dropped stream self-heals), Discord's inbound is push - so each session needs
    * its OWN reconnect loop, or the approval echo silently dies on the first SSE
    * disconnect (network blip, gateway restart, token eviction). The loop
    * re-subscribes with exponential backoff (1s→30s, jitter ±20%) until `signal`
@@ -254,7 +254,7 @@ export class DiscordBridge {
     try {
       while (!stream.aborted) {
         // subscribeEvents resolves when the stream ends (or never opened); the
-        // caller owns reconnection — that's this loop. Resume from the last frame
+        // caller owns reconnection - that's this loop. Resume from the last frame
         // id seen so a reconnect catches frames that arrived during the blip.
         await this.cfg.client.subscribeEvents(
           sessionId,

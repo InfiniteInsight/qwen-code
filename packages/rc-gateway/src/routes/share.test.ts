@@ -385,7 +385,7 @@ describe('GET /rc/share/whoami (redemption)', () => {
       sessionLockId: 's1',
     });
     const first = await fetch(`${url}/rc/share/whoami`);
-    // Node fetch has NO cookie jar — forward Set-Cookie by hand or the test
+    // Node fetch has NO cookie jar - forward Set-Cookie by hand or the test
     // would pass vacuously (the cookie would never arrive on call 2).
     const cookie = first.headers.get('set-cookie')!;
     expect(store.listShares()[0].uses).toBe(1);

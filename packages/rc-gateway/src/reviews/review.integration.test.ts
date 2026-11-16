@@ -8,7 +8,7 @@
  * End-to-end integration test for the remote-review control plane (E.3).
  *
  * Every other review route test (`routes/review.test.ts`) injects a FAKE
- * bridge (`{ open: vi.fn(), close: vi.fn() }`) — sufficient for saga-shape
+ * bridge (`{ open: vi.fn(), close: vi.fn() }`) - sufficient for saga-shape
  * assertions, but it never exercises the actual permission bridge's vote/
  * escalate logic or its `onEscalate`/`onResume` wiring in server.ts. This
  * file does NOT set `deps.review.bridge`: with no injected bridge,
@@ -58,11 +58,11 @@ async function setup(
   registry: ReviewRegistry;
   frames: OwnerEvent[];
 }> {
-  // promptDelayMs is small by default (fast teardown — `stub.close()` waits
+  // promptDelayMs is small by default (fast teardown - `stub.close()` waits
   // for any in-flight keep-alive request, including a pending
   // POST /session/:id/prompt, to settle). The cancel test below overrides it
-  // to something large enough that the review is still 'running' — its
-  // `/review` prompt still in flight — when the cancel call lands.
+  // to something large enough that the review is still 'running' - its
+  // `/review` prompt still in flight - when the cancel call lands.
   stub = await startStubDaemon({ promptDelayMs: 50, ...stubOpts });
   const dir = await mkdtemp(join(tmpdir(), 'review-e2e-'));
   const store = await TokenStore.open(join(dir, 'tokens.json'));
@@ -74,7 +74,7 @@ async function setup(
     store,
     pairing: new PairingService(),
     auditPath: join(dir, 'audit.log'),
-    // NO `bridge` here — createGatewayApp default-constructs the REAL
+    // NO `bridge` here - createGatewayApp default-constructs the REAL
     // ReviewPermissionBridge over `deps.daemon` (the stub), which is the
     // whole point of this test file.
     review: {
@@ -108,7 +108,7 @@ function post(url: string, token: string, body: unknown): Promise<Response> {
 describe('remote review end-to-end (real permission bridge)', () => {
   it('trigger → review_started frame → cancel → review_cancelled frame + daemon session end', async () => {
     // A long prompt delay keeps the review 'running' (its `/review` prompt
-    // still in flight) well past the cancel call below — otherwise this
+    // still in flight) well past the cancel call below - otherwise this
     // would race the prompt settling and completing the review first.
     const { url, owner, frames } = await setup({ promptDelayMs: 3000 });
 
@@ -157,12 +157,12 @@ describe('remote review end-to-end (real permission bridge)', () => {
   });
 
   it('auto-approve: the real bridge votes a read (allow_once) and escalates an edit (autofix:false)', async () => {
-    // The review's daemon session will be the stub's FIRST created session —
+    // The review's daemon session will be the stub's FIRST created session -
     // deterministic because `setup()` starts a brand-new stub per test.
     const reviewSessionId = 'stub-agent-1';
     const { url, owner, registry } = await setup({
       // Clean replay: only the scripted permission frames, none of the
-      // stub's default two `session_update` frames (see the option's JSDoc —
+      // stub's default two `session_update` frames (see the option's JSDoc -
       // permissionFrames ids continue after `frames`, so pass `frames: []`).
       frames: [],
       permissionFrames: [
@@ -176,7 +176,7 @@ describe('remote review end-to-end (real permission bridge)', () => {
             // test discriminate kind-based selection from a regressed
             // positional `options[0]` selector. If selection ever degraded to
             // "pick index 0", this would return 'always' and the assertion
-            // below (expecting 'ok') would fail — proving the real
+            // below (expecting 'ok') would fail - proving the real
             // `selectAllowOnceOptionId` picks by `kind`, not position.
             options: [
               { optionId: 'always', kind: 'allow_always' },
@@ -212,7 +212,7 @@ describe('remote review end-to-end (real permission bridge)', () => {
     expect(sessionId).toBe(reviewSessionId);
 
     // The bridge processes the two scripted permission frames IN ORDER off a
-    // single subscription (`for await` over one SSE replay) — the read vote
+    // single subscription (`for await` over one SSE replay) - the read vote
     // completes (an HTTP round-trip to the stub) strictly before the edit is
     // handled. So waiting for the review to become 'blocked' (the
     // onEscalate → lifecycle.setBlocked side effect wired in server.ts) is a
@@ -231,7 +231,7 @@ describe('remote review end-to-end (real permission bridge)', () => {
     // The EDIT was never voted: the stub's `lastRespondedPermission` is the
     // most-recent POST /session/:id/permission/:requestId call it has seen.
     // The stream contained exactly two permission frames and then ended
-    // cleanly (no reconnect on a clean end — see the bridge's `run()`
+    // cleanly (no reconnect on a clean end - see the bridge's `run()`
     // comment), so if the edit had been voted `lastRespondedPermission`
     // would now show `q-edit`, not `q-read`. It doesn't: escalation left it
     // pending for a human, matching the "NEVER send cancelled/deny, only

@@ -77,12 +77,12 @@ export const DAEMONS_USAGE =
 export function parseDaemonsArgs(argv: string[]): DaemonsArgsResult {
   const sub = argv[0];
   if (sub === undefined) {
-    return { ok: false, error: `missing subcommand — ${DAEMONS_USAGE}` };
+    return { ok: false, error: `missing subcommand - ${DAEMONS_USAGE}` };
   }
   if (!(SUBS as readonly string[]).includes(sub)) {
     return {
       ok: false,
-      error: `unknown subcommand "${sub}" — ${DAEMONS_USAGE}`,
+      error: `unknown subcommand "${sub}" - ${DAEMONS_USAGE}`,
     };
   }
 
@@ -151,7 +151,7 @@ export function parseDaemonsArgs(argv: string[]): DaemonsArgsResult {
     } else if (a === '--insecure') {
       value.insecure = true;
     } else if (a.startsWith('--')) {
-      return { ok: false, error: `unknown flag: ${a} — ${DAEMONS_USAGE}` };
+      return { ok: false, error: `unknown flag: ${a} - ${DAEMONS_USAGE}` };
     } else {
       positional.push(a);
     }
@@ -162,7 +162,7 @@ export function parseDaemonsArgs(argv: string[]): DaemonsArgsResult {
     if (positional.length !== 2) {
       return {
         ok: false,
-        error: 'add requires <name> and <url> — ' + DAEMONS_USAGE,
+        error: 'add requires <name> and <url> - ' + DAEMONS_USAGE,
       };
     }
     value.name = positional[0];
@@ -171,14 +171,14 @@ export function parseDaemonsArgs(argv: string[]): DaemonsArgsResult {
     if (positional.length !== 1) {
       return {
         ok: false,
-        error: `${value.sub} requires <name> — ${DAEMONS_USAGE}`,
+        error: `${value.sub} requires <name> - ${DAEMONS_USAGE}`,
       };
     }
     value.name = positional[0];
   } else if (positional.length > 0) {
     return {
       ok: false,
-      error: `unexpected argument: ${positional[0]} — ${DAEMONS_USAGE}`,
+      error: `unexpected argument: ${positional[0]} - ${DAEMONS_USAGE}`,
     };
   }
 
@@ -259,7 +259,7 @@ function pad(s: string, width: number): string {
 /** Fixed-width table: NAME / URL / DEFAULT / TOKEN / HEALTH. */
 export function formatDaemonsListTable(rows: DaemonRow[]): string {
   if (rows.length === 0) {
-    return '(no daemons registered — add one: qwen-rc daemons add <name> <url>)';
+    return '(no daemons registered - add one: qwen-rc daemons add <name> <url>)';
   }
   const headers = ['NAME', 'URL', 'DEFAULT', 'TOKEN', 'HEALTH'];
   const body = rows.map((r) => [
@@ -289,9 +289,9 @@ export function formatHealthLine(
   if (status === 'ok')
     return `${base}  ok${ms !== undefined ? ` (${ms} ms)` : ''}`;
   if (status === 'unreachable') {
-    return `${base}  UNREACHABLE${detail ? ` — ${detail}` : ''}`;
+    return `${base}  UNREACHABLE${detail ? ` - ${detail}` : ''}`;
   }
-  return `${base}  ERROR${detail ? ` — ${detail}` : ''}`;
+  return `${base}  ERROR${detail ? ` - ${detail}` : ''}`;
 }
 
 export interface WhoamiInfo {
@@ -318,7 +318,7 @@ export function formatWhoami(info: WhoamiInfo): string {
     case 'owner':
       return `token  ${name}\n  scopes: ${scopes}\n  ${expiry}`;
     case 'invalid':
-      return 'token rejected by the daemon (401) — re-pair: qwen-rc daemons remove <name> && qwen-rc daemons add <name> <url>';
+      return 'token rejected by the daemon (401) - re-pair: qwen-rc daemons remove <name> && qwen-rc daemons add <name> <url>';
     default:
       return 'token accepted, but its identity could not be determined (no recorded metadata and no owner listing access)';
   }

@@ -15,27 +15,27 @@ import {
 } from '../policy/overlays.js';
 
 /**
- * Session-scoped permission overlays (issue #33) — TTL-bound overrides an
+ * Session-scoped permission overlays (issue #33) - TTL-bound overrides an
  * operator sets from the dashboard. Owner-scoped at the mount (mirrors
  * `/policy/explain`): no daemon call, gateway-local store.
  *
- * - `GET    /rc/permission-overlays` — active overlays (expired ones pruned).
- * - `POST   /rc/permission-overlays` — set one; body
+ * - `GET    /rc/permission-overlays` - active overlays (expired ones pruned).
+ * - `POST   /rc/permission-overlays` - set one; body
  *   `{ sessionId?, tool?, action, ttlSeconds, reason? }`. `sessionId` absent
  *   = all sessions; `tool` absent = any tool. Every overlay MUST carry a TTL
  *   of 1..{@link OVERLAY_MAX_TTL_SEC} seconds (the 24h cap is what makes an
- *   override ephemeral — there is no persistent form of this API).
- * - `DELETE /rc/permission-overlays/:id` — revoke early (404 `overlay_not_found`
+ *   override ephemeral - there is no persistent form of this API).
+ * - `DELETE /rc/permission-overlays/:id` - revoke early (404 `overlay_not_found`
  *   when unknown or already expired).
  *
- * Overlays live in gateway memory only: a restart drops them (fail-closed —
+ * Overlays live in gateway memory only: a restart drops them (fail-closed -
  * the file policy is the only durable source of truth).
  */
 
 /** Hard TTL cap: 24 hours. Enforced here so no override can outlive a day. */
 export const OVERLAY_MAX_TTL_SEC = 86_400;
 
-/** `reason` is a short operator note — capped so it stays audit/UI-friendly. */
+/** `reason` is a short operator note - capped so it stays audit/UI-friendly. */
 const OVERLAY_REASON_MAX_LEN = 200;
 
 const ACTIONS: readonly PolicyAction[] = ['allow', 'deny', 'prompt'];
@@ -61,7 +61,7 @@ interface OverlayBody {
 /**
  * Build the three overlay route handlers around a shared in-memory store
  * (the same instance the PolicyEnforcer evaluates against). All responses
- * echo only the closed fields the operator supplied — never anything from
+ * echo only the closed fields the operator supplied - never anything from
  * a permission frame.
  */
 export function createPermissionOverlayRoutes(

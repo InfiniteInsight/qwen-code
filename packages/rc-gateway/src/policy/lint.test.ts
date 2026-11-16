@@ -70,7 +70,7 @@ describe('lintPolicyFile', () => {
     expect(r.error).not.toMatch(/file not found/);
   });
 
-  it('lints a maxPerWindow rule clean — honored at runtime, not deferred (cycle 43)', async () => {
+  it('lints a maxPerWindow rule clean - honored at runtime, not deferred (cycle 43)', async () => {
     const p = await write(
       'quota.yaml',
       `rules:\n  - id: quota\n    match: { tool: execute }\n    action: allow\n    maxPerWindow: { count: 5, windowSec: 60 }\n  - id: plain\n    match: { tool: read }\n    action: allow\n`,

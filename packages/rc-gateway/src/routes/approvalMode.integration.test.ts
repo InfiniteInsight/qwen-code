@@ -10,33 +10,33 @@
  *
  *  1. The route (routes/approvalMode.ts), mounted through the REAL
  *     `createGatewayApp` (real TokenStore/PairingService/requireScope(WRITE)
- *     mount, real stub daemon over HTTP) — an owner token setting `plan` gets
+ *     mount, real stub daemon over HTTP) - an owner token setting `plan` gets
  *     the full `200` result body, and the REQUEST ITSELF produces no
  *     `approval_mode_changed` owner-bus frame (the route deliberately does not
  *     publish/notify; see routes/approvalMode.ts's top-of-file doc comment).
  *
- *  2. The forward (webpush/approvalModeForward.ts) — the single owner-stream
+ *  2. The forward (webpush/approvalModeForward.ts) - the single owner-stream
  *     broadcast per change is driven by the gateway's OWN daemon-event pump
  *     (`SessionEventPump`), whose `onEvent` hook cli.ts wires as:
  *       `if (ev.type === 'approval_mode_changed') forwardApprovalModeChange(sid, ev.data, ownerEvents)`
- *     — see cli.ts around the `pump = new SessionEventPump(...)` construction.
+ *     - see cli.ts around the `pump = new SessionEventPump(...)` construction.
  *     The forward publishes the owner-bus frame ONLY; it takes no notifier
  *     and never calls `notify`. The push notification for this same event is
  *     delivered by the pump's OWN universal notify path
  *     (`SessionEventPump.runLoop`'s unconditional
- *     `await this.notifier?.notify(...)`, pump.ts) — identical to every other
+ *     `await this.notifier?.notify(...)`, pump.ts) - identical to every other
  *     event type. This test wires ONE shared notifier to both the pump
  *     constructor and (historically) the forward call, specifically so it
- *     can assert the notifier fires exactly ONCE per event — a regression
+ *     can assert the notifier fires exactly ONCE per event - a regression
  *     guard for a verified double-push bug where the forward ALSO called
  *     `notify`, producing two real pushes for one `approval_mode_changed`
  *     event (no event-level dedup in `notify`, coalescer off by default).
  *     `createGatewayApp` itself does NOT construct or start that pump (it has
- *     no `SessionEventPump` reference at all — confirmed by inspection); the
+ *     no `SessionEventPump` reference at all - confirmed by inspection); the
  *     pump is boot-time wiring that lives only in cli.ts, alongside
  *     usage-ingestion/agent/review `onEvent` consumers. So there is no way to
  *     "feed the stub daemon's SSE stream and see a forwarded owner frame"
- *     through `createGatewayApp` alone — nothing inside the app subscribes to
+ *     through `createGatewayApp` alone - nothing inside the app subscribes to
  *     that stream itself. Asserting otherwise would either hang (nothing ever
  *     forwards) or require silently reintroducing pump wiring into the app,
  *     which is out of scope for a test-only task.
@@ -44,7 +44,7 @@
  *     Instead, this test reconstructs the EXACT seam cli.ts builds: a real
  *     `SessionEventPump` (production class, not a fake) is subscribed to the
  *     SAME stub daemon and given an `onEvent` hook that calls the real
- *     `forwardApprovalModeChange` against `gw.ownerEvents` — the SAME bus
+ *     `forwardApprovalModeChange` against `gw.ownerEvents` - the SAME bus
  *     `createGatewayApp` returns and that GET /rc/events reads from. This
  *     precisely mirrors the existing precedent in
  *     `cost/ingestPump.integration.test.ts`, which faces the identical gap
@@ -57,7 +57,7 @@
  *     before `forwardApprovalModeChange` ever runs, so this proves the actual
  *     wire path is reachable, not just that the forward function is correct
  *     in isolation (already covered by `webpush/approvalModeForward.test.ts`
- *     with a bare `OwnerEventBus` and hand-fed data — no daemon, no pump).
+ *     with a bare `OwnerEventBus` and hand-fed data - no daemon, no pump).
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -100,7 +100,7 @@ function fakeNotifier(calls: NotifyCall[]) {
   };
 }
 
-/** Poll a predicate until it holds or a deadline elapses — never a fixed sleep. */
+/** Poll a predicate until it holds or a deadline elapses - never a fixed sleep. */
 async function waitFor(
   predicate: () => boolean,
   timeoutMs = 3000,
@@ -135,7 +135,7 @@ describe('approval-mode integration (route set + pump forward)', () => {
     // the route half) and a scripted `approval_mode_changed` SSE frame plus a
     // matching workspace-session listing (for the pump half). holdOpenMs
     // parks the pump's per-session loop in `for await` after the single frame
-    // so it does not hot-reconnect and re-dispatch — same trick
+    // so it does not hot-reconnect and re-dispatch - same trick
     // webpush/pump.test.ts uses.
     stub = await startStubDaemon({
       approvalModeResult: {
@@ -159,7 +159,7 @@ describe('approval-mode integration (route set + pump forward)', () => {
     // Real app: real TokenStore, real requireScope(WRITE)/bearerResolve mount
     // (server.ts wires POST /session/:id/approval-mode behind
     // requireScope(WRITE), with the route's own in-handler OWNER escalation
-    // for power modes/persist) — no hand-rolled express() app.
+    // for power modes/persist) - no hand-rolled express() app.
     const store = await TokenStore.open(join(runtimeBase, 'tokens.json'));
     const { token: ownerToken } = await store.issue(['owner'], 'o');
 
@@ -200,7 +200,7 @@ describe('approval-mode integration (route set + pump forward)', () => {
       planExitedOutOfBand: false,
     });
 
-    // The request itself must never publish an approval_mode_changed frame —
+    // The request itself must never publish an approval_mode_changed frame -
     // that broadcast is exclusively the pump forward's job (routes/approvalMode.ts's
     // doc comment). The real audit write DOES publish a same-bus `audit`
     // frame (AuditLog's own onRecord -> ownerEvents.publish, unrelated to this
@@ -212,7 +212,7 @@ describe('approval-mode integration (route set + pump forward)', () => {
     expect(approvalFramesFromRequest).toHaveLength(0);
 
     // --- Part 2: the forward, through the real pump seam ----------------
-    // createGatewayApp does not construct/start a SessionEventPump — that
+    // createGatewayApp does not construct/start a SessionEventPump - that
     // wiring lives only in cli.ts. Reconstruct the identical seam here: a
     // real SessionEventPump (not a fake) subscribed to the same stub daemon,
     // with the same onEvent -> forwardApprovalModeChange call cli.ts makes,
@@ -249,12 +249,12 @@ describe('approval-mode integration (route set + pump forward)', () => {
       persisted: false,
     });
 
-    // Regression guard: the notifier must fire EXACTLY ONCE for this event —
+    // Regression guard: the notifier must fire EXACTLY ONCE for this event -
     // from the pump's OWN always-on generic dispatch
     // (`SessionEventPump.runLoop`'s unconditional
     // `await this.notifier?.notify(...)` for every non-suppressed event,
     // pump.ts, independent of `onEvent`). `forwardApprovalModeChange` no
-    // longer takes a notifier and never calls `notify` itself — it only
+    // longer takes a notifier and never calls `notify` itself - it only
     // publishes the owner-bus frame asserted above. Before that fix, this
     // same `notifier` reference was ALSO passed into the forward, which
     // called `notify` a second time, so this event produced TWO real

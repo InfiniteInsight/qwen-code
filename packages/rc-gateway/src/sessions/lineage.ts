@@ -6,7 +6,7 @@
 
 import type { ForkRecord } from './forkTranscript.js';
 
-/** One node in a lineage chain — just the session id (no name/event stored). */
+/** One node in a lineage chain - just the session id (no name/event stored). */
 export interface LineageNode {
   sessionId: string;
   /** Human title (core `custom_title`), when set. Enriched by the route. */
@@ -33,7 +33,7 @@ export const MAX_LINEAGE_DEPTH = 100;
  * Extract a session's parent id from its transcript: the FIRST record's
  * `forkedFrom.sessionId`. Our fork writer (`forkTranscript.forkRecords`, which
  * replicates core `SessionService.forkSession`) stamps `forkedFrom` on every
- * record uniformly, so the first record is authoritative — its absence means
+ * record uniformly, so the first record is authoritative - its absence means
  * the session is a root. Returns null for a root, a missing/empty transcript,
  * or a malformed `forkedFrom` (no string `sessionId`).
  */

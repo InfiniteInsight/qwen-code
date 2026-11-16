@@ -19,7 +19,7 @@ function ctx(over: Partial<RoomStateCtx> = {}): RoomStateCtx {
   };
 }
 
-describe('extractSync — invites', () => {
+describe('extractSync - invites', () => {
   it('collects rooms the bot was invited to', () => {
     const sync = {
       next_batch: 's2',
@@ -66,7 +66,7 @@ describe('extractSync — invites', () => {
   });
 });
 
-describe('extractSync — messages + power levels', () => {
+describe('extractSync - messages + power levels', () => {
   it('extracts a text message and resolves the sender power level from state', () => {
     const sync = {
       rooms: {
@@ -257,7 +257,7 @@ describe('extractSync — messages + power levels', () => {
   });
 });
 
-describe('extractSync — reactions', () => {
+describe('extractSync - reactions', () => {
   it('extracts a reaction with its target event and key', () => {
     const sync = {
       rooms: {
@@ -294,7 +294,7 @@ describe('extractSync — reactions', () => {
   });
 });
 
-describe('extractSync — encryption detection', () => {
+describe('extractSync - encryption detection', () => {
   it('flags a room with an m.room.encryption state event', () => {
     const sync = {
       rooms: {
@@ -339,7 +339,7 @@ describe('extractSync — encryption detection', () => {
   });
 });
 
-describe('extractSync — robustness', () => {
+describe('extractSync - robustness', () => {
   it('handles an empty / malformed sync without throwing', () => {
     expect(extractSync(undefined, ctx())).toMatchObject({
       invites: [],

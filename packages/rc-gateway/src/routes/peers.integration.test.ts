@@ -7,7 +7,7 @@
 /**
  * End-to-end proof for `GET /rc/peers`, mounted through the REAL
  * `createGatewayApp` (real TokenStore/PairingService/requireScope(OWNER)
- * mount, real stub daemon over HTTP — though this route never calls the
+ * mount, real stub daemon over HTTP - though this route never calls the
  * daemon). Mirrors the harness in `policyExplain.integration.test.ts` (the
  * authoritative precedent for `startStubDaemon`/`TokenStore.open`/`.issue`/
  * `createGatewayApp`/server `.listen`). The `browsePeers` dep is stubbed so

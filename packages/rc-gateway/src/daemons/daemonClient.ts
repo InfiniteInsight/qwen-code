@@ -11,9 +11,9 @@
  * seam that talks to a daemon over the wire.
  *
  * Error classification is what the CLI renders on:
- *  - {@link DaemonUnreachableError} — the fetch itself failed (DNS,
+ *  - {@link DaemonUnreachableError} - the fetch itself failed (DNS,
  *    connection refused, TLS, timeout); the daemon may be down.
- *  - {@link DaemonHttpError} — the daemon answered, but non-2xx; carries the
+ *  - {@link DaemonHttpError} - the daemon answered, but non-2xx; carries the
  *    HTTP status and the JSON body's `code` (e.g. `fork_mid_prompt`).
  */
 
@@ -70,7 +70,7 @@ export interface DaemonRequestOptions {
   timeoutMs?: number;
   /**
    * Skip TLS certificate verification (self-signed local daemons). Sets
-   * NODE_TLS_REJECT_UNAUTHORIZED=0 for the rest of this process — acceptable
+   * NODE_TLS_REJECT_UNAUTHORIZED=0 for the rest of this process - acceptable
    * here because the CLI exits right after the command.
    */
   insecure?: boolean;
@@ -135,7 +135,7 @@ export async function daemonRequest(
     try {
       json = JSON.parse(text);
     } catch {
-      // Not JSON — keep the raw text.
+      // Not JSON - keep the raw text.
     }
   }
   if (res.status < 200 || res.status >= 300) {

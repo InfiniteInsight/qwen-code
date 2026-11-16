@@ -41,12 +41,12 @@ export interface ApprovalModeRouteDeps {
 const POWER_MODES = new Set(['auto-edit', 'auto', 'yolo']);
 
 /**
- * POST /session/:id/approval-mode — proxy the daemon's approval-mode change
+ * POST /session/:id/approval-mode - proxy the daemon's approval-mode change
  * (via the SDK) with a tiered scope gate and a passthrough of the daemon's
  * own trust-gate decision.
  *
  * Tiered scope (fail-closed): `plan`/`default` need only WRITE (the mount
- * floor — see server.ts); a power mode (`auto-edit`/`auto`/`yolo`) OR a
+ * floor - see server.ts); a power mode (`auto-edit`/`auto`/`yolo`) OR a
  * durable `persist: true` demands OWNER, checked in-handler BEFORE any
  * daemon call. A rejected escalation is audited as `scope_denied` (mirrors
  * routes/review.ts's privileged-flag gate) and the daemon is never touched.
@@ -63,12 +63,12 @@ const POWER_MODES = new Set(['auto-edit', 'auto', 'yolo']);
  * `daemon_unavailable`.
  *
  * On success, audits `session_approval_mode_set` with ONLY
- * `{ mode, previous, persisted, planExitedOutOfBand }` — never args, paths,
- * or prompt content — and the actor is always the AUTHENTICATED
+ * `{ mode, previous, persisted, planExitedOutOfBand }` - never args, paths,
+ * or prompt content - and the actor is always the AUTHENTICATED
  * `req.rcClient`, never anything from the request body.
  *
  * This route does NOT publish to the owner-event bus or send a push
- * notification — that fan-out is driven by the daemon's own
+ * notification - that fan-out is driven by the daemon's own
  * `approval_mode_changed` event (a later task's pump), so there is exactly
  * one broadcast per change regardless of how the change was triggered
  * (this route, another client, or a local CLI toggle).
@@ -164,13 +164,13 @@ async function handleApprovalMode(
         }
       | undefined;
     if (status === 403) {
-      // Daemon trust gate (a power mode in an untrusted folder) — surface
+      // Daemon trust gate (a power mode in an untrusted folder) - surface
       // unchanged so the remote client learns the folder is untrusted, not
       // merely that its own scope was insufficient. Prefer the daemon's own
       // human-readable message (`error`, then `message`) when present, so
       // the string is faithful to what the daemon actually said; otherwise
       // fall back to the generic message below. Only that single string is
-      // copied — never the whole daemon body.
+      // copied - never the whole daemon body.
       const humanError =
         (typeof eBody?.error === 'string' && eBody.error.length > 0
           ? eBody.error

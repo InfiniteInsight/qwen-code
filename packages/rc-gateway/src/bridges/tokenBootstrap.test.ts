@@ -55,7 +55,7 @@ describe('resolveBridgeToken', () => {
     const cfg = { ...baseCfg, pairingCode: 'pc_1' };
     const token = await resolveBridgeToken(cfg, f.deps);
     expect(token).toBe('qwk_persisted');
-    expect(f.redeems).toHaveLength(0); // pairing code ignored — file exists
+    expect(f.redeems).toHaveLength(0); // pairing code ignored - file exists
   });
 
   it('redeems a pairing code and persists the result on first boot', async () => {

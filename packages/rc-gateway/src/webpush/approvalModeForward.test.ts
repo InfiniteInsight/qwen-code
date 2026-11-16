@@ -9,7 +9,7 @@ import { OwnerEventBus, type OwnerEvent } from '../ownerEvents.js';
 import { forwardApprovalModeChange } from './approvalModeForward.js';
 
 describe('forwardApprovalModeChange', () => {
-  it('publishes exactly one approval_mode_changed owner frame (no notify — the pump owns the push)', () => {
+  it('publishes exactly one approval_mode_changed owner frame (no notify - the pump owns the push)', () => {
     const bus = new OwnerEventBus();
     const received: OwnerEvent[] = [];
     bus.subscribe((event) => {

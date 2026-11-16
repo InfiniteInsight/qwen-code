@@ -8,9 +8,9 @@
  * CORS allowlist CRUD endpoints (wire-protocol: "Browser CORS allowlist
  * derived from pairing").
  *
- *   GET    /rc/cors         — list all admitted origins (owner)
- *   POST   /rc/cors         — manually admit an origin (owner)
- *   DELETE /rc/cors/:origin — remove an admitted origin (owner; 409 for config)
+ *   GET    /rc/cors         - list all admitted origins (owner)
+ *   POST   /rc/cors         - manually admit an origin (owner)
+ *   DELETE /rc/cors/:origin - remove an admitted origin (owner; 409 for config)
  */
 
 import type { RequestHandler } from 'express';
@@ -28,7 +28,7 @@ export interface CorsRouteDeps {
 }
 
 /**
- * GET /rc/cors — list all admitted origins.
+ * GET /rc/cors - list all admitted origins.
  * Returns `{ origins: CorsOriginRecord[] }`.
  */
 export function createListCorsOriginsRoute(
@@ -41,7 +41,7 @@ export function createListCorsOriginsRoute(
 }
 
 /**
- * POST /rc/cors { origin } — manually admit an origin to the allowlist.
+ * POST /rc/cors { origin } - manually admit an origin to the allowlist.
  * 400 when the origin is missing/invalid; 200 with the record on success.
  */
 export function createAddCorsOriginRoute(deps: CorsRouteDeps): RequestHandler {
@@ -75,7 +75,7 @@ export function createAddCorsOriginRoute(deps: CorsRouteDeps): RequestHandler {
 }
 
 /**
- * DELETE /rc/cors/:origin — remove an admitted origin.
+ * DELETE /rc/cors/:origin - remove an admitted origin.
  * 404 when origin is not in the store; 409 when it is config-sourced.
  */
 export function createRemoveCorsOriginRoute(

@@ -86,7 +86,7 @@ export interface DispatchDeps {
 /**
  * Handle one Telegram update (`add-telegram-bridge`). Self-catching: one bad
  * update must never kill the poll loop. A `/start <token>` REDEEMS an
- * operator-issued invite to bind the chat (the SOLE bind path — a chat user
+ * operator-issued invite to bind the chat (the SOLE bind path - a chat user
  * never names a session id directly); a plain message becomes a prompt
  * (per-sender sub-actor, local ban check, 429 → "slow down", 403 → cache the
  * ban + drop); a button tap becomes a vote.
@@ -102,7 +102,7 @@ export async function handleUpdate(
       await handleCallback(update.callback_query, deps);
     }
   } catch (err) {
-    // Swallow — the poll loop continues with the next update.
+    // Swallow - the poll loop continues with the next update.
     deps.onError?.(err);
   }
 }
@@ -121,14 +121,14 @@ async function handleMessage(
       return;
     }
     // Redeem the operator's one-time invite. On failure, relay the gateway's
-    // error text and persist NOTHING — a chat user can't bind by guessing.
+    // error text and persist NOTHING - a chat user can't bind by guessing.
     const redeemed = await deps.bridge.redeemInvite(deps.bridgeId, token);
     if (!redeemed.ok || !redeemed.sessionId) {
       await deps.tg.sendMessage(chatId, inviteError(redeemed));
       return;
     }
     // DEFERRED: the spec persists `(chatId, sessionId, primarySubActor)`; our
-    // store keeps only `(chatId, sessionId)` — the per-message sub-actor is
+    // store keeps only `(chatId, sessionId)` - the per-message sub-actor is
     // resolved at send time, so the redeemer's identity isn't needed at bind.
     await deps.chats.bind(chatId, redeemed.sessionId);
     await deps.tg.sendMessage(
@@ -160,7 +160,7 @@ async function handleMessage(
     const secs = r.retryAfterSec ?? 'a few';
     await deps.tg.sendMessage(
       chatId,
-      `Slow down — try again in ${secs} seconds.`,
+      `Slow down - try again in ${secs} seconds.`,
     );
     return;
   }

@@ -136,7 +136,7 @@ describe('StreamRouter, a code block across flushes (#168)', () => {
   });
 });
 
-describe('StreamRouter — buffering + flush', () => {
+describe('StreamRouter - buffering + flush', () => {
   it('buffers until a hard trigger, then posts to the channel', async () => {
     const h = harness(() => ['chan_1']);
     h.router.onChunk('sess', 'partial '); // no trigger
@@ -172,7 +172,7 @@ describe('StreamRouter — buffering + flush', () => {
   });
 });
 
-describe('StreamRouter — threads on long streams', () => {
+describe('StreamRouter - threads on long streams', () => {
   // Each flush is a paragraph (hard trigger) → one posted message per flush.
   const flush = (h: ReturnType<typeof harness>, n: number) =>
     h.router.onChunk('sess', `msg ${n}\n\n`);
@@ -243,7 +243,7 @@ describe('StreamRouter — threads on long streams', () => {
   });
 });
 
-describe('StreamRouter — ordering', () => {
+describe('StreamRouter - ordering', () => {
   it('preserves order despite concurrent slow posts (serialized chain)', async () => {
     const order: string[] = [];
     let resolveFirst: (() => void) | undefined;

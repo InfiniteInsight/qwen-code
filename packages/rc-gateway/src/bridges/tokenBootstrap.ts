@@ -9,17 +9,17 @@
  * bootstrap persists token"). Resolves the bridge-scope token a sidecar will
  * present to the gateway, with this precedence:
  *
- *   1. `QWEN_BRIDGE_TOKEN` (explicit operator token) — used as-is, not persisted.
- *   2. A previously persisted `$STATE_DIR/token` — short-circuits the pairing
+ *   1. `QWEN_BRIDGE_TOKEN` (explicit operator token) - used as-is, not persisted.
+ *   2. A previously persisted `$STATE_DIR/token` - short-circuits the pairing
  *      code, so "subsequent boots ignore QWEN_BRIDGE_PAIRING_CODE if the token
  *      file exists" (the spec scenario).
- *   3. `QWEN_BRIDGE_PAIRING_CODE` — redeemed against the gateway's
+ *   3. `QWEN_BRIDGE_PAIRING_CODE` - redeemed against the gateway's
  *      `POST /rc/pair/redeem` (a PRE-AUTH bootstrap call: no bearer), and the
  *      resulting token persisted to `$STATE_DIR/token` at mode 0600.
  *
  * fs + fetch are injected so the precedence and the 0600 persistence are
  * unit-testable without touching disk or the network. The persisted token is a
- * credential — never logged (this module returns it; callers must not print it).
+ * credential - never logged (this module returns it; callers must not print it).
  */
 
 import { join } from 'node:path';
@@ -49,7 +49,7 @@ export function tokenFilePath(stateDir: string): string {
 /**
  * Resolve the bridge token for `cfg`, redeeming + persisting a pairing code on
  * first boot. Throws {@link SidecarConfigError} if no credential can be resolved
- * (should not happen — the resolver guarantees one) or if redemption fails.
+ * (should not happen - the resolver guarantees one) or if redemption fails.
  */
 export async function resolveBridgeToken(
   cfg: SidecarConfig,

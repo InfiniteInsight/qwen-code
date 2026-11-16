@@ -17,21 +17,21 @@ import { isSubActorBan, type BanCacheLike } from '../banCache.js';
 
 /**
  * Pure inbound dispatch for the Matrix bridge (`add-matrix-bridge`): given a
- * NORMALIZED Matrix event (a room message, or a reaction — the shapes the sync
+ * NORMALIZED Matrix event (a room message, or a reaction - the shapes the sync
  * loop produces), drive the gateway over the loopback contract. No SDK, no live
- * sync — handlers take injected deps so prompt/vote/command/ban/power-level logic
+ * sync - handlers take injected deps so prompt/vote/command/ban/power-level logic
  * is unit-testable without an access token.
  *
  * Sub-actor is always the fully-qualified MXID (`matrix:@user:server`).
  *
  * Binding: `<prefix> attach <token>` REDEEMS an operator-issued one-time invite
- * via `POST /rc/bridges/:id/invite/redeem` (the spec's bind path) — the SOLE way
+ * via `POST /rc/bridges/:id/invite/redeem` (the spec's bind path) - the SOLE way
  * a room binds, and still power-gated (≥50) + refused in encrypted rooms. A room
  * member never names a session id directly; the operator decides every binding.
  *
  * Encrypted rooms (E2EE) are NOT supported in this build: the bridge can't read
  * ciphertext over the plain fetch transport, so it REFUSES to bind an encrypted
- * room and says so — rather than silently failing (which is what would happen if
+ * room and says so - rather than silently failing (which is what would happen if
  * encryption-handling were deferred along with E2EE itself).
  */
 
@@ -127,7 +127,7 @@ export interface MatrixDispatchDeps {
   /** Command prefix (default `!qwen`). */
   commandPrefix: string;
   /**
-   * Called when a new inbound prompt is accepted for a session — a turn boundary
+   * Called when a new inbound prompt is accepted for a session - a turn boundary
    * (spec: "the next inbound user prompt") so the stream router ends the prior
    * turn (its m.thread isn't reused). Optional (pure-dispatch tests omit it).
    */
@@ -201,7 +201,7 @@ export async function handleMessage(
     return;
   }
 
-  // Plain prompt — requires a bound room.
+  // Plain prompt - requires a bound room.
   const sessionId = deps.rooms.sessionFor(msg.roomId);
   if (!sessionId) return;
   const subActor = subActorOf(msg.sender);
@@ -217,7 +217,7 @@ export async function handleMessage(
     const secs = r.retryAfterSec ?? 'a few';
     await deps.rest.sendMessage(msg.roomId, {
       msgtype: 'm.text',
-      body: `Slow down — try again in ${secs} seconds.`,
+      body: `Slow down - try again in ${secs} seconds.`,
     });
     return;
   }
@@ -256,7 +256,7 @@ async function handleCommand(
       return;
     }
     // Redeem the operator's one-time invite. On failure, relay the gateway's
-    // error text and persist NOTHING — a member can't bind by guessing.
+    // error text and persist NOTHING - a member can't bind by guessing.
     const redeemed = await deps.bridge.redeemInvite(deps.bridgeId, arg);
     if (!redeemed.ok || !redeemed.sessionId) {
       await reply(inviteError(redeemed));
@@ -296,13 +296,13 @@ function inviteError(r: { body?: unknown }): string {
 
 /** Guidance text sent once per requestId when a user reacts on a deeplink message. */
 export const DEEPLINK_REACTION_GUIDANCE =
-  'This decision requires the web client — use the link above.';
+  'This decision requires the web client - use the link above.';
 
 /**
  * A reaction becomes a vote when it annotates a tracked permission_request event
  * with 👍/👎 (normalized for variation selector / skin tone). Banned reactors and
  * untracked / non-thumb reactions are dropped without a daemon call. The bridge
- * does NOT tally — it POSTs per valid reaction and lets the daemon dedupe
+ * does NOT tally - it POSTs per valid reaction and lets the daemon dedupe
  * (first-responder-wins).
  *
  * Deeplink-surface messages are NOT reaction-votable. A 👍/👎 on such a message

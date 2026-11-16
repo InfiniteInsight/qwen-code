@@ -122,7 +122,7 @@ describe('senderPowerLevel', () => {
   });
 });
 
-describe('matrix dispatch — message → prompt', () => {
+describe('matrix dispatch - message → prompt', () => {
   it('forwards a bound-room message with the MXID sub-actor', async () => {
     await rooms.bind('!abc:home.example.com', 'sess_xyz');
     const f = deps();
@@ -210,7 +210,7 @@ describe('matrix dispatch — message → prompt', () => {
   });
 });
 
-describe('matrix dispatch — !qwen commands + power-level gate', () => {
+describe('matrix dispatch - !qwen commands + power-level gate', () => {
   it('attach REDEEMS an invite when the invoker is a moderator (power ≥ 50)', async () => {
     const f = deps();
     await handleMessage(
@@ -233,7 +233,7 @@ describe('matrix dispatch — !qwen commands + power-level gate', () => {
     expect(f.sent[0].body).toBe('Invalid or expired invite token');
   });
 
-  it('rejects attach from a non-moderator (power < 50) — no redeem, no binding', async () => {
+  it('rejects attach from a non-moderator (power < 50) - no redeem, no binding', async () => {
     const f = deps();
     await handleMessage(
       msg({
@@ -248,7 +248,7 @@ describe('matrix dispatch — !qwen commands + power-level gate', () => {
     expect(f.sent[0].body).toContain('power level ≥ 50');
   });
 
-  it('refuses attach in an encrypted room — no redeem, no binding', async () => {
+  it('refuses attach in an encrypted room - no redeem, no binding', async () => {
     const f = deps({ encryptedRooms: new Set(['!abc:home.example.com']) });
     await handleMessage(
       msg({ body: '!qwen attach inv_ok', powerLevel: 100 }),
@@ -282,7 +282,7 @@ describe('matrix dispatch — !qwen commands + power-level gate', () => {
   });
 });
 
-describe('matrix dispatch — reaction → vote', () => {
+describe('matrix dispatch - reaction → vote', () => {
   // The request below was posted to !abc, which is bound to its session.
   beforeEach(async () => {
     await rooms.bind('!abc:home.example.com', 'sess_xyz');

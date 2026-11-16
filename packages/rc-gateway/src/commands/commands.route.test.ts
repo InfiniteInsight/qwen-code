@@ -489,7 +489,7 @@ describe('POST /rc/session/:id/command/:name', () => {
     expect(((await res.json()) as { code: string }).code).toBe(
       'prompt_timeout',
     );
-    // The command WAS invoked, so it is still audited — as timed out, with no
+    // The command WAS invoked, so it is still audited - as timed out, with no
     // stopReason, and never the resolved body.
     const invoked = audit.entries.find(
       (e) => e.action === 'slash_command_invoked',

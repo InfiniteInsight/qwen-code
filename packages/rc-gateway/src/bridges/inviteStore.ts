@@ -11,14 +11,14 @@ import { randomBytes } from 'node:crypto';
  * add-{telegram,discord,matrix}-bridge "operator-issued invite binds <surface>").
  *
  * An operator mints an invite for a `{kind, sessionId}` pair (the gateway analog
- * of the spec's `qwen rc bridges invite --kind <kind> --session <id>` CLI — the
+ * of the spec's `qwen rc bridges invite --kind <kind> --session <id>` CLI - the
  * daemon→gateway move is the standing fork architecture deviation). The bridge
  * redeems it via `POST /rc/bridges/:id/invite/redeem`, learning the sessionId to
  * bind WITHOUT a chat user ever naming a session id directly. That is the whole
  * point: the OPERATOR decides which chat→session bindings exist.
  *
  * Mirrors {@link PairingService}: in-memory + single-use + TTL. A gateway restart
- * drops unredeemed invites (the operator re-mints) — the same ephemerality as the
+ * drops unredeemed invites (the operator re-mints) - the same ephemerality as the
  * pairing codes and the bridge registry. Tokens are 16 random bytes (vs pairing's
  * 6): an invite is chat-relayed (copy-paste/forward), not human-typed, so there's
  * no length pressure and the extra entropy removes any brute-force question.
@@ -31,7 +31,7 @@ const DEFAULT_TTL_MS = 20 * 60 * 1000;
 
 interface PendingInvite {
   /** Advisory bridge kind (telegram|discord|matrix). Recorded, NOT gated on at
-   * redeem — see {@link InviteStore.redeem}. */
+   * redeem - see {@link InviteStore.redeem}. */
   kind: string;
   sessionId: string;
   expiresAt: number;
@@ -65,7 +65,7 @@ export class InviteStore {
    * before the expiry check, so a redeem attempt always burns it.
    *
    * `kind` is returned for audit but deliberately NOT matched against the
-   * redeeming bridge — gating on it would force either id==kind brittleness or a
+   * redeeming bridge - gating on it would force either id==kind brittleness or a
    * registration-schema coupling, and the only threat it closes (operator hands a
    * token to the wrong bridge type) is low-severity; the bridge-scope token + the
    * one-time invite are the real controls.

@@ -10,7 +10,7 @@ import { isSessionLevelGone } from '../daemonHttpError.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
 
 /**
- * GET /session/:id/resources — relay what one live conversation has loaded:
+ * GET /session/:id/resources - relay what one live conversation has loaded:
  * its skills and its MCP servers, as the daemon sanitises them for a reader.
  *
  * WHY THIS IS NOT THE WORKSPACE READ

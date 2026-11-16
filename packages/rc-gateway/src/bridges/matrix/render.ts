@@ -9,14 +9,14 @@ import type { BridgeHints } from '../hints.js';
 /**
  * Pure Matrix translation (`add-matrix-bridge`): daemon `permission_request`
  * frames → an `m.room.message` body, 👍/👎 reactions ↔ gateway votes, and the
- * `m.replace` edit content used on resolve. No I/O, no SDK — just the wire shapes,
+ * `m.replace` edit content used on resolve. No I/O, no SDK - just the wire shapes,
  * kept pure so the rendering + reaction contract is unit-testable without an
  * access token or a live homeserver.
  *
  * Matrix differs from Telegram/Discord in three ways reflected here: there is NO
  * inline-button surface, so the vote affordance is a 👍/👎 REACTION on the message
  * (`supportsActions: false`); ids are fully-qualified MXIDs carried verbatim
- * (`@user:home.example.com`, never stripped to a localpart — federation makes
+ * (`@user:home.example.com`, never stripped to a localpart - federation makes
  * `@a:x` and `@a:y` different users); and an edit is a NEW event carrying
  * `m.new_content` + an `m.replace` relation, not an in-place patch.
  */
@@ -47,9 +47,9 @@ export function subActorOf(mxid: string): string {
 
 /**
  * Normalize a reaction key before matching: strip the emoji variation selector
- * (U+FE0F) and any skin-tone modifier (U+1F3FB–U+1F3FF), since clients send
+ * (U+FE0F) and any skin-tone modifier (U+1F3FB-U+1F3FF), since clients send
  * `👍`, `👍️`, and `👍🏽` interchangeably. Matching the raw key would miss
- * the common variation-selector form — a bug a literal fixture hides.
+ * the common variation-selector form - a bug a literal fixture hides.
  */
 export function normalizeReactionKey(key: string): string {
   return key.replace(/️/g, '').replace(/[\u{1F3FB}-\u{1F3FF}]/gu, '');
@@ -108,7 +108,7 @@ export function renderPermissionRequest(
 
 /**
  * Whether a rendered permission_request message should have its reactions
- * tracked. Deeplink (sensitive) messages are NOT tracked — those require
+ * tracked. Deeplink (sensitive) messages are NOT tracked - those require
  * explicit web-client review, not a room reaction.
  */
 export function tracksReactions(data: unknown): boolean {
@@ -126,7 +126,7 @@ export function tracksReactions(data: unknown): boolean {
  * <subActor>", but the daemon's `permission_resolved` frame carries only
  * `{requestId, outcome}` with NO voter (first-responder-wins is resolved
  * daemon-side), so the bridge can't know which reactor won. We render the
- * available `outcome` and omit the voter rather than fabricate one — the same
+ * available `outcome` and omit the voter rather than fabricate one - the same
  * deviation carried by the Discord bridge.
  */
 export function renderResolveEdit(

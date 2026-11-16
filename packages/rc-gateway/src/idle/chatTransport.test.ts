@@ -11,7 +11,7 @@ import {
   type SuggestConfig,
 } from './chatTransport.js';
 
-describe('resolveSuggestConfig — coherent (key, host) sets only', () => {
+describe('resolveSuggestConfig - coherent (key, host) sets only', () => {
   it('tier 1: dedicated QWEN_RC_SUGGEST_* key+base (trailing slash trimmed)', () => {
     expect(
       resolveSuggestConfig({
@@ -121,7 +121,7 @@ describe('createChatTransport', () => {
   });
 
   it('fires its own timeout on a hung endpoint (load-bearing for the pump)', async () => {
-    // A fetch that never resolves on its own, but honors the composed signal —
+    // A fetch that never resolves on its own, but honors the composed signal -
     // proves the 15 s AbortSignal.timeout (overridden tiny here) actually aborts,
     // so a hung endpoint can never wedge the caller.
     const fakeFetch = ((_url: string, init: RequestInit) =>

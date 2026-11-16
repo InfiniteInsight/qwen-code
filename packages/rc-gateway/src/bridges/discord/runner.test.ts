@@ -410,7 +410,7 @@ describe('DiscordBridge runner', () => {
   });
 });
 
-describe('DiscordBridge runner — session_update streaming', () => {
+describe('DiscordBridge runner - session_update streaming', () => {
   const chunk = (text: string) => ({
     type: 'session_update' as const,
     data: {
@@ -452,7 +452,7 @@ describe('DiscordBridge runner — session_update streaming', () => {
     expect(h.created[h.created.length - 1].channelId).toBe('thread_1');
   });
 
-  it('a permission_resolved ends the turn — the next chunk goes to the channel', async () => {
+  it('a permission_resolved ends the turn - the next chunk goes to the channel', async () => {
     await channels.bind('chan_1', 'g1', 'sess_q');
     const h = harness();
     for (let i = 1; i <= 7; i++) {

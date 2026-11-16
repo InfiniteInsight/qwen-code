@@ -20,14 +20,14 @@ import type { CorsOriginRecord } from './types.js';
  * Verified-token cache bounds.
  *
  * argon2id is deliberately memory-hard (19 MiB) and slow (~390 ms measured), by
- * design — that cost is right when checking a *candidate* secret, but the auth
+ * design - that cost is right when checking a *candidate* secret, but the auth
  * path re-pays it on every single authenticated request, including polls and
  * SSE reconnects. Under sustained traffic that is hundreds of megabytes of
  * churn per minute and enough CPU to make the gateway visibly slow.
  *
  * Caching only the argon2 comparison (plaintext ↔ record identity) keeps the
- * expensive step once per token per TTL. Every policy decision — revocation,
- * max-age, TTL expiry — is still evaluated from the live record on each
+ * expensive step once per token per TTL. Every policy decision - revocation,
+ * max-age, TTL expiry - is still evaluated from the live record on each
  * request, so a revoked or expired token stops working immediately.
  */
 const VERIFY_CACHE_TTL_MS = 5 * 60_000;
@@ -343,7 +343,7 @@ export class TokenStore {
    * second concurrent `consumeUse` between check and bump (the equivalent of the
    * design's atomic SQL `UPDATE ... WHERE uses < max_uses`). `persist()` is the
    * only await and happens after the bump; a persist failure rejects but the
-   * in-memory count already moved — the caller (whoami) catches that and 500s.
+   * in-memory count already moved - the caller (whoami) catches that and 500s.
    *
    * Returns `usesRemaining` post-bump (`null` when unlimited). An unlimited
    * (`maxUses === undefined`) share always succeeds. `uses` is read with `?? 0`
@@ -474,8 +474,8 @@ export class TokenStore {
    * Resolve a raw `Authorization` header value to identity + scopes. An expired
    * share token (`expiresAt !== undefined && now >= expiresAt`) is treated as no
    * match (→ null → 401). On match, the record's `sessionLockId` is returned so
-   * `enforceSessionLock` can confine a share token to its one session, and —
-   * for a share token only — its `label` as `shareLabel` so callers can stamp
+   * `enforceSessionLock` can confine a share token to its one session, and -
+   * for a share token only - its `label` as `shareLabel` so callers can stamp
    * audit rows with the human-readable share name at action time.
    */
   resolve(authHeader: string): {
@@ -499,7 +499,7 @@ export class TokenStore {
   /**
    * Resolve a token id to a copy of its scopes (pure read, no I/O). Used by the
    * push notifier to scope-gate fan-out. Returns undefined for an unknown id OR
-   * an expired token — an expired share token must grant no push delivery, just
+   * an expired token - an expired share token must grant no push delivery, just
    * as `resolve()` rejects it for requests. The absolute max-age ceiling
    * applies here too (#165): a token too old to log in must not keep being
    * notified.
@@ -573,7 +573,7 @@ export class TokenStore {
    * Revoke a token by id. Stamps `revokedAt` so `verifyTokenDetailed` returns
    * `{ ok: false, reason: 'revoked' }` and the credential is permanently
    * rejected. `list()` and `listShares()` exclude revoked records. Awaits
-   * persist so revocation is durable before the caller responds — a crash
+   * persist so revocation is durable before the caller responds - a crash
    * must never resurrect a revoked token on reopen.
    *
    * Returns true if a record was revoked, false if the id was unknown or was
@@ -590,12 +590,12 @@ export class TokenStore {
   }
 
   /**
-   * Batch revocation (spec: "Batch revocation" — `POST /rc/tokens/revoke-all`):
+   * Batch revocation (spec: "Batch revocation" - `POST /rc/tokens/revoke-all`):
    * stamp `revokedAt` on every non-revoked token, except the caller's own token
    * when `exceptTokenId` is given (`{ "except": "self" }`). Already-revoked
    * records are untouched and never appear in `revokedIds`.
    * Returns the revoked ids so the routes layer can write one `token_revoked`
-   * audit entry per id — the store is deliberately not coupled to audit.
+   * audit entry per id - the store is deliberately not coupled to audit.
    * Persists atomically (single persist call after all stamps).
    */
   async revokeAll(
@@ -616,7 +616,7 @@ export class TokenStore {
 
   // ---------------------------------------------------------------------------
   // CORS origin persistence (wire-protocol: "Browser CORS allowlist derived
-  // from pairing").  Origins are stored independently of tokens — revoking the
+  // from pairing").  Origins are stored independently of tokens - revoking the
   // admitting token does NOT remove the origin.
   // ---------------------------------------------------------------------------
 

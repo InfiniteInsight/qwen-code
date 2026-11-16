@@ -8,7 +8,7 @@
  * On-disk store for an ACME-issued cert bundle, under `<baseDir>/<domain-slug>/`
  * (the cli passes `~/.qwen/rc/acme`). The leaf cert, private key, issuer chain,
  * and metadata are separate files so the https server can read exactly what it
- * needs. Private material is written 0600 under a 0700 directory — these keys are
+ * needs. Private material is written 0600 under a 0700 directory - these keys are
  * the crown jewels and must never be group/world-readable.
  */
 import { mkdir, readFile, chmod } from 'node:fs/promises';
@@ -38,7 +38,7 @@ export interface CertBundle {
  * Map a domain to a filesystem-safe directory name: collapse anything outside
  * `[A-Za-z0-9._-]` (notably the wildcard `*`) to `_`, and neutralize `..` runs so
  * a pathological value can't escape `baseDir`. (`--acme-domain` is operator-set,
- * not remote — this is defense-in-depth, not the primary guard.)
+ * not remote - this is defense-in-depth, not the primary guard.)
  */
 export function safeDirName(domain: string): string {
   const slug = domain.replace(/[^A-Za-z0-9._-]/g, '_').replace(/\.\.+/g, '_');

@@ -14,7 +14,7 @@
  *  - the TOML file uses `[[daemon]]` (singular) array-of-tables; the JSON output
  *    key is `daemons` (plural).
  *  - `generatedAt` is endpoint-generated (cache-build time), NOT read from file.
- *  - entries pass through verbatim — `default` is NOT synthesized (the client
+ *  - entries pass through verbatim - `default` is NOT synthesized (the client
  *    interprets "no explicit default → first entry is default").
  *  - missing or invalid TOML → `{ daemons: [], warning }` with status 200.
  *  - the response is cached server-side for 60 s.
@@ -36,7 +36,7 @@ export interface ClientsManifest {
 
 /**
  * Build the manifest from raw TOML text (or `null` when the file is absent).
- * Pure and total — never throws; a parse failure becomes a `warning`.
+ * Pure and total - never throws; a parse failure becomes a `warning`.
  */
 export function buildClientsManifest(
   tomlText: string | null,

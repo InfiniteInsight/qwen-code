@@ -8,7 +8,7 @@
  * On-box validation for the ACME DNS-01 flow (NOT a CI test). Issues a REAL cert
  * from Let's Encrypt **staging** for your domain via your DNS provider, proving the
  * `acme-client` wrapper + DNS-01 solver work end-to-end before the cli wires them
- * in. Staging certs are NOT browser-trusted — that's fine; this checks the flow,
+ * in. Staging certs are NOT browser-trusted - that's fine; this checks the flow,
  * not trust. (Switch to production only after staging issues cleanly.)
  *
  * Prereqs on the box:
@@ -25,7 +25,7 @@
  *     ACME_DNS_PROVIDER=cloudflare CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ZONE_ID=… \
  *     npx tsx scripts/acme-staging-test.mts
  *
- * Set ACME_PRODUCTION=1 to hit LE production instead (rate-limited — only after
+ * Set ACME_PRODUCTION=1 to hit LE production instead (rate-limited - only after
  * staging works). Set ACME_STATE_DIR to keep the issued bundle; default is a tmp dir.
  */
 import { mkdtemp } from 'node:fs/promises';
@@ -63,13 +63,13 @@ try {
   const bundle = await manager.start();
   manager.stop();
   console.error('');
-  console.error(`[acme] ✅ SUCCESS — certificate issued`);
+  console.error(`[acme] ✅ SUCCESS - certificate issued`);
   console.error(`[acme]    notAfter:   ${bundle.meta.notAfter}`);
   console.error(`[acme]    leaf bytes: ${bundle.cert.length}`);
   console.error(`[acme]    chain bytes:${bundle.chain.length}`);
   if (staging) {
     console.error(
-      '[acme]    (LE STAGING cert — not browser-trusted; the FLOW works. ' +
+      '[acme]    (LE STAGING cert - not browser-trusted; the FLOW works. ' +
         'Re-run with ACME_PRODUCTION=1 for a real cert.)',
     );
   }

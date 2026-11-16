@@ -7,7 +7,7 @@
 /**
  * End-to-end proof for `POST /policy/explain` (P4), mounted through the REAL
  * `createGatewayApp` (real TokenStore/PairingService/requireScope(OWNER)
- * mount, real stub daemon over HTTP — though this route never calls the
+ * mount, real stub daemon over HTTP - though this route never calls the
  * daemon). There is no way to inject a policy through `createGatewayApp`
  * other than the `policyExplain` dep bundle itself (cli.ts wires it from a
  * hot-reloaded `let currentPolicy`); this test hand-builds that bundle

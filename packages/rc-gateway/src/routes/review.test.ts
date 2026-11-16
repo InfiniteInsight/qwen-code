@@ -52,7 +52,7 @@ async function setup(
   store: TokenStore;
 }> {
   // Keep the review prompt in-flight past the accept window so the 202-accept
-  // path is deterministic (never a race on an instant settle) — this ALSO
+  // path is deterministic (never a race on an instant settle) - this ALSO
   // keeps a triggered review 'running' well past cancel, so cancel-while-
   // running tests never race prompt-settle (see D.3 report).
   stub = await startStubDaemon({ promptDelayMs: 2000, ...stubOpts });
@@ -227,7 +227,7 @@ describe('POST /rc/reviews (trigger saga)', () => {
     expect(bridge.open).not.toHaveBeenCalled();
 
     // The owner-gate denial is audited as a scope_denied row (the mount-level
-    // scope_denied never fires — a WRITE token passes requireScope(WRITE)).
+    // scope_denied never fires - a WRITE token passes requireScope(WRITE)).
     await waitFor(() =>
       frames.some(
         (f) =>
@@ -447,7 +447,7 @@ describe('POST /rc/reviews (trigger saga)', () => {
   it('prompt send failure → 502 prompt_send_failed: bridge closed, session ended, review failed', async () => {
     // Inverse of the accept-path config: a LARGE accept window (1000ms) + an
     // IMMEDIATE prompt rejection (promptStatus 500, no delay) makes
-    // 'send_failed' win the race deterministically — the ~ms rejection beats
+    // 'send_failed' win the race deterministically - the ~ms rejection beats
     // the window, never a race. This is the ONLY leg that diverges from the
     // agents mirror (it must bridge.close before ending the session).
     const { url, tokens, registry, bridge } = await setup(
@@ -620,7 +620,7 @@ describe('GET /rc/reviews, GET /rc/reviews/:id (list/detail)', () => {
       parentId: 'owner',
     });
 
-    // Another session's review, by id, must 404 — same shape as unknown id —
+    // Another session's review, by id, must 404 - same shape as unknown id -
     // and must NEVER leak its (raw filesystem) path in the response body.
     const otherRes = await fetch(`${url}/rc/reviews/${other.reviewId}`, {
       headers: { Authorization: `Bearer ${share.token}` },
@@ -663,7 +663,7 @@ describe('GET /rc/reviews, GET /rc/reviews/:id (list/detail)', () => {
 describe('POST /rc/reviews/:id/cancel', () => {
   it('cancels a running review: 200 + review_cancelled owner frame + session ended + registry cancelled', async () => {
     // Default setup() keeps promptDelayMs at 2000ms, so the triggered review
-    // is still 'running' when cancel is called — deterministic, no race
+    // is still 'running' when cancel is called - deterministic, no race
     // against prompt-settle (see D.3 report for why this avoids the flake
     // shape noted in agents.integration.test.ts).
     const { url, tokens, registry, bridge, frames } = await setup();

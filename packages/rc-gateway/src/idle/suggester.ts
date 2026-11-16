@@ -25,7 +25,7 @@ const SYSTEM_PROMPT =
  * degrades to silence, never a crash or a broken UI). No turns → `[]` (nothing
  * to suggest from; also avoids a pointless model call).
  *
- * This NEVER touches the daemon session — it makes an independent model call and
+ * This NEVER touches the daemon session - it makes an independent model call and
  * the result is surfaced out-of-band (a later slice emits an `idle_suggestions`
  * event), so the live transcript, viewers, and the model's own later replies are
  * unaffected (the whole reason `add-idle-suggestions` is built gateway-side).

@@ -6,7 +6,7 @@
 
 /**
  * AWS Route53 DNS-01 solver. `present` UPSERTs the `_acme-challenge` TXT record
- * into the hosted zone and waits until Route53 reports the change `INSYNC` — its
+ * into the hosted zone and waits until Route53 reports the change `INSYNC` - its
  * authoritative "fully propagated" signal, so the CA can validate immediately
  * with no extra DNS polling. `cleanup` DELETEs it (best-effort).
  *
@@ -45,7 +45,7 @@ export interface Route53ProviderOptions {
   client: Route53Client;
   /** The hosted zone id that owns the challenge domain (env-supplied). */
   hostedZoneId: string;
-  /** TTL for the challenge record (default 60s — it's short-lived). */
+  /** TTL for the challenge record (default 60s - it's short-lived). */
   ttl?: number;
   /** INSYNC poll interval (default 2s). */
   pollIntervalMs?: number;
@@ -202,7 +202,7 @@ export async function createRoute53Client(
     ) {
       throw new Error(
         'route53 DNS provider needs the optional @aws-sdk/client-route-53 ' +
-          'dependency — run: npm install @aws-sdk/client-route-53',
+          'dependency - run: npm install @aws-sdk/client-route-53',
       );
     }
     throw err;

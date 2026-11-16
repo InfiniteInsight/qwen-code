@@ -29,7 +29,7 @@ export type CloneStartGate = (
 ) => Promise<CloneStartGateHit | null>;
 
 /**
- * POST /session — create (or attach to) a daemon session so a freshly-paired
+ * POST /session - create (or attach to) a daemon session so a freshly-paired
  * client (the web UI's "New conversation" button) has a session to watch and
  * prompt. Write-scoped. Bare namespace, mirroring the daemon's own
  * `POST /session` 1:1 (transparent-proxy topology).
@@ -45,12 +45,12 @@ export type CloneStartGate = (
  *  - `scope` defaults to `'single'` (coalesce onto the workspace's session);
  *    `'thread'` opens a fresh independent session.
  *
- * The gateway itself never spawns the SESSION — it holds the daemon token and
+ * The gateway itself never spawns the SESSION - it holds the daemon token and
  * `createOrAttachSession` does the real work (whether against a single daemon
  * or the pool). On success returns the new session's id (+ its workspace) so
  * the caller can immediately watch it.
  *
- * Audit carries only the session id (`target`) and the scope enum — never the
+ * Audit carries only the session id (`target`) and the scope enum - never the
  * `cwd` path (audit records stay free of paths/args per the gateway's data
  * contract).
  */
@@ -70,7 +70,7 @@ export function createSessionCreateRoute(
 
     // Validate a non-empty cwd BEFORE any daemon call: it must name an
     // existing directory. Any stat failure (ENOENT, EACCES, not-a-dir, …) or
-    // a non-directory target collapses to the same 400 — the error message
+    // a non-directory target collapses to the same 400 - the error message
     // never echoes the path (audit/error-hygiene invariant below).
     if (workspaceCwd !== undefined) {
       let isDir = false;
@@ -124,8 +124,8 @@ export function createSessionCreateRoute(
       });
     } catch (err) {
       // A full workspace daemon pool (max concurrent workspace daemons, all
-      // busy — see DaemonPool.evictLruIdle) is a distinct, RETRYABLE
-      // condition, not a daemon failure — surface it as its own 503 rather
+      // busy - see DaemonPool.evictLruIdle) is a distinct, RETRYABLE
+      // condition, not a daemon failure - surface it as its own 503 rather
       // than collapsing it into the generic 502 below.
       if (err instanceof WorkspacePoolFullError) {
         res.status(503).json(workspacePoolFullBody(req, err));

@@ -6,7 +6,7 @@
 
 /**
  * One parsed JSONL transcript record. We deliberately operate on opaque parsed
- * JSON objects (not core's full `ChatRecord` type) — the transform only reads
+ * JSON objects (not core's full `ChatRecord` type) - the transform only reads
  * `uuid` and rewrites three well-known fields; every other field is copied
  * verbatim, so we never need to know its shape.
  */

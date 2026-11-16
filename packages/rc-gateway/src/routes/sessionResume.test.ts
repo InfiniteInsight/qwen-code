@@ -308,7 +308,7 @@ describe('POST /session/:id/resume', () => {
 
   it('omits replay fields the daemon did not return (older daemon)', async () => {
     // A daemon that returns a bare restored session (no in-band replay) must
-    // not surface `undefined` keys — the route spreads conditionally.
+    // not surface `undefined` keys - the route spreads conditionally.
     const dir = makeTmpDir('qwen-session-resume-bare-');
     const pool = fakePool();
     const url = await mountGateway(pool);

@@ -7,7 +7,7 @@
 /**
  * Server-level proof for `GET /rc/llama-swap`, mounted through the REAL
  * `createGatewayApp` (real TokenStore/PairingService/requireScope(OWNER)
- * mount, real stub daemon over HTTP — though this route never calls the
+ * mount, real stub daemon over HTTP - though this route never calls the
  * daemon). Mirrors the harness in `routes/peers.integration.test.ts`. Proves
  * both states of the conditional mount: `llamaSwapProbe` set → 200 with the
  * probe's body; `llamaSwapProbe` omitted → 404 (route not registered at

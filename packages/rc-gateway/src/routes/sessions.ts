@@ -10,14 +10,14 @@ import { archiveChatsDirOf, resolveChatsDir } from '../sessions/chatsPath.js';
 import { listSessionsAcross } from '../sessions/sessionList.js';
 
 /**
- * GET /rc/sessions — a flat, workspace-wide list of sessions with fork lineage:
+ * GET /rc/sessions - a flat, workspace-wide list of sessions with fork lineage:
  * each item carries its `parentSessionId` (when a fork) and a derived `forks[]`
  * reverse index, so a client can render the fork tree. `truncated` flags a
  * partial scan (the file-count cap was hit).
  *
  * OWNER-scoped at the mount (same posture as `/session/:id/lineage`): a flat
  * topology enumerates sibling/ancestor ids a session-locked share token must
- * never see. Read-only and daemon-light — `resolveWorkspaceCwd` is
+ * never see. Read-only and daemon-light - `resolveWorkspaceCwd` is
  * request-aware (callers may honor a `?cwd`/`:cwd` override, `path.resolve`d,
  * falling back to the trusted boot `workspaceCwd`), then the listing scans
  * the on-disk chats dir (the same first-record `forkedFrom` source lineage
@@ -59,7 +59,7 @@ export function createSessionListRoute(
       }
 
       // `?archiveState=archived` reads the archive dir instead of the chats dir. The
-      // default stays exactly what it always was — the chats dir alone — so an
+      // default stays exactly what it always was - the chats dir alone - so an
       // existing caller sees no change. Archive is a SEPARATE listing rather
       // than rows added to the main one because an archived conversation
       // cannot be opened: the daemon answers a transcript read on it with
@@ -92,7 +92,7 @@ export function createSessionListRoute(
         archived ? { archivedDirs: scanDirs } : {},
       );
 
-      // Privacy: count + truncated flag only — never the session ids.
+      // Privacy: count + truncated flag only - never the session ids.
       void audit?.record({
         action: 'session_list_read',
         actorTokenId: req.rcClient?.id,

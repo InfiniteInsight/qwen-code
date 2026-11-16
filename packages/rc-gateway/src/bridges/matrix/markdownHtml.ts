@@ -14,7 +14,7 @@
  * Handles: fenced code blocks, inline code, bold, italic, links, and line breaks,
  * with everything else HTML-escaped. Code spans/blocks are extracted BEFORE
  * escaping/inline-formatting so their contents are never treated as markup, then
- * restored (escaped) at the end — so a backtick-wrapped `<b>` renders as literal
+ * restored (escaped) at the end - so a backtick-wrapped `<b>` renders as literal
  * text in a `<code>`, never as a tag. This is a renderer, not a sanitizer: it
  * only ever EMITS the fixed tag set above and HTML-escapes all author text, so no
  * author input can inject other tags/attributes.
@@ -34,7 +34,7 @@ const BLOCK_RE = new RegExp(`${PUA}B(\\d+)${PUA}`, 'g');
 
 // Link targets are restricted to these schemes. A `javascript:`/`data:`/`vbscript:`
 // href would execute when clicked in some Matrix clients, so anything else is
-// dropped to plain text (the link's visible text, escaped — never an href).
+// dropped to plain text (the link's visible text, escaped - never an href).
 // Scheme-relative and relative URLs (no `scheme:`) are allowed through.
 function isSafeUrl(url: string): boolean {
   const m = /^\s*([a-z][a-z0-9+.-]*):/i.exec(url);

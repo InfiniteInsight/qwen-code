@@ -62,7 +62,7 @@ describe('loadLayeredRoutingMatcherStrict (hot-reload loader)', () => {
     ).rejects.toBeInstanceOf(RoutingError);
   });
 
-  it('a MISSING file (ENOENT) is not an error — workspace layer alone applies', async () => {
+  it('a MISSING file (ENOENT) is not an error - workspace layer alone applies', async () => {
     // user routing.yaml absent (intended removal); workspace provides the rule.
     const wsCwd = join(dir, 'ws');
     await mkdir(join(wsCwd, '.qwen'), { recursive: true });

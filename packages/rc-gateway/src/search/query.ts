@@ -14,7 +14,7 @@
  * Operators are UPPERCASE-ONLY (`OR`, `AND`, `NOT`); lowercase `or`/`and`/`not`
  * are ordinary terms, so every all-lowercase query WITHOUT parens stays a
  * pure-AND substring search (back-compat with cycle 19). Precedence: `OR`
- * lowest, then implicit `AND`, then `NOT`/atom/parens. The parser is total — it
+ * lowest, then implicit `AND`, then `NOT`/atom/parens. The parser is total - it
  * never throws and never loops.
  *
  * NOTE (cycle-32 deviation): bare `(`/`)` are now grouping syntax, so a literal
@@ -63,7 +63,7 @@ function tokenize(q: string): Token[] {
   let i = 0;
   while (i < q.length) {
     const ch = q[i];
-    // Skip whitespace using the SAME predicate the word-scanner stops on — a
+    // Skip whitespace using the SAME predicate the word-scanner stops on - a
     // mismatch leaves a char that is neither skipped nor consumed, so the loop
     // spins forever on an interior NBSP/\v/\f/Unicode space.
     if (WS.test(ch)) {

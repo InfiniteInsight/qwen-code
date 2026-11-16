@@ -271,7 +271,7 @@ describe('TelegramBridge runner', () => {
   });
 });
 
-describe('TelegramBridge — cursor persistence', () => {
+describe('TelegramBridge - cursor persistence', () => {
   it('loads cursor from store on start and passes it as Last-Event-ID on subscribe', async () => {
     await chats.bind(7, 'sess-q');
     const cursors = await CursorStore.open(join(dir, 'cursors.json'));

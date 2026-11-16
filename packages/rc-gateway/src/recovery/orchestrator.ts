@@ -75,7 +75,7 @@ export interface RecoveryPool {
 
 export interface RecoveryOrchestratorOptions {
   pool: RecoveryPool;
-  /** `hadInFlightTurn` source — the prompt route holds the per-session slot
+  /** `hadInFlightTurn` source - the prompt route holds the per-session slot
    * across the turn, so a held slot at the moment of death means a prompt
    * was in flight. */
   promptQueue: Pick<PromptQueue, 'isInFlight'>;
@@ -158,13 +158,13 @@ export class RecoveryOrchestrator {
     return run;
   }
 
-  /** `RecoveryStateProvider` — the pool delegates `recoveryState` here.
+  /** `RecoveryStateProvider` - the pool delegates `recoveryState` here.
    * Unknown session → `'idle'`. */
   recoveryState(sessionId: string): RecoveryState {
     return this.state.get(sessionId) ?? 'idle';
   }
 
-  /** The pool reports the session live again (created/resumed out-of-band —
+  /** The pool reports the session live again (created/resumed out-of-band -
    * e.g. a manual `POST /session/:id/resume` after a failed recovery), so a
    * stale outcome stops short-circuiting the events route. Ignore during an
    * active recovery saga so `pool.resumeSession` does not clear `'recovering'`
@@ -223,7 +223,7 @@ export class RecoveryOrchestrator {
   ): Promise<void> {
     const unique = [...new Set(sessions)];
     for (const id of unique) this.markRecovering(id);
-    // Snapshot BEFORE respawn (design §2.2) — once the daemon is back, the
+    // Snapshot BEFORE respawn (design §2.2) - once the daemon is back, the
     // in-flight prompt has rejected and released its queue slot.
     const inFlight = new Map<string, boolean>();
     for (const id of unique) inFlight.set(id, this.promptQueue.isInFlight(id));
@@ -246,7 +246,7 @@ export class RecoveryOrchestrator {
       try {
         this.reportOutcome?.(sessionId, outcome);
       } catch {
-        // A failing sink must not break the saga — the other sessions still
+        // A failing sink must not break the saga - the other sessions still
         // get their outcomes.
       }
     };

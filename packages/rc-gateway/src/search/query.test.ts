@@ -84,7 +84,7 @@ describe('parseQuery (behavioral / back-compat)', () => {
   });
 });
 
-describe('parseQuery — parenthesised grouping (cycle 32)', () => {
+describe('parseQuery - parenthesised grouping (cycle 32)', () => {
   it('(a OR b) AND c distributes the AND over the OR', () => {
     expect(m('(a OR b) AND c', 'a c')).toBe(true);
     expect(m('(a OR b) AND c', 'b c')).toBe(true);
@@ -94,7 +94,7 @@ describe('parseQuery — parenthesised grouping (cycle 32)', () => {
   });
 
   it('grouping changes precedence vs the bare form', () => {
-    // bare: a OR (b AND c)  —  grouped: (a OR b) AND c
+    // bare: a OR (b AND c)  -  grouped: (a OR b) AND c
     expect(m('a OR b AND c', 'a')).toBe(true); // a alone satisfies the OR
     expect(m('(a OR b) AND c', 'a')).toBe(false); // c required
   });

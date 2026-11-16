@@ -26,20 +26,20 @@ import {
 /**
  * SECURITY-CRITICAL: the enforcement point for a remote review's permission
  * policy. For each opened review session the bridge owns a DEDICATED
- * `subscribeEvents(sessionId, { lastEventId: 0 })` subscription — seeded at 0 to
- * force a full ring replay so no early `permission_request` is missed — and, on
+ * `subscribeEvents(sessionId, { lastEventId: 0 })` subscription - seeded at 0 to
+ * force a full ring replay so no early `permission_request` is missed - and, on
  * each frame, either VOTES (auto-approve, one-time only) or ESCALATES (leaves the
  * permission pending for the owner). It NEVER sends a `cancelled` (deny) outcome:
- * a human decides deny. Escalate-by-default — anything we cannot prove safe is
+ * a human decides deny. Escalate-by-default - anything we cannot prove safe is
  * escalated, never approved.
  *
  * Two enforcement layers sit in front of a vote:
  *
- *   1. The classifier (`classifyReviewToolCall`, C.1) — the first filter. It is a
+ *   1. The classifier (`classifyReviewToolCall`, C.1) - the first filter. It is a
  *      pure function keyed on `toolCall.kind` + `rawInput`, string-level path math
  *      only (no fs).
  *
- *   2. Guard 2 (below) — a SECOND gate layered only on `edit` approvals. After the
+ *   2. Guard 2 (below) - a SECOND gate layered only on `edit` approvals. After the
  *      classifier approves an `edit`, the bridge `fs.realpath`-verifies every
  *      target path field actually lands inside the worktree, defeating an in-tree
  *      symlink that points outside (which the string-level classifier cannot see).
@@ -47,16 +47,16 @@ import {
  *      under another name, a `.git` file's `gitdir:`), since writing it is code
  *      execution on the next auto-approved `git` command (#169).
  *
- * GUARD 3 — `kind` INTEGRITY (trust boundary, documented, no code needed):
+ * GUARD 3 - `kind` INTEGRITY (trust boundary, documented, no code needed):
  * The classifier auto-approves `read`/`search` on `toolCall.kind` ALONE. That is
  * sound ONLY because `kind` is assigned by the daemon from each tool's registered
  * `Kind` enum, NOT from the model or the reviewed diff. The `permission_request`
  * frames this bridge consumes originate from the daemon's ACP HTTP bridge
  * (`httpAcpBridge.ts`) over the same authenticated gateway↔daemon boundary as
- * every other daemon read — they are not model-controlled JSON. So a
+ * every other daemon read - they are not model-controlled JSON. So a
  * prompt-injected diff cannot forge a benign `kind` to smuggle a dangerous call
  * past the on-kind-alone shortcut. If a future change ever let untrusted input set
- * `kind`, this assumption — and the read/search shortcut — would break; it holds
+ * `kind`, this assumption - and the read/search shortcut - would break; it holds
  * within the current trust model.
  */
 
@@ -84,7 +84,7 @@ export interface ReviewBridgeDeps {
   /** Called when tool output flows again (unblock). */
   onResume?: (sessionId: string) => void;
   /**
-   * Observability hook for a swallowed error — a per-frame handler throw (e.g.
+   * Observability hook for a swallowed error - a per-frame handler throw (e.g.
    * `respondToSessionPermission` rejecting on a daemon non-2xx) or a mid-stream
    * subscription throw before reconnect. Best-effort; a throwing `onError` is
    * itself ignored. The loop NEVER dies on either error class.
@@ -128,11 +128,11 @@ export class ReviewPermissionBridge {
    * not attached), so it must SELF-HEAL rather than die on the first hiccup:
    *
    *  - Per-frame isolation: a `handlePermission` throw (a vote HTTP rejecting on
-   *    a daemon non-2xx/restart, etc.) is caught PER FRAME and logged — the loop
+   *    a daemon non-2xx/restart, etc.) is caught PER FRAME and logged - the loop
    *    continues, so a failed vote never silences a LATER frame's escalation.
    *  - Reconnect: a mid-stream throw from the subscription iterator itself
    *    (network blip / daemon restart) is caught and, after a bounded backoff,
-   *    re-subscribed — resuming from the last-seen event id so already-processed
+   *    re-subscribed - resuming from the last-seen event id so already-processed
    *    frames are not re-delivered (no duplicate escalation notifications).
    *
    * Both loops terminate ONLY on `signal.aborted` (via `close()`/`closeAll()`) or
@@ -146,7 +146,7 @@ export class ReviewPermissionBridge {
   ): Promise<void> {
     // 1-based event ids; seed 0 forces a FULL ring replay on the first subscribe
     // (closes the poll-latency gap). On reconnect we resume from the last id we
-    // actually processed so we never re-deliver — and never re-notify — a frame.
+    // actually processed so we never re-deliver - and never re-notify - a frame.
     let lastSeenId = 0;
     while (!signal.aborted) {
       try {
@@ -185,7 +185,7 @@ export class ReviewPermissionBridge {
             this.deps.onResume?.(sessionId);
           }
         }
-        // Stream ended cleanly (session over / server closed the SSE). Done — we
+        // Stream ended cleanly (session over / server closed the SSE). Done - we
         // only reconnect on an ERROR, never busy-loop a resubscribe on a clean
         // end.
         return;
@@ -215,7 +215,7 @@ export class ReviewPermissionBridge {
     const toolCall = data.toolCall ?? ({} as ReviewToolCall);
     const decision = classifyReviewToolCall(toolCall, policy);
     if (decision === 'approve') {
-      // GUARD 2 — symlink realpath confinement for `edit` approvals only.
+      // GUARD 2 - symlink realpath confinement for `edit` approvals only.
       // The classifier confined the path at the STRING level (path.resolve, no
       // symlinks). Before honoring an edit approval we additionally realpath the
       // target to defeat an in-tree symlink pointing OUTSIDE the worktree (e.g. a

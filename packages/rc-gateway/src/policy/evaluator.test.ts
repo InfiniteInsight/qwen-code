@@ -278,7 +278,7 @@ rules:
       new Date('2026-06-09T20:00:00Z'),
     );
     // Falls through to default prompt (requireScope 'approve'), NOT the owner
-    // rule — the out-of-window rule does not match at all.
+    // rule - the out-of-window rule does not match at all.
     expect(d.action).toBe('prompt');
     expect(d.ruleId).toBeUndefined();
     expect(d.requireScope).toBe('approve');
@@ -402,7 +402,7 @@ rules:
 
   it('SAFETY: a deferred field with a FALSY value still downgrades (presence, not truthiness)', () => {
     // Regression: `expiresAt: 0` (and bare `maxPerWindow:` → null) are falsy but
-    // PRESENT — they must still force the allow→prompt downgrade. A `||`-based
+    // PRESENT - they must still force the allow→prompt downgrade. A `||`-based
     // truthiness gate would wrongly auto-allow `rm -rf /` here.
     const policy = loadPolicy(`
 rules:

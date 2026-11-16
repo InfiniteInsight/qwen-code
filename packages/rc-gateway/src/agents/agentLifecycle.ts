@@ -14,7 +14,7 @@ import type { AgentRegistry, AgentRecord } from './agentRegistry.js';
 
 /**
  * The notification sink the lifecycle hands frames to. Structurally satisfied
- * by PushNotifier.notify (webpush/notifier.ts) — kept structural so tests can
+ * by PushNotifier.notify (webpush/notifier.ts) - kept structural so tests can
  * pass a collector and so the lifecycle never imports webpush.
  */
 export interface AgentNotifySink {
@@ -26,7 +26,7 @@ export interface AgentNotifySink {
 
 /**
  * Drives agent status transitions off the gateway's OWN event plumbing (the
- * SessionEventPump's onEvent seam — no second daemon connection) and emits
+ * SessionEventPump's onEvent seam - no second daemon connection) and emits
  * the five lifecycle frames (design: "agentLifecycle.ts"):
  *
  *  - `session_died` on the agent's session      → `failed`   + agent_failed
@@ -35,7 +35,7 @@ export interface AgentNotifySink {
  *    (the pump only hands this over when policy did NOT auto-handle the
  *    request, i.e. a human really is needed; see SessionEventPump `onEvent`)
  *  - `session_update` while blocked             → `running`  (no frame; the
- *    spec registers exactly five event types — resumption is visible via
+ *    spec registers exactly five event types - resumption is visible via
  *    GET /rc/agents)
  *
  * Every frame goes to: the parent session's SSE stream (when a parent
@@ -73,11 +73,11 @@ export class AgentLifecycle {
    * the void + catch keeps rejections contained).
    *
    * The OWNER events stream (`/rc/events`) NEVER carries the agent's
-   * spawning-prompt `task` text — only ids/enums/counts. The parent
+   * spawning-prompt `task` text - only ids/enums/counts. The parent
    * session's own stream and the notifier both still receive the full
    * `agent` object (the parent already knows the task it spawned with, and
    * the notifier's `buildPayload` already strips to metadata before any push
-   * leaves the process — see webpush/payload.ts).
+   * leaves the process - see webpush/payload.ts).
    */
   emit(type: AgentLifecycleEventType, record: AgentRecord): void {
     const agent = this.payloadFor(record);

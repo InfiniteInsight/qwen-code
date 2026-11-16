@@ -7,7 +7,7 @@
 /**
  * Pure parsing + rendering for the `qwen-rc usage` / `usage prune` operator CLI
  * (`add-cost-tracking`: "Operator CLI"). The daemon-free CLI glue in cli.ts opens
- * the usage store and calls these — kept pure so flag parsing and the table
+ * the usage store and calls these - kept pure so flag parsing and the table
  * renderer are unit-tested without a store.
  */
 

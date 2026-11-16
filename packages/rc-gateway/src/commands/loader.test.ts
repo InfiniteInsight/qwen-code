@@ -167,7 +167,7 @@ describe('CommandLoader', () => {
   });
 
   // C1: an unreadable root (here a regular file at the user-commands path →
-  // ENOTDIR) must not reject out of load() — that would hang the route in
+  // ENOTDIR) must not reject out of load() - that would hang the route in
   // express 4 (no error middleware). It contributes no commands instead.
   it('returns [] for a root that is a regular file (ENOTDIR), not throwing', async () => {
     const filePath = join(root, 'a-file');

@@ -27,7 +27,7 @@ describe('parseHealthzPort', () => {
       expect(parseHealthzPort(v, 9100)).toBeUndefined();
     }
   });
-  it('a valid 1–65535 port wins; junk falls back', () => {
+  it('a valid 1-65535 port wins; junk falls back', () => {
     expect(parseHealthzPort('9123', 9100)).toBe(9123);
     expect(parseHealthzPort('70000', 9100)).toBe(9100); // out of range → fallback
     expect(parseHealthzPort('abc', 9100)).toBe(9100);
@@ -174,7 +174,7 @@ describe('startMatrixHealthServer (live loopback server)', () => {
       });
     server = await startMatrixHealthServer(0, report);
     const taken = server.port;
-    // A second bind on the same port fails — but resolves to a no-op handle,
+    // A second bind on the same port fails - but resolves to a no-op handle,
     // never throws (a healthz conflict must not take down the bridge).
     const second = await startMatrixHealthServer(taken, report);
     expect(second.port).toBe(0);

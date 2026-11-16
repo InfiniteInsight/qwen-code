@@ -17,7 +17,7 @@
  * SECURITY INVARIANT: no function in this module ever returns a string
  * destined for stdout that contains the code. `displayHint` is the ONLY
  * stdout-facing helper and it carries the path alone. The spec's one
- * exception — displaying the code on an interactive terminal — is the
+ * exception - displaying the code on an interactive terminal - is the
  * CALLER's responsibility, and only via the controlling terminal
  * (`/dev/tty`), never via stdout/stderr.
  *
@@ -53,7 +53,7 @@ export const OWNER_BOOTSTRAP_TTL_MS = 30 * 60 * 1000;
  * an explicit chmod re-asserts 0600 when an earlier code file is being
  * overwritten (e.g. `qwen rc bootstrap-reset`).
  *
- * Returns only the path — never the code — so callers can hand the result
+ * Returns only the path - never the code - so callers can hand the result
  * straight to `displayHint` for stdout.
  */
 export function writeBootstrapCode(

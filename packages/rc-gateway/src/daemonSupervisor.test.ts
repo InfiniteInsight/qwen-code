@@ -149,7 +149,7 @@ describe('daemonSupervisor', () => {
 
   it('fails fast with the child exit reason instead of polling until timeout', async () => {
     // A spawned daemon that dies at startup must surface WHY (its exit reason),
-    // not masquerade as a generic health timeout — the bug that made us
+    // not masquerade as a generic health timeout - the bug that made us
     // misdiagnose a supervisor failure as a "WSL timeout".
     const t0 = Date.now();
     await expect(

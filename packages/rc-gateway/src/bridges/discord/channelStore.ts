@@ -17,7 +17,7 @@ import { dirname } from 'node:path';
  * file fails open to empty).
  *
  * Unlike the Telegram chat store, EVERY id stays a STRING: Discord channel and
- * guild ids are 64-bit snowflakes (17–19 digits) that round past 2^53 if coerced
+ * guild ids are 64-bit snowflakes (17-19 digits) that round past 2^53 if coerced
  * to a number, so this store never calls `Number()`. The on-disk shape is the
  * versioned `{version, channels[]}` form from the design.
  */

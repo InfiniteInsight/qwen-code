@@ -21,7 +21,7 @@
  * wiring reads the cert files and picks http vs https from the returned mode.
  */
 
-/** A refusal to bind — the cli prints `.message` and exits non-zero. */
+/** A refusal to bind - the cli prints `.message` and exits non-zero. */
 export class BindSecurityError extends Error {
   constructor(message: string) {
     super(message);
@@ -30,7 +30,7 @@ export class BindSecurityError extends Error {
 }
 
 export type BindMode =
-  /** Loopback HTTP — the safe default; TLS unnecessary (traffic never leaves host). */
+  /** Loopback HTTP - the safe default; TLS unnecessary (traffic never leaves host). */
   | 'loopback-http'
   /** Native TLS termination in the gateway (cert+key supplied). */
   | 'tls'
@@ -45,12 +45,12 @@ export interface BindSecurity {
   /** Cert/key paths when `mode === 'tls'`. */
   tls?: { certPath: string; keyPath: string };
   /**
-   * Whether a CLIENT must use TLS to reach this gateway — `false` only for the
+   * Whether a CLIENT must use TLS to reach this gateway - `false` only for the
    * loopback-http default. Drives the mDNS `tlsRequired` TXT key: native TLS and a
    * fronting proxy both mean clients connect over TLS.
    *
    * NOTE(mdns): the cleartext-bind-vs-advertised-endpoint mismatch this once
-   * flagged for insecure-proxy mode does not arise — mDNS advertising is SUPPRESSED
+   * flagged for insecure-proxy mode does not arise - mDNS advertising is SUPPRESSED
    * on a non-native-TLS bind (only a `tls` bind advertises; see mdns/advert.ts
    * `mdnsDecision`). If advertising were ever enabled behind a proxy, the
    * advertised endpoint must be the proxy host/port, not this cleartext bind.
@@ -102,8 +102,8 @@ export function resolveBindSecurity(input: BindSecurityInput): BindSecurity {
     );
   }
 
-  // ACME (auto Let's Encrypt) is its own native-TLS story — it obtains the cert
-  // rather than reading files — so it satisfies a non-loopback bind. It's mutually
+  // ACME (auto Let's Encrypt) is its own native-TLS story - it obtains the cert
+  // rather than reading files - so it satisfies a non-loopback bind. It's mutually
   // exclusive with file-supplied TLS and with the insecure-proxy assertion.
   const hasAcme = (input.acmeDomains?.length ?? 0) > 0;
   if (hasAcme && hasTls) {

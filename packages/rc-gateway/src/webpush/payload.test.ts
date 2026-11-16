@@ -80,7 +80,7 @@ describe('buildPayload', () => {
 
   it('ignores the nonexistent toolCall.name field (wire-mismatch regression)', () => {
     // The daemon never sends `toolCall.name`; a frame carrying only it (the old
-    // synthetic test shape) must NOT surface it — it falls back to the generic
+    // synthetic test shape) must NOT surface it - it falls back to the generic
     // label, proving the dead `.name` branch is gone.
     const p = buildPayload(
       {
@@ -326,7 +326,7 @@ describe('agent lifecycle payloads', () => {
     expect(p).not.toBeNull();
     expect(p!.kind).toBe('agent.completed');
     expect(p!.sessionId).toBe('s1');
-    // Metadata only — the task text must NEVER reach a push payload.
+    // Metadata only - the task text must NEVER reach a push payload.
     expect(JSON.stringify(p)).not.toContain('sekrit task text');
     expect(AGENT_EVENT_KINDS['agent_blocked']).toBe('agent.blocked');
     for (const t of [
@@ -607,7 +607,7 @@ describe('turn-end push payloads (#40)', () => {
       summary: 'Reply ready',
       url: '/ui/?session=s1',
     });
-    // Metadata only — a stop reason is never surfaced in the summary.
+    // Metadata only - a stop reason is never surfaced in the summary.
     expect(JSON.stringify(p)).not.toContain('end_turn');
   });
 
@@ -652,8 +652,8 @@ describe('turn-end push payloads (#40)', () => {
 
   it('does NOT map the daemon-prefixed turn events (pump double-push guard)', () => {
     // The pump forwards EVERY daemon event to the notifier. The daemon's
-    // own turn-end events are pending_prompt_completed / turn_error — never
-    // the bare prompt_* types the onTurnEnd hook emits — so these must
+    // own turn-end events are pending_prompt_completed / turn_error - never
+    // the bare prompt_* types the onTurnEnd hook emits - so these must
     // produce no payload, or every turn would push twice.
     for (const type of ['pending_prompt_completed', 'turn_error']) {
       expect(buildPayload({ type, data: {} }, { sessionId: 's1' })).toBeNull();

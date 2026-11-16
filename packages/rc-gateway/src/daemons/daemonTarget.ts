@@ -31,11 +31,11 @@ export interface DaemonTarget {
 }
 
 export interface DaemonTargetOptions {
-  /** `--daemon <name>` — a clients.toml entry name. */
+  /** `--daemon <name>` - a clients.toml entry name. */
   daemonName?: string;
-  /** `--url <u>` — explicit base URL; bypasses the registry for the URL. */
+  /** `--url <u>` - explicit base URL; bypasses the registry for the URL. */
   url?: string;
-  /** `--token <t>` — explicit token; wins over the token store. */
+  /** `--token <t>` - explicit token; wins over the token store. */
   token?: string;
 }
 
@@ -57,7 +57,7 @@ export type DaemonTargetResult =
 
 /**
  * The local daemon default: the launcher's `qwen-rc up` port (8443, native
- * TLS). Overridable via `QWEN_RC_DAEMON_URL` — the same env var `qwen-rc
+ * TLS). Overridable via `QWEN_RC_DAEMON_URL` - the same env var `qwen-rc
  * serve --attach-daemon` reads, so a hand-rolled daemon URL reaches every
  * per-daemon command identically.
  */
@@ -81,7 +81,7 @@ function isValidHttpUrl(u: string): boolean {
  *
  * Errors (ok:false) cover: an unparseable `--url`, and a `--daemon <name>`
  * that matches no entry (the error lists the known names). An EMPTY registry
- * with no explicit url/name is not an error — it resolves to the local
+ * with no explicit url/name is not an error - it resolves to the local
  * default so the single-daemon setup keeps working with zero config.
  */
 export async function resolveDaemonTarget(

@@ -8,13 +8,13 @@
  * In-process bridge resolution (`add-{telegram,discord,matrix}-bridge`). The
  * gateway can run a bridge IN-PROCESS (opt-in via env), distinct from the
  * standalone sidecar, but talking the gateway ONLY over the loopback contract
- * with an operator-minted bridge token — so it stays sidecar-extractable.
+ * with an operator-minted bridge token - so it stays sidecar-extractable.
  *
  * This is the pure resolver: env → the {@link SidecarConfig}s to start (plus the
- * warnings to print) — no fs, network, or `process` access, so the env gating is
+ * warnings to print) - no fs, network, or `process` access, so the env gating is
  * unit-tested. `startBridge` consumes each plan, so the in-process and sidecar
  * paths share ONE construction (no per-runner duplication). `whoami` validation
- * for Matrix is NOT done here (it needs the network) — the caller does it.
+ * for Matrix is NOT done here (it needs the network) - the caller does it.
  *
  * The in-process URL split the sidecar does not have: the gateway is reached over
  * LOOPBACK (`gatewayUrl` = `http://127.0.0.1:<port>`), while deeplinks must be
@@ -44,7 +44,7 @@ export interface InProcessBridgePlan {
 }
 
 export interface InProcessBridgeResolution {
-  /** Bridges whose creds AND bridge token are present — ready to start. */
+  /** Bridges whose creds AND bridge token are present - ready to start. */
   plans: InProcessBridgePlan[];
   /** Human warnings (e.g. creds present but the bridge token is missing). */
   warnings: string[];
@@ -55,7 +55,7 @@ function needsTokenWarning(kind: BridgeKind): string {
   const credsPhrase =
     kind === 'matrix' ? 'homeserver creds set' : 'bot token set';
   return (
-    `${kind} bridge: ${credsPhrase} but QWEN_BRIDGE_TOKEN missing — mint a ` +
+    `${kind} bridge: ${credsPhrase} but QWEN_BRIDGE_TOKEN missing - mint a ` +
     "bridge token (POST /rc/tokens {scopes:['bridge']}) and set " +
     'QWEN_BRIDGE_TOKEN. Bridge NOT started.'
   );
@@ -65,7 +65,7 @@ function needsTokenWarning(kind: BridgeKind): string {
  * Resolve which bridges to start in-process from `env`. A bridge is considered
  * configured when its credentials are present; if the shared `QWEN_BRIDGE_TOKEN`
  * is then missing it yields a warning instead of a plan (never an auto-minted
- * internal token — the bridge MUST use an operator token). Pure; the caller
+ * internal token - the bridge MUST use an operator token). Pure; the caller
  * starts each plan via `startBridge` (and Matrix `whoami`-validates first).
  */
 export function resolveInProcessBridges(
@@ -145,7 +145,7 @@ export function resolveInProcessBridges(
         },
         token,
         deeplinkUrl,
-        // In-process healthz is opt-in (no default) — avoid a surprise bind.
+        // In-process healthz is opt-in (no default) - avoid a surprise bind.
         ...(parseHealthzPort(env['QWEN_BRIDGE_HEALTHZ_PORT'], undefined) !==
         undefined
           ? {

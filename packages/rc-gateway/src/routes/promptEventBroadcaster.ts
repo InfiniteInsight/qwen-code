@@ -9,7 +9,7 @@
  *
  * Used to deliver synthetic events (e.g. `stream_error` with code
  * `prompt_timeout`) to all active `/session/:id/events` subscribers when the
- * gateway itself needs to signal something — without the event originating
+ * gateway itself needs to signal something - without the event originating
  * from the daemon.
  *
  * Mirrors the design of `UsageTickBroadcaster`: listeners register a writer

@@ -11,7 +11,7 @@ import type { AuditRecorder } from '../auditLog.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
 
 /**
- * GET /session/:id/turn-index — relay one page of the daemon's TURN INDEX.
+ * GET /session/:id/turn-index - relay one page of the daemon's TURN INDEX.
  *
  * The transcript route hands back records; this hands back the list those
  * records are indexed by: one entry per navigation turn, with its ordinal, its
@@ -48,7 +48,7 @@ export function createSessionTurnIndexRoute(
 ): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;
-    // Reject a malformed/path-traversal-shaped id before any daemon call —
+    // Reject a malformed/path-traversal-shaped id before any daemon call -
     // mirrors the sibling session routes (events, fork, rewind, export).
     if (!isValidSessionId(sessionId)) {
       res
@@ -88,7 +88,7 @@ export function createSessionTurnIndexRoute(
       });
       res.status(200).json(page);
     } catch (err) {
-      // Three failures, three answers, none of them a laundered 502 — the same
+      // Three failures, three answers, none of them a laundered 502 - the same
       // discipline as the transcript and export routes.
       //
       // The daemon's 400 is a bad paging combination (a `start` with no

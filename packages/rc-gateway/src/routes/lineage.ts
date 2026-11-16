@@ -19,16 +19,16 @@ import { walkLineage } from '../sessions/lineage.js';
 import { readSessionTitle } from '../sessions/sessionList.js';
 
 /**
- * GET /session/:id/lineage — the fork lineage chain of a session, from the
+ * GET /session/:id/lineage - the fork lineage chain of a session, from the
  * session itself up to its root ancestor.
  *
  * OWNER-scoped at the mount (a lineage chain enumerates ancestor session ids; a
  * session-locked share token must never learn sibling/ancestor ids it isn't
  * locked to). Read-only: walks each transcript's first-record
- * `forkedFrom.sessionId` on demand — no daemon call at all, no in-memory
+ * `forkedFrom.sessionId` on demand - no daemon call at all, no in-memory
  * adjacency map, no write path. The transcript lives in the chats dir of the
  * workspace the session ran in: the trusted `resolveWorkspaceCwd()` dir is
- * tried first (a cheap existence stat — the walk re-reads the file anyway),
+ * tried first (a cheap existence stat - the walk re-reads the file anyway),
  * then a bounded project-dir scan (`findSessionChatsDir`) covers sessions of
  * other workspaces. A fork chain always stays in one workspace (fork copies
  * land in the parent's chats dir), so the located dir serves the whole walk.
@@ -50,7 +50,7 @@ export function createLineageRoute(
       }
 
       // The transcript lives in the chats dir of the workspace the session
-      // ran in. Trusted cwd first (cheap stat — the walk re-reads the file
+      // ran in. Trusted cwd first (cheap stat - the walk re-reads the file
       // anyway), then a bounded scan for sessions of other workspaces.
       let chatsDir: string | null = null;
       const trustedCwd = await resolveWorkspaceCwd();
@@ -60,7 +60,7 @@ export function createLineageRoute(
           await stat(join(candidate, `${sessionId}.jsonl`));
           chatsDir = candidate;
         } catch {
-          // not in the trusted workspace — fall through to the scan
+          // not in the trusted workspace - fall through to the scan
         }
       }
       if (!chatsDir) {
@@ -106,14 +106,14 @@ export function createLineageRoute(
       }
 
       // Enrich each node with its human title (bounded tail read, never throws),
-      // so the lineage chain renders names instead of bare ids — same source of
+      // so the lineage chain renders names instead of bare ids - same source of
       // truth as /rc/sessions. Best-effort: a missing title just omits the field.
       for (const node of result.chain) {
         const title = await readSessionTitle(chatsDir, node.sessionId);
         if (title) node.title = title;
       }
 
-      // Privacy: depth + truncated flag only — never the session ids themselves.
+      // Privacy: depth + truncated flag only - never the session ids themselves.
       void audit?.record({
         action: 'session_lineage_read',
         actorTokenId: req.rcClient?.id,

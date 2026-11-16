@@ -13,7 +13,7 @@ import type { WalFrame } from './wal.js';
  *
  * Emitted by the notifier for every event it evaluates, before any send, so
  * observing it is non-intrusive and happens even when the event is dropped.
- * Carries only metadata — NO session content, NO tool args.
+ * Carries only metadata - NO session content, NO tool args.
  */
 export interface RoutingDecisionEvent {
   type: 'routing_decision';
@@ -75,8 +75,8 @@ export type AgentLifecycleEventType =
 /**
  * Payload of an agent lifecycle frame on the OWNER events stream (design:
  * `{ agentId, sessionId, parentSessionId, agentType, status,
- * costMicrocents? }`). `task` is deliberately OPTIONAL and — per the
- * metadata-only invariant this type enforces for `/rc/events` — the owner
+ * costMicrocents? }`). `task` is deliberately OPTIONAL and - per the
+ * metadata-only invariant this type enforces for `/rc/events` - the owner
  * stream never actually sets it; the parent session's own stream (which
  * already knows the task it spawned with) and the notification pipeline
  * carry the full record separately as untyped `data`, outside this
@@ -102,7 +102,7 @@ export type ReviewLifecycleEventType =
 /**
  * Payload of a review lifecycle frame (design: `{ reviewId, sessionId, target,
  * status, reportPath?, summary? }`). On the OWNER events stream, `target`'s
- * `path` branch is reduced to `{ kind: 'path' }` — a `path` target's raw
+ * `path` branch is reduced to `{ kind: 'path' }` - a `path` target's raw
  * filesystem path is caller-supplied and, mirroring
  * `webpush/payload.ts`'s review branch, must never leave the daemon that ran
  * the review (see `sanitizeReviewTarget` in reviewRegistry.ts, used by
@@ -144,7 +144,7 @@ export interface ApprovalModePayload {
  *  - `audit`: a durably-appended audit record (the live security feed; cycle 49).
  *  - `idle_suggestions`: gateway-generated next-step suggestions emitted when a
  *    session's active prompt finishes (proposal `add-idle-suggestions`, slice 2).
- *    `suggestions` is a small list of short imperative strings — NEVER transcript
+ *    `suggestions` is a small list of short imperative strings - NEVER transcript
  *    text, only the model's distilled next-step phrases.
  *    `expiresAt` is an ISO-8601 timestamp after which the client SHOULD dismiss
  *    the suggestions (default TTL: 30 minutes from the firing instant).
@@ -196,7 +196,7 @@ export type OwnerEvent =
   | {
       /**
        * Read-only mirror of a local hook firing (POST /rc/hooks/ingest).
-       * OWNER stream only — hook payloads carry tool arguments. `dropped`
+       * OWNER stream only - hook payloads carry tool arguments. `dropped`
        * surfaces how many frames the ingest rate limiter dropped since the
        * previously mirrored frame.
        */
@@ -223,7 +223,7 @@ export type OwnerEvent =
 export type OwnerEventHandler = (event: OwnerEvent) => void;
 
 /**
- * Hard cap on concurrent owner subscribers — defense-in-depth atop the OWNER
+ * Hard cap on concurrent owner subscribers - defense-in-depth atop the OWNER
  * scope gate so a bug or a misbehaving owner client can't open unbounded streams.
  */
 export const MAX_OWNER_SUBSCRIBERS = 32;

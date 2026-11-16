@@ -100,7 +100,7 @@ export class WorkflowRunRegistry {
    * concurrent/late `POST .../cancel` calls within the drain window (the run
    * only reaches the terminal 'cancelled' status later, once the background
    * finish() runs after in-flight sessions drain) can gate abort()/audit/SSE
-   * on the return value — mirroring agentRegistry.setStatus's CAS pattern.
+   * on the return value - mirroring agentRegistry.setStatus's CAS pattern.
    * A run already 'cancelling' or terminal loses (returns false); the
    * background finish() path is the only place that ever reaches 'cancelled'.
    */

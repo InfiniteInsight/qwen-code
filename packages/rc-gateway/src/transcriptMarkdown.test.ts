@@ -5,7 +5,7 @@
  */
 
 // Assistant text is markdown (#93). These drive the shipped transcript-view.js
-// in jsdom — the real build/patch path, not a copy of the walker — because the
+// in jsdom - the real build/patch path, not a copy of the walker - because the
 // property that matters is that model-authored text never becomes an element it
 // did not ask for, and that lives in the wiring as much as in the parser.
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';

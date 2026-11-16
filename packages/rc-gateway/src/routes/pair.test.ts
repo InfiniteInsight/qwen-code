@@ -68,7 +68,7 @@ async function mount(withCors = true): Promise<{ url: string }> {
 // Basic redemption (regression)
 // ---------------------------------------------------------------------------
 
-describe('POST /rc/pair/redeem — basic', () => {
+describe('POST /rc/pair/redeem - basic', () => {
   it('redeems a valid code and returns id, token, scopes', async () => {
     const { url } = await mount();
     const { code } = pairing.mint([OWNER]);
@@ -120,7 +120,7 @@ describe('POST /rc/pair/redeem — basic', () => {
 // CORS admission at redemption
 // ---------------------------------------------------------------------------
 
-describe('POST /rc/pair/redeem — CORS admission', () => {
+describe('POST /rc/pair/redeem - CORS admission', () => {
   it('admits origin when codeAllowOrigin=true and Sec-Fetch-Site is absent', async () => {
     const { url } = await mount();
     const { code } = pairing.mint([OWNER], { allowOrigin: true });

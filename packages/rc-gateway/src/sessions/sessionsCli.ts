@@ -9,7 +9,7 @@
  * 3.3: "the terminal renders a static tree with unicode box-drawing").
  *
  * The SCAN is not here: the cli.ts glue reuses {@link listSessions} from
- * sessionList.ts — the exact source of truth behind `GET /rc/sessions` — so
+ * sessionList.ts - the exact source of truth behind `GET /rc/sessions` - so
  * the CLI tree and the web UI tree can never drift. Only the argv parsing,
  * the flat-listing → forest fold, and the box-drawing render are pure logic
  * worth isolating (and unit testing).
@@ -45,7 +45,7 @@ export function parseSessionsArgs(argv: string[]): SessionsArgsResult {
     } else if (a.startsWith('--cwd=')) {
       cwd = a.slice('--cwd='.length) || undefined;
     } else {
-      return { ok: false, error: `unknown argument: ${a} — ${USAGE}` };
+      return { ok: false, error: `unknown argument: ${a} - ${USAGE}` };
     }
   }
   return { ok: true, value: { ...(cwd ? { cwd } : {}), json } };
@@ -59,7 +59,7 @@ export interface SessionTreeNode {
 /**
  * Pure: fold a flat listing into a forest. A session whose parent is NOT in
  * the listing (deleted, or beyond the scan cap) is listed as a ROOT with its
- * `parentSessionId` preserved in the item — truncate-don't-fabricate, the
+ * `parentSessionId` preserved in the item - truncate-don't-fabricate, the
  * same rule assembleListing applies to `forks[]`. A self-parent (hand-edited
  * transcript) is a root, never its own child.
  */
@@ -96,7 +96,7 @@ function formatNode(item: SessionListItem): string {
 
 /**
  * Pure: render the forest with unicode box-drawing. Static (no
- * collapse/expand — that is the web client's job per task 3.3). Roots are
+ * collapse/expand - that is the web client's job per task 3.3). Roots are
  * siblings under an implicit workspace top, so every node carries a
  * connector:
  *
@@ -142,7 +142,7 @@ export function sessionsApiPath(cwd?: string): string {
 /**
  * Coerce a `GET /rc/sessions` JSON body into the listing shape the tree
  * renderer wants. The route returns the listSessions result verbatim, but a
- * foreign/older daemon may answer differently — never let a malformed body
+ * foreign/older daemon may answer differently - never let a malformed body
  * crash the renderer (empty listing beats a stack trace).
  */
 export function sessionsFromApiResponse(body: unknown): {

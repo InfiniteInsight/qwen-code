@@ -45,7 +45,7 @@ function permFrame(
   };
 }
 
-describe('ReviewPermissionBridge — baseline vote / escalate', () => {
+describe('ReviewPermissionBridge - baseline vote / escalate', () => {
   it('auto-approves a read call with the allow_once option', async () => {
     const { daemon, votes } = fakeDaemon([
       permFrame('q1', { kind: 'read', rawInput: {} }),
@@ -174,7 +174,7 @@ describe('ReviewPermissionBridge — baseline vote / escalate', () => {
   });
 });
 
-describe('ReviewPermissionBridge — reliability (error isolation + reconnect)', () => {
+describe('ReviewPermissionBridge - reliability (error isolation + reconnect)', () => {
   const votePolicy: ReviewPolicy = {
     autoApprove: true,
     autofix: false,
@@ -185,7 +185,7 @@ describe('ReviewPermissionBridge — reliability (error isolation + reconnect)',
   it('survives a per-frame vote throw: a LATER frame still escalates', async () => {
     // Frame 1 (read) auto-approves → vote, but respondToSessionPermission
     // rejects (routine daemon non-2xx / restart). Frame 2 (edit, autofix off)
-    // must STILL escalate — the loop must not die on the failed vote.
+    // must STILL escalate - the loop must not die on the failed vote.
     const frames = [
       {
         type: 'permission_request',
@@ -305,7 +305,7 @@ describe('ReviewPermissionBridge — reliability (error isolation + reconnect)',
   });
 });
 
-describe('ReviewPermissionBridge — Guard 2 realpath edit confinement', () => {
+describe('ReviewPermissionBridge - Guard 2 realpath edit confinement', () => {
   let root: string;
   let outside: string;
 
@@ -373,7 +373,7 @@ describe('ReviewPermissionBridge — Guard 2 realpath edit confinement', () => {
   it('ESCALATES a DANGLING in-tree symlink whose destination does not exist yet', async () => {
     // The dangerous case: write_file would CREATE the destination outside the
     // tree by following the link. realpath(target) throws ENOENT just like a
-    // genuine new file — only lstat distinguishes them.
+    // genuine new file - only lstat distinguishes them.
     const dest = join(outside, 'authorized_keys'); // deliberately NOT created
     await symlink(dest, join(root, 'evil'));
     const { votes, escalated } = await runEdit({ file_path: 'evil' });

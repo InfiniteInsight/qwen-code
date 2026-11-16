@@ -10,7 +10,7 @@
  *
  * The gateway CANNOT open the terminal itself. It runs headless (a systemd unit
  * with no controlling terminal), and WSL only lets a process create a Win32
- * window when it already sits in the user's interactive session — verified:
+ * window when it already sits in the user's interactive session - verified:
  * `wt`, `cmd /c start notepad` and PowerShell `Start-Process` all fail with
  * "Access is denied" from that context. So the gateway records the request and
  * the Windows-side launcher app (which IS in the interactive session) drains

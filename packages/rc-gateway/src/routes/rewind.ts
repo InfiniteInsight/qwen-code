@@ -28,7 +28,7 @@ import { activeBranch } from './activeBranch.js';
  * The daemon surface this route needs: `rewindSession` plus
  * `getRewindSnapshots`, which the route uses to map the gateway's
  * turn-counted `toTurn` onto the daemon's promptId-keyed rewind target, and
- * `resumeSession` — the pool-ownership ensure: under `DaemonPool` a session
+ * `resumeSession` - the pool-ownership ensure: under `DaemonPool` a session
  * this process never created/resumed is unroutable (session-keyed calls look
  * up an in-memory owner map), so the route resumes the session (an idempotent
  * attach for warm ones, a load for cold ones) in its workspace before the
@@ -54,7 +54,7 @@ export interface RewindRouteDeps {
   /**
    * Owner-event bus: when provided, publishes the `session_rewound` marker
    * as a `session_event` frame (the SAME `OwnerEvent` variant
-   * `session_forked`/`child_forked` already use — no new variant).
+   * `session_forked`/`child_forked` already use - no new variant).
    */
   bus?: OwnerEventBus;
   /** Root directory for WAL files; when provided, seeds the WAL marker. */
@@ -73,11 +73,11 @@ export interface RewindRouteDeps {
 }
 
 /**
- * POST /session/:id/rewind — proxy the daemon's ACP `rewindSession` (via the
+ * POST /session/:id/rewind - proxy the daemon's ACP `rewindSession` (via the
  * SDK) and append a `session_rewound` marker to the session's own WAL.
  *
  * Saga (mirrors routes/fork.ts's rollback discipline):
- *  1. Guard: `queue.acquire(sessionId, 0)` — an immediate (zero-wait) attempt
+ *  1. Guard: `queue.acquire(sessionId, 0)` - an immediate (zero-wait) attempt
  *     at the session's existing prompt FIFO slot. A free slot resolves
  *     synchronously and is HELD for the whole saga (blocking a new prompt
  *     from starting mid-rewind); a busy slot throws `QueueTimeoutError`
@@ -92,14 +92,14 @@ export interface RewindRouteDeps {
  *     both miss, a bounded scan of the runtime base dir's project dirs
  *     (`findSessionChatsDir`) is the last resort. The cwd of the first
  *     candidate that hits is remembered as `workspaceCwd` (a scan hit leaves
- *     it undefined — the scan names the file, not the workspace). No cwd
+ *     it undefined - the scan names the file, not the workspace). No cwd
  *     names the transcript and the scan finds nothing ->
  *     404 `session_transcript_not_found`. `invalid_turn` -> 400;
  *     `rewind_not_applicable` -> 409.
  *  3. Map `toTurn` onto the daemon's promptId-keyed rewind. First, when
  *     `workspaceCwd` is known, `resumeSession(id, { workspaceCwd })` ensures
  *     the session is owned by its workspace daemon (idempotent attach for
- *     warm sessions; the in-band replay payload is discarded — the client's
+ *     warm sessions; the in-band replay payload is discarded - the client's
  *     SSE cursor belongs to the watch flow). Pool-full ->
  *     503 `workspace_pool_full`; the daemon reporting the session unknown ->
  *     404 `session_not_found`; any other ensure failure -> 502
@@ -114,7 +114,7 @@ export interface RewindRouteDeps {
  *     409 `rewind_not_applicable`. The daemon's own `409` (session_busy) is
  *     surfaced verbatim as 409; every other failure (unreachable, 4xx/5xx,
  *     network) maps to 502 `daemon_unavailable`. On ANY failure: no WAL
- *     marker, no audit — nothing half-applied.
+ *     marker, no audit - nothing half-applied.
  *     A fetch TIMEOUT on `rewindSession` is the exception: the daemon cannot
  *     cancel a dispatched rewind, so the outcome is unknown. The route polls
  *     `getRewindSnapshots` for up to `reconcileMs`; once the target snapshot is
@@ -125,7 +125,7 @@ export interface RewindRouteDeps {
  *     `(wal.latestId() ?? 0) + 1` (unlike fork, rewind has no caller-supplied
  *     WAL coordinate to derive an id from, so it uses the WAL's own next
  *     sequence number). A synchronous append failure is retried once; if the
- *     retry also fails, respond 500 `rewind_marker_failed` — the daemon has
+ *     retry also fails, respond 500 `rewind_marker_failed` - the daemon has
  *     ALREADY rewound at this point, so the gateway/daemon views diverge; this
  *     is logged loudly and NO audit row is written (marker-absent state is the
  *     consistent one: never a marker without an audit or an audit without a
@@ -345,7 +345,7 @@ export function createRewindRoute(
       // 3. Map `toTurn` onto the daemon's promptId-keyed rewind and proxy
       //    it. The daemon's snapshot `turnIndex` counts the same user turns
       //    the resolver does, so the snapshot with `turnIndex === toTurn`
-      //    is the checkpoint taken when turn toTurn+1 was submitted — the
+      //    is the checkpoint taken when turn toTurn+1 was submitted - the
       //    state after `toTurn` turns completed. The TIP
       //    (`toTurn === addressableTurnCount`) has no snapshot: a rewind to
       //    the tip truncates nothing, so the daemon is NOT called and only
@@ -366,7 +366,7 @@ export function createRewindRoute(
           //     process never created/resumed is unroutable (the owner map is
           //     in-memory); `resumeSession` is an idempotent attach for warm
           //     sessions and loads cold ones. The in-band replay payload is
-          //     intentionally discarded — the client's SSE cursor is owned by
+          //     intentionally discarded - the client's SSE cursor is owned by
           //     the watch flow, not this route. Skipped when workspaceCwd is
           //     unknown (scan hit): an unroutable session then surfaces as
           //     the 502 below rather than a guessed workspace.
@@ -465,7 +465,7 @@ export function createRewindRoute(
 
       const rewoundAt = now().toISOString();
       // Owner-scope: the actor is derived from the AUTHENTICATED client, never
-      // from the request body — a non-owner can never spoof this.
+      // from the request body - a non-owner can never spoof this.
       const rewoundByTokenId = req.rcClient?.id;
       const markerData = {
         toTurn: targetTurnIndex,
@@ -495,7 +495,7 @@ export function createRewindRoute(
           appendMarkerWithRetry(wal, markerId, markerData);
         } catch (err) {
           safeCloseWal(wal, sessionId, markerId);
-          // The daemon has ALREADY rewound — the gateway WAL now diverges from
+          // The daemon has ALREADY rewound - the gateway WAL now diverges from
           // the daemon's view. Log loudly so an operator can reconcile.
           // eslint-disable-next-line no-console
           console.error(
@@ -513,14 +513,14 @@ export function createRewindRoute(
         // The marker bytes are now DURABLE (writeSync succeeded). From here the
         // rewind is COMMITTED: a subsequent close() failure (e.g. a deferred
         // writeback EIO on NFS) must NOT abort the post-commit steps. Swallow
-        // and log it — never let it skip audit / bus.publish / the 202. A
+        // and log it - never let it skip audit / bus.publish / the 202. A
         // marker on disk without an audit row is the exact inconsistency the
         // saga must never produce.
         safeCloseWal(wal, sessionId, markerId);
       }
 
       // 5. Publish the marker on the owner bus, reusing the existing
-      //    session_event variant — no new OwnerEvent type for rewind. Not
+      //    session_event variant - no new OwnerEvent type for rewind. Not
       //    nested under `if (walDir)`, mirroring fork.ts's `if (bus)`.
       if (bus) {
         bus.publish({
@@ -612,7 +612,7 @@ function appendMarkerWithRetry(
 /** Same classification routes/sessionResume.ts uses for the resume call: a
  * 404 status (the daemon's `session_not_found`) or a `UnknownSessionError`
  * (thrown by `DaemonPool` for a session id it has no record of) both mean
- * the session is unknown to the daemon — distinct from transport death. */
+ * the session is unknown to the daemon - distinct from transport death. */
 function isSessionNotFoundError(err: unknown): boolean {
   if (err instanceof UnknownSessionError) return true;
   const status = (err as { status?: unknown } | undefined)?.status;

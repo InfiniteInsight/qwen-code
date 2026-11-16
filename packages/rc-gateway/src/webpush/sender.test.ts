@@ -97,7 +97,7 @@ describe('PushSender', () => {
     const sender = new PushSender(vapid, store, audit, { transport, ...FAST });
     await sender.send(record, PAYLOAD);
     // Auth/config error (e.g. VAPID misconfig) must NOT wipe the sub and must
-    // NOT retry — a single misconfig would otherwise clear the whole store.
+    // NOT retry - a single misconfig would otherwise clear the whole store.
     expect(calls).toBe(1);
     expect(store.get(record.id)).toBeDefined();
     const failed = audit.calls.filter((c) => c.action === 'push_send_failed');

@@ -9,7 +9,7 @@
  * {@link SidecarConfig} + a bridge-scope token, over the loopback/daemon HTTP+SSE
  * contract. BOTH the standalone sidecar entrypoint and the in-process `cli.ts`
  * path go through here (cli.ts resolves which bridges to start via the unit-tested
- * `resolveInProcessBridges`, then hands each plan to `startBridge`) — the runner
+ * `resolveInProcessBridges`, then hands each plan to `startBridge`) - the runner
  * only ever reaches the gateway through the injected {@link BridgeClient} (bearer
  * token), so the same code runs in-process or out-of-process by changing only
  * `gatewayUrl` (transport) and `deeplinkUrl`.
@@ -57,7 +57,7 @@ export interface StartBridgeOptions {
    * User-reachable base for deeplinks. Defaults to `cfg.gatewayUrl` (the sidecar
    * case, where transport and deeplink collapse). In-process the transport is
    * loopback (`cfg.gatewayUrl`) but deeplinks must be reachable, so the caller
-   * passes `QWEN_DAEMON_URL || loopback` here — distinct from the transport.
+   * passes `QWEN_DAEMON_URL || loopback` here - distinct from the transport.
    */
   deeplinkUrl?: string;
   /**
@@ -70,7 +70,7 @@ export interface StartBridgeOptions {
   createCryptoAdapter?: typeof createMatrixCryptoAdapter;
 }
 
-/** A started bridge — call `stop()` to abort its loops. */
+/** A started bridge - call `stop()` to abort its loops. */
 export interface StartedBridge {
   stop(): void;
 }
@@ -95,7 +95,7 @@ function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
  * Construct the runner for `cfg.kind`, start its loops, and return a handle that
  * aborts them. The caller owns process lifecycle (signals, exit). For Matrix the
  * caller MUST have already validated `whoami` against `cfg.userId` (the spec's
- * MXID-mismatch fail-fast) — this only wires the validated identity in.
+ * MXID-mismatch fail-fast) - this only wires the validated identity in.
  */
 export async function startBridge(
   cfg: SidecarConfig,
@@ -119,7 +119,7 @@ export async function startBridge(
 
   // Launch a runner's loops without letting a boot-time rejection escape as an
   // UNHANDLED rejection. A runner's start() awaits registerSelf(), which THROWS
-  // when the gateway is unreachable (the BridgeClient propagates fetch errors) —
+  // when the gateway is unreachable (the BridgeClient propagates fetch errors) -
   // and these are launched fire-and-forget, so an unguarded throw would crash the
   // host process (the gateway itself, for an in-process bridge). In-process the
   // gateway is loopback (never unreachable), so this only bites a sidecar whose
@@ -130,7 +130,7 @@ export async function startBridge(
       log?.(
         `${cfg.kind} bridge: start failed (${
           (err as Error).message ?? err
-        }) — not started`,
+        }) - not started`,
       );
     });
   };
@@ -172,7 +172,7 @@ export async function startBridge(
     return { stop: () => abort.abort() };
   }
 
-  // matrix — whoami already validated by the caller.
+  // matrix - whoami already validated by the caller.
   const mxRest = new MatrixRestApi({
     homeserverUrl: cfg.homeserverUrl,
     accessToken: cfg.accessToken,
@@ -189,11 +189,11 @@ export async function startBridge(
   // E2EE (opt-in, OFF by default). When the crypto adapter is built it becomes
   // the SOLE /sync owner (a second sync on the same device would race it for the
   // to-device megolm keys) AND the outbound transport (the SDK encrypts iff the
-  // room is encrypted — no plaintext into an encrypted room). setupMatrixCrypto
+  // room is encrypted - no plaintext into an encrypted room). setupMatrixCrypto
   // degrades any construction failure to null, so the plain bridge always boots.
   //
   // The adapter captures its callbacks at construction, but they must dispatch
-  // into the runner built below — so they route through this sink, whose targets
+  // into the runner built below - so they route through this sink, whose targets
   // are set once the runner exists (callbacks only fire after adapter.start()).
   const sink: {
     onMessage: (m: DecryptedMatrixMessage) => void | Promise<void>;
@@ -244,7 +244,7 @@ export async function startBridge(
               try {
                 await adapter.start();
                 // The SDK owns /sync from here; reflect "reachable at start"
-                // (it hides later reconnects from the runner — see health.ts).
+                // (it hides later reconnects from the runner - see health.ts).
                 if (health) health.homeserverReachable = true;
                 return;
               } catch (err) {
@@ -273,7 +273,7 @@ export async function startBridge(
   launch(runner);
 
   // Start the loopback /healthz server (when configured); close it on shutdown.
-  // Never throws — a bind failure degrades to a no-op handle.
+  // Never throws - a bind failure degrades to a no-op handle.
   let healthServer: MatrixHealthServer | undefined;
   if (health && opts.healthzPort != null) {
     healthServer = await startMatrixHealthServer(

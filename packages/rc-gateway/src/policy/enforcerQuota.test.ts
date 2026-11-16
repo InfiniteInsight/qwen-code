@@ -42,7 +42,7 @@ function fakeDaemon(voteOk: boolean): {
 /**
  * REAL permission_request data (the daemon's ACP ToolCall verbatim): `{
  * toolCallId, title, kind, rawInput }`. The old synthetic `{ name, input }`
- * shape hid the extraction bug that Task 7 fixes — never reintroduce it here.
+ * shape hid the extraction bug that Task 7 fixes - never reintroduce it here.
  */
 function permEvent(
   kind: string,
@@ -193,7 +193,7 @@ describe('PolicyEnforcer + quota store (cycle 43 flip)', () => {
 /**
  * A daemon whose `respondToSessionPermission` returns a Promise that only
  * settles when the test explicitly resolves it (via the returned
- * `resolvers` array, in call order) — lets a test hold two concurrent votes
+ * `resolvers` array, in call order) - lets a test hold two concurrent votes
  * open simultaneously with no timers/sleeps, so ordering is deterministic.
  */
 function controllableDaemon(): {
@@ -244,16 +244,16 @@ describe('PolicyEnforcer + quota store: concurrent cross-session race (check-the
     const p2 = enf.handlePermission('s2', permEvent('execute', 'r2'));
 
     // THE RACE, pinned: current (buggy) code lets BOTH calls read the quota
-    // as 'room' before either consumes, so both reach the daemon — votes
+    // as 'room' before either consumes, so both reach the daemon - votes
     // would be length 2 here. The fix closes the window by committing
     // (reserving) the slot synchronously the instant a decision is 'allow',
-    // before the vote's `await` — so the second session's OWN evaluate()
+    // before the vote's `await` - so the second session's OWN evaluate()
     // check sees the slot already taken and never calls the daemon at all.
     // This assertion is therefore a second, sharper RED signal (RED: 2)
     // that also pins the fixed shape (GREEN: 1).
     expect(votes).toHaveLength(1);
 
-    // Resolve whatever votes were actually cast (1 fixed / 2 unfixed) — both
+    // Resolve whatever votes were actually cast (1 fixed / 2 unfixed) - both
     // as a successful vote, the worst case for the race: if a check-then-
     // consume gap still existed, both would now consume, exceeding count:1.
     for (const resolve of resolvers) resolve(true);
@@ -281,7 +281,7 @@ describe('PolicyEnforcer + quota store: concurrent cross-session race (check-the
     });
 
     // The loser's audit record: never voted, fell through to the policy
-    // default (prompt) — proving it wasn't silently dropped, just correctly
+    // default (prompt) - proving it wasn't silently dropped, just correctly
     // turned away by its own quota check.
     const loserRecord = entries.find(
       (e) =>
@@ -315,7 +315,7 @@ describe('PolicyEnforcer + quota store: concurrent cross-session race (check-the
       () => NOW,
     );
 
-    // First call: the vote throws — must fall through, and must NOT leave the
+    // First call: the vote throws - must fall through, and must NOT leave the
     // reserved slot stuck (unusable forever).
     expect(await enf.handlePermission('s1', permEvent('execute', 'r1'))).toBe(
       false,

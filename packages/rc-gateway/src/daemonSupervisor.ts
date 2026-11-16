@@ -17,11 +17,11 @@ export interface SpawnedDaemon {
    */
   kill: (signal?: NodeJS.Signals) => void;
   /**
-   * Optional: settles (resolves — never rejects, to avoid stray unhandled
+   * Optional: settles (resolves - never rejects, to avoid stray unhandled
    * rejections) when the child terminates, carrying a human-readable reason.
    * `startDaemon` races this against the health poll so a daemon that crashes
    * at startup fails fast with the REAL cause (`spawn ENOENT`, `exited code 1:
-   * <stderr>`) instead of a generic "did not become healthy" timeout — the gap
+   * <stderr>`) instead of a generic "did not become healthy" timeout - the gap
    * that made a supervisor crash look like a "WSL timeout".
    */
   whenExited?: Promise<DaemonExit>;
@@ -56,7 +56,7 @@ export interface StartDaemonOptions {
    * Attach to an ALREADY-RUNNING daemon instead of spawning one (the handoff
    * Phase-1 path: a terminal session's `qwen serve` that the gateway shares, so
    * mobile clients see the SAME sessions). When set, no process is spawned and
-   * `stop()` is a NO-OP — the gateway never kills a daemon it did not start.
+   * `stop()` is a NO-OP - the gateway never kills a daemon it did not start.
    * `url` is the daemon's base URL; `token` its `QWEN_SERVER_TOKEN`.
    */
   attach?: { url: string; token: string };
@@ -81,9 +81,9 @@ export interface DaemonHandle {
   /** True when attached to an externally-managed daemon (`stop()` is a no-op). */
   attached: boolean;
   /**
-   * Settles (resolves — never rejects) when the spawned daemon process
+   * Settles (resolves - never rejects) when the spawned daemon process
    * terminates, carrying code/signal (add-mid-turn-recovery: the pool wires
-   * this into its death detection). Undefined in attach mode — the gateway
+   * this into its death detection). Undefined in attach mode - the gateway
    * does not own the lifecycle of a daemon it did not start.
    */
   whenExited?: Promise<DaemonExit>;
@@ -95,7 +95,7 @@ export interface DaemonHandle {
   /**
    * The daemon's `QWEN_SERVER_TOKEN`. Undefined when the daemon was reached
    * without one (attach mode against a tokenless daemon) or an injected
-   * spawner omitted it — callers that must authenticate a new client treat
+   * spawner omitted it - callers that must authenticate a new client treat
    * that as unavailable rather than guessing.
    */
   token: string | undefined;
@@ -104,7 +104,7 @@ export interface DaemonHandle {
 /**
  * Build the argv for `qwen serve`. Extracted as a pure function so the exact
  * flag names (which `qwen serve` validates with yargs `.strict()`) are unit
- * tested — a wrong flag would otherwise only fail at real-process spawn time,
+ * tested - a wrong flag would otherwise only fail at real-process spawn time,
  * which no hermetic test exercises.
  */
 export function buildServeArgs(port: number, workspaceCwd?: string): string[] {
@@ -165,10 +165,10 @@ function defaultSpawner(
   //
   // `detached: true` puts the child in its OWN process group so we can reap the
   // whole subtree with `process.kill(-pid, …)`. This is essential because the
-  // `qwen` entry (`cli-entry.js`) `spawnSync`s the real `cli.js` — the daemon is
+  // `qwen` entry (`cli-entry.js`) `spawnSync`s the real `cli.js` - the daemon is
   // a GRANDCHILD. Signalling only the tracked child (the shim) orphans the
   // daemon, which reparents to init and survives. Group-kill reaches both. We do
-  // NOT `unref()` — we keep tracking the child.
+  // NOT `unref()` - we keep tracking the child.
   const spawnOpts: SpawnOptions = {
     env: buildDaemonEnv(process.env, token, maxAttachmentBytes),
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -192,7 +192,7 @@ function defaultSpawner(
         process.kill(-child.pid, signal);
         return;
       } catch {
-        /* group gone or unsupported — fall through */
+        /* group gone or unsupported - fall through */
       }
     }
     try {
@@ -295,7 +295,7 @@ export async function startDaemon(
   let exitSignal: Promise<'exited'> | undefined;
   // Hoisted so the returned handle can expose `whenExited` (add-mid-turn-
   // recovery: the pool wires the child's exit into death detection).
-  // Undefined in attach mode — no owned process.
+  // Undefined in attach mode - no owned process.
   let spawned: SpawnedDaemon | undefined;
   if (opts.attach) {
     daemon = new DaemonClient({

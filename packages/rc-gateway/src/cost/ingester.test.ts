@@ -82,7 +82,7 @@ describe('extractUsage', () => {
   });
 
   it('ignores a usage block on a non-agent_message_chunk frame (no double-count)', () => {
-    // A `result`-style frame also carrying usage must NOT be priced — only the
+    // A `result`-style frame also carrying usage must NOT be priced - only the
     // agent_message_chunk locus is, so one turn is never counted twice.
     const resultFrame = {
       sessionId: 's1',

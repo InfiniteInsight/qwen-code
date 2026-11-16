@@ -7,7 +7,7 @@
 /**
  * How richly the chat service renders markdown (`add-bridge-protocol`): `full`
  * (e.g. Discord), `limited` (a constrained dialect like Telegram MarkdownV2), or
- * `none` (plain text — e.g. the Matrix bridge sends bare `m.text` with no
+ * `none` (plain text - e.g. the Matrix bridge sends bare `m.text` with no
  * `formatted_body`, so markdown is shown literally). Widened from a boolean so
  * the owner's bridge list reflects the real rendering fidelity.
  */
@@ -44,7 +44,7 @@ export interface BridgeRegistration extends BridgeCapabilities {
 
 /**
  * In-memory registry of live bridges (`add-bridge-protocol`). Registration is
- * advisory presence/capability metadata — it grants nothing — so it lives in
+ * advisory presence/capability metadata - it grants nothing - so it lives in
  * memory: a gateway restart drops it and each bridge re-registers on reconnect
  * (mirrors WorkingDeviceTracker / IdleSessionToggles). Idempotent on the bridge's
  * stable `id`. Every method is total (no I/O, never throws).
@@ -52,7 +52,7 @@ export interface BridgeRegistration extends BridgeCapabilities {
 export class BridgeRegistry {
   private readonly byId = new Map<string, BridgeRegistration>();
 
-  /** Upsert a registration (register OR heartbeat — same call, idempotent). */
+  /** Upsert a registration (register OR heartbeat - same call, idempotent). */
   register(reg: BridgeRegistration): void {
     this.byId.set(reg.id, reg);
   }
@@ -94,7 +94,7 @@ export class BridgeRegistry {
   /**
    * Remove every bridge whose last register/heartbeat is older than `staleMs`
    * before `now` (i.e. it missed enough heartbeats). Returns the removed ids so
-   * the caller can audit each `bridge_stale_deregistered`. Pure bookkeeping — no
+   * the caller can audit each `bridge_stale_deregistered`. Pure bookkeeping - no
    * I/O, never throws.
    */
   pruneStale(now: number, staleMs: number): string[] {

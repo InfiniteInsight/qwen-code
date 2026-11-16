@@ -11,12 +11,12 @@
  * `onChange` hook so a live cert swap (Slice 4 SNICallback) takes effect with no
  * restart.
  *
- * **Renewal scheduling — the load-bearing detail.** Node's `setTimeout` delay is a
+ * **Renewal scheduling - the load-bearing detail.** Node's `setTimeout` delay is a
  * 32-bit int (~24.8 days max); a larger delay silently clamps to ~1ms and fires
- * almost immediately. A fresh 90-day cert renews in ~60 days ≈ 5.2e9 ms — 2.4× the
- * cap — so arming one long timer would RE-ISSUE on every boot and trip Let's
+ * almost immediately. A fresh 90-day cert renews in ~60 days ≈ 5.2e9 ms - 2.4× the
+ * cap - so arming one long timer would RE-ISSUE on every boot and trip Let's
  * Encrypt's duplicate-cert limit (a week-long lockout). Instead we **cap each sleep
- * at `maxTimerMs` (default 6h) and re-check on wake** — a poll loop, never one
+ * at `maxTimerMs` (default 6h) and re-check on wake** - a poll loop, never one
  * multi-week timer.
  *
  * **Fail-safe.** A renewal failure with a still-valid current cert is non-fatal:
@@ -157,7 +157,7 @@ export class AcmeManager {
         if (stored) {
           this.log(
             `acme: initial renewal failed; serving the stored cert ` +
-              `(notAfter=${stored.meta.notAfter}) — ${msg}`,
+              `(notAfter=${stored.meta.notAfter}) - ${msg}`,
           );
           this.current = stored;
         } else {
@@ -312,7 +312,7 @@ export class AcmeManager {
     } catch (err) {
       this.log(
         `acme: renewal failed, keeping current cert ` +
-          `(notAfter=${this.current.meta.notAfter}); retrying — ${errMsg(err)}`,
+          `(notAfter=${this.current.meta.notAfter}); retrying - ${errMsg(err)}`,
       );
       this.scheduleNext(this.nextBackoff());
     }

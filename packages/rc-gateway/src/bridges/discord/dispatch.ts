@@ -13,9 +13,9 @@ import { isSubActorBan, type BanCacheLike } from '../banCache.js';
 
 /**
  * Pure inbound dispatch for the Discord bridge (`add-discord-bridge`): given a
- * NORMALIZED Discord event (a chat message, a slash command, or a button click —
+ * NORMALIZED Discord event (a chat message, a slash command, or a button click -
  * the shapes the future gateway WebSocket loop will produce), drive the gateway
- * over the loopback contract. No discord.js, no live socket — the handlers take
+ * over the loopback contract. No discord.js, no live socket - the handlers take
  * injected deps so the full prompt/vote/ban/back-pressure logic is unit-testable
  * without a bot token.
  *
@@ -23,7 +23,7 @@ import { isSubActorBan, type BanCacheLike } from '../banCache.js';
  * cache mirrors the gateway's 403 so a banned user is dropped without re-hitting.
  *
  * Binding: `/qwen attach <token>` REDEEMS an operator-issued one-time invite via
- * `POST /rc/bridges/:id/invite/redeem` (the spec's bind path) — the SOLE way a
+ * `POST /rc/bridges/:id/invite/redeem` (the spec's bind path) - the SOLE way a
  * channel binds. A guild member never names a session id directly; the operator
  * decides every channel→session binding.
  */
@@ -74,7 +74,7 @@ export interface DiscordDispatchDeps {
   /** Local ban cache (sub-actor ids): mirrors gateway `sub_actor_banned` 403s. */
   bans: BanCacheLike;
   /**
-   * Called when a NEW inbound prompt is accepted for a session — a turn boundary
+   * Called when a NEW inbound prompt is accepted for a session - a turn boundary
    * (spec: "the next inbound user prompt"). The runner uses it to end the prior
    * turn so its stream thread isn't reused. Optional (pure-dispatch tests omit).
    */
@@ -99,7 +99,7 @@ export interface NormalizedSlashCommand {
   /** Invoking member's user snowflake (string). */
   userId: string;
   name: 'attach' | 'detach' | 'status';
-  /** The string arg for `/qwen attach` — an operator-issued invite token. */
+  /** The string arg for `/qwen attach` - an operator-issued invite token. */
   arg?: string;
 }
 
@@ -140,11 +140,11 @@ export async function handleMessage(
   if (r.status === 429) {
     const secs = r.retryAfterSec ?? 'a few';
     // A MESSAGE_CREATE has no interaction token, so an ephemeral reply is not
-    // possible — post a plain channel notice instead (Discord ephemeral requires
+    // possible - post a plain channel notice instead (Discord ephemeral requires
     // an interaction; this is the honest implementable behavior).
     await deps.rest.createMessage(
       msg.channelId,
-      `Slow down — try again in ${secs} seconds.`,
+      `Slow down - try again in ${secs} seconds.`,
     );
     return;
   }
@@ -172,7 +172,7 @@ export async function handleSlashCommand(
       return;
     }
     // Redeem the operator's one-time invite. On failure, relay the gateway's
-    // error text and persist NOTHING — a member can't bind by guessing.
+    // error text and persist NOTHING - a member can't bind by guessing.
     const redeemed = await deps.bridge.redeemInvite(deps.bridgeId, token);
     if (!redeemed.ok || !redeemed.sessionId) {
       await reply(deps, cmd, inviteError(redeemed));
@@ -214,7 +214,7 @@ export async function handleSlashCommand(
  * reply edited with the outcome (or the daemon error). A 403 caches the ban.
  *
  * Discord interaction tokens expire after 15 minutes. If `editInteractionReply`
- * fails (4xx — the token is expired), we fall back to posting a regular channel
+ * fails (4xx - the token is expired), we fall back to posting a regular channel
  * message via the bot token mentioning the voter, so the acknowledgement is
  * never silently lost.
  */
@@ -257,7 +257,7 @@ export async function handleComponent(
 }
 
 /**
- * Edit the deferred interaction reply with `content`. If that fails (4xx —
+ * Edit the deferred interaction reply with `content`. If that fails (4xx -
  * the interaction token is expired, which happens when >15 minutes have passed
  * since the permission_request was rendered), fall back to a regular channel
  * message via the bot token, mentioning the voter by snowflake so they still
@@ -273,7 +273,7 @@ async function replyOrFallback(
     content,
   );
   if (!r.ok) {
-    // Interaction token is expired (or otherwise unusable) — fall back to a
+    // Interaction token is expired (or otherwise unusable) - fall back to a
     // plain channel message mentioning the voter so the outcome is not lost.
     await deps.rest.createMessage(
       comp.channelId,

@@ -357,7 +357,7 @@ describe('POST /session/:id/supported-commands/:name', () => {
     expect(((await res.json()) as { code: string }).code).toBe(
       'prompt_timeout',
     );
-    // The command WAS invoked, so it is audited — as timed out, with no
+    // The command WAS invoked, so it is audited - as timed out, with no
     // stopReason and never the args.
     expect(audit.entries).toHaveLength(1);
     expect(audit.entries[0]!.detail).toEqual({ name: 'diff', timedOut: true });

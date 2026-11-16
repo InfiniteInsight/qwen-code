@@ -121,7 +121,7 @@ function startTurnCollector(
 
 /**
  * Gateway spawner (design: "SessionSpawner"). Each workflow agent IS a real
- * daemon session — observable, cost-tracked, searchable — tagged with the
+ * daemon session - observable, cost-tracked, searchable - tagged with the
  * workflow's runId on its AgentRecord. On abort (workflow cancel) the session
  * is ended.
  */

@@ -214,7 +214,7 @@ describe('AgentLifecycle', () => {
     });
 
     // The parent session's own stream already knows the task it spawned with
-    // (it's the parent's own prompt content) — that surface is UNCHANGED.
+    // (it's the parent's own prompt content) - that surface is UNCHANGED.
     const parentFrame = parentSeen.find((e) => e.type === 'agent_failed');
     expect(JSON.stringify(parentFrame)).toContain('SECRET_SPAWN_PROMPT_MARKER');
   });

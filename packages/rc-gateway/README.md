@@ -6,8 +6,8 @@ A self-hosted sidecar reverse-proxy that adds remote control to `qwen serve`.
 
 `rc-gateway` supervises an unmodified `qwen serve` Stage 1 daemon and sits in
 front of it as the sole externally-bindable surface. It lets you start a
-qwen-code coding session on a workstation and control it from any device —
-phone, laptop, browser — without depending on a vendor relay.
+qwen-code coding session on a workstation and control it from any device -
+phone, laptop, browser - without depending on a vendor relay.
 
 The gateway owns everything a public-facing endpoint needs that the daemon
 itself does not: TLS termination and certificate management, bind-address
@@ -24,12 +24,12 @@ loopback exactly as it would in local-only use.
 - The gateway claims the bare `/session/:id/*`, `/capabilities`, and
   `/workspace/*` namespace and proxies matching requests to the daemon.
 - Every remote-control feature lives under `/rc/*`, entirely on the gateway
-  side — the daemon is never modified and is not aware the gateway exists.
+  side - the daemon is never modified and is not aware the gateway exists.
 - The daemon binds to loopback only; the gateway is the one process allowed
   to bind a public address, and it validates that bind against an explicit
   bind-security policy (see `docs/bind-security.md`).
-- State that must survive a restart — auth tokens, pending events, the audit
-  log — is kept in a durable, append-only write-ahead log (WAL) with replay
+- State that must survive a restart - auth tokens, pending events, the audit
+  log - is kept in a durable, append-only write-ahead log (WAL) with replay
   and bounded retention, so the gateway can recover cleanly after a crash or
   redeploy without losing in-flight notifications.
 
@@ -46,35 +46,35 @@ client (phone/laptop/browser)
 
 ## Features
 
-- **Authentication** — Argon2id-hashed tokens with a `qwk_` prefix, a 180-day
+- **Authentication** - Argon2id-hashed tokens with a `qwk_` prefix, a 180-day
   maximum age, and sliding renewal on use.
-- **Owner bootstrap** — one-time pairing codes issued on first `serve`,
+- **Owner bootstrap** - one-time pairing codes issued on first `serve`,
   written to a 0600-permission file for local retrieval.
-- **TLS** — automatic certificates via ACME (Let's Encrypt) or a manually
+- **TLS** - automatic certificates via ACME (Let's Encrypt) or a manually
   supplied certificate/key pair.
-- **CORS** — an allowlist derived from device pairing, gated by
+- **CORS** - an allowlist derived from device pairing, gated by
   `Sec-Fetch-Site` to resist cross-origin abuse.
-- **Audit log** — SHA-256 hash-chained entries (each record links to the
+- **Audit log** - SHA-256 hash-chained entries (each record links to the
   previous via `prevHash`) with daily rotation, verifiable with
   `qwen-rc audit verify`.
-- **Durable event WAL** — bounded retention with replay and
+- **Durable event WAL** - bounded retention with replay and
   truncation-recovery so notification/event delivery survives restarts.
-- **Chat bridges** — Telegram, Discord, and Matrix (with E2EE), each
+- **Chat bridges** - Telegram, Discord, and Matrix (with E2EE), each
   supporting sub-actor identity and cardinality caps to prevent runaway fan-out.
-- **Push delivery** — Web Push (VAPID) for browsers and native push (APNs)
+- **Push delivery** - Web Push (VAPID) for browsers and native push (APNs)
   for mobile shells.
-- **Policy engine** — YAML-defined rules to auto-approve or auto-deny tool
+- **Policy engine** - YAML-defined rules to auto-approve or auto-deny tool
   calls, with `qwen-rc policy lint` / `policy explain` for authoring and review.
-- **Notification routing** — per-subscription routing with quiet hours.
-- **Cost tracking** — per-session usage attribution in integer microcents.
-- **Cross-session search** — FTS5 full-text search with highlight offsets
+- **Notification routing** - per-subscription routing with quiet hours.
+- **Cost tracking** - per-session usage attribution in integer microcents.
+- **Cross-session search** - FTS5 full-text search with highlight offsets
   and session-lineage filtering.
-- **Session forking** — fork a session with configurable transcript modes.
-- **Sharing and convenience** — link sharing, custom slash commands, and
+- **Session forking** - fork a session with configurable transcript modes.
+- **Sharing and convenience** - link sharing, custom slash commands, and
   idle-session suggestions.
-- **LAN discovery** — mDNS/Bonjour advertisement and discovery of daemons on
+- **LAN discovery** - mDNS/Bonjour advertisement and discovery of daemons on
   the local network.
-- **Scopes** — a hierarchy of `owner > write > read`, plus dedicated `bridge`
+- **Scopes** - a hierarchy of `owner > write > read`, plus dedicated `bridge`
   and `approve` scopes for narrower delegation.
 
 ## Prerequisites
@@ -135,13 +135,13 @@ npm test --workspace @qwen-code/rc-gateway
 ```
 
 The suite covers auth, bind security, bootstrap, CORS, the audit log,
-policy, routing, bridges, cost tracking, search, and the WAL — roughly 1,900
+policy, routing, bridges, cost tracking, search, and the WAL - roughly 1,900
 tests in total.
 
 ## Specs
 
-Design and specification documents for remote control — including the
-OpenSpec proposals this package implements — live in the
+Design and specification documents for remote control - including the
+OpenSpec proposals this package implements - live in the
 [`Qwen-Code-Remote`](https://github.com/InfiniteInsight/Qwen-Code-Remote)
 repository. Package-local design notes for individual subsystems (ACME,
 bind security, bridges, cost tracking, mDNS discovery, idle suggestions,

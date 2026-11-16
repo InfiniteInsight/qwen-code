@@ -6,7 +6,7 @@
 
 /**
  * Pure argv/ payload logic for `qwen-rc fork` (`add-session-forking` task
- * 3.4 — the terminal-client shortcut; this repo has no interactive session
+ * 3.4 - the terminal-client shortcut; this repo has no interactive session
  * REPL, so the CLI command IS the terminal client, and task 3.2's `:fork`
  * slash maps onto it). The cli.ts branch is glue: it resolves the daemon
  * target, POSTs, and prints.
@@ -70,7 +70,7 @@ export function parseForkArgs(argv: string[]): ForkArgsResult {
         return {
           ok: false,
           error:
-            'summary mode is deferred (the daemon answers 400 unsupported_fork_mode) — use include or empty',
+            'summary mode is deferred (the daemon answers 400 unsupported_fork_mode) - use include or empty',
         };
       }
       if (!(MODES as readonly string[]).includes(v)) {
@@ -92,7 +92,7 @@ export function parseForkArgs(argv: string[]): ForkArgsResult {
       }
       name = v;
     } else if (a.startsWith('--')) {
-      return { ok: false, error: `unknown flag: ${a} — ${USAGE}` };
+      return { ok: false, error: `unknown flag: ${a} - ${USAGE}` };
     } else {
       positional.push(a);
     }

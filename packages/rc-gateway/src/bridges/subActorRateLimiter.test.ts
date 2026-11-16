@@ -63,7 +63,7 @@ describe('SubActorRateLimiter', () => {
   });
 });
 
-describe('SubActorRateLimiter — cardinality cap', () => {
+describe('SubActorRateLimiter - cardinality cap', () => {
   it('allows up to the cap distinct sub-actors per token', () => {
     const rl = new SubActorRateLimiter(
       SUB_ACTOR_WINDOW_MS,

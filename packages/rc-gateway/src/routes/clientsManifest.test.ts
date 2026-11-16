@@ -37,7 +37,7 @@ describe('buildClientsManifest', () => {
       tokenStorageKey: 'qwen-rc:qwen.local:4170:token',
       default: true,
     });
-    // the second entry has no `default` key — NOT synthesized
+    // the second entry has no `default` key - NOT synthesized
     expect('default' in (r.daemons[1] as object)).toBe(false);
   });
 

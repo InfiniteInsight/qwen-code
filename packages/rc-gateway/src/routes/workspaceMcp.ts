@@ -119,15 +119,15 @@ function daemonError(err: unknown, res: Parameters<RequestHandler>[1]): void {
 }
 
 /**
- * GET /rc/workspace/mcp — read the workspace MCP status (server list with
+ * GET /rc/workspace/mcp - read the workspace MCP status (server list with
  * connection state). Mounted at the WRITE floor (server.ts). The daemon
  * redacts credential-bearing config values before this response is built.
  *
- * POST /rc/workspace/mcp/reload — (re)run workspace MCP discovery. Mounted
+ * POST /rc/workspace/mcp/reload - (re)run workspace MCP discovery. Mounted
  * OWNER-only. Audits `workspace_mcp_reloaded` on success (no extra fields;
  * the resolved `workspace` cwd for a non-default target).
  *
- * POST /rc/workspace/mcp/servers — persist one MCP server into the
+ * POST /rc/workspace/mcp/servers - persist one MCP server into the
  * workspace's `mcpServers` setting: `{operation: 'set' | 'remove', name,
  * config?}`. Mounted OWNER-only. `set` requires a non-null object
  * `config`; `remove` ignores any `config` the caller sends (the daemon's
@@ -207,7 +207,7 @@ export function createWorkspaceMcpRoutes(
         action: 'workspace_mcp_reloaded',
         actorTokenId: req.rcClient?.id,
         subActor: req.rcClient?.subActor,
-        // Only for a non-default target — keeps the row shape unchanged
+        // Only for a non-default target - keeps the row shape unchanged
         // for existing readers; name-only rule still holds (no config
         // values).
         ...(target.cwd !== undefined
@@ -287,13 +287,13 @@ export function createWorkspaceMcpRoutes(
       // Optimistic concurrency: when a `baseVersion` is supplied (from the
       // prior GET's `version`), re-fetch the current MCP status and confirm
       // the server list the caller saw is still current. A mismatch means
-      // another writer added/removed/renamed a server in the window —
+      // another writer added/removed/renamed a server in the window -
       // reject with the current version so the caller can reload and retry
       // instead of silently clobbering.
       if (baseVersion !== undefined) {
         let current: DaemonWorkspaceMcpStatus;
         try {
-          // Same target as the mutation below — a baseVersion from one
+          // Same target as the mutation below - a baseVersion from one
           // workspace must not be checked against another's servers.
           current = await daemon.workspaceMcp(target.cwd);
         } catch (err) {
@@ -303,7 +303,7 @@ export function createWorkspaceMcpRoutes(
         const currentVersion = mcpVersion(current);
         if (currentVersion !== baseVersion) {
           res.status(409).json({
-            error: 'Stale MCP server list — reload and try again',
+            error: 'Stale MCP server list - reload and try again',
             code: 'stale_base',
             currentVersion,
           });
@@ -325,7 +325,7 @@ export function createWorkspaceMcpRoutes(
         return;
       }
 
-      // Name only — NEVER the config (credential material). The
+      // Name only - NEVER the config (credential material). The
       // non-default `workspace` cwd is metadata, not config.
       void deps.audit?.record({
         action:

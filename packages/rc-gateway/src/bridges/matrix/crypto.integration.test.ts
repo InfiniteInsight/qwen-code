@@ -5,7 +5,7 @@
  */
 
 /**
- * LIVE Matrix E2EE integration test — the full wired path against a real Synapse.
+ * LIVE Matrix E2EE integration test - the full wired path against a real Synapse.
  * ENV-GATED: skips cleanly in the default suite, runs only against a homeserver
  * the operator stands up in Docker (see `integration/matrix/README.md`). Set:
  *   QWEN_MATRIX_IT_HS_URL     e.g. http://localhost:8008
@@ -16,12 +16,12 @@
  * prepares crypto and starts syncing BEFORE the sender sends (Megolm shares the
  * session key to known devices at send time and does not re-key history). Test 1
  * asserts the adapter decrypts into `onMessage`; test 2 wires the adapter through a
- * real MatrixBridge and asserts the full path — decrypted → bound session, the
+ * real MatrixBridge and asserts the full path - decrypted → bound session, the
  * bot's encrypted reply decrypted by the sender, and a reaction → vote.
  *
  * Two real-world gotchas, documented in the README and worth repeating:
- *   1. ORDERING — bot must be joined + prepared + syncing before the sender sends.
- *   2. UNVERIFIED-DEVICE POLICY — the sender must share keys to the bot's
+ *   1. ORDERING - bot must be joined + prepared + syncing before the sender sends.
+ *   2. UNVERIFIED-DEVICE POLICY - the sender must share keys to the bot's
  *      (unverified) device; if your Synapse/SDK build withholds keys from
  *      unverified devices the bot never decrypts. Verify the device or enable
  *      share-to-unverified.
@@ -56,7 +56,7 @@ describe.skipIf(!RUN)('Matrix E2EE live decrypt (Synapse-gated)', () => {
       SimpleFsStorageProvider,
     } = sdk;
     // Runtime store-type value from the native package (@vector-im/matrix-bot-sdk's
-    // RustSdkCryptoStoreType is a runtime-erased const enum — see cryptoAdapter.ts).
+    // RustSdkCryptoStoreType is a runtime-erased const enum - see cryptoAdapter.ts).
     const { StoreType } = await import('@matrix-org/matrix-sdk-crypto-nodejs');
 
     const stamp = `${Date.now()}`;
@@ -174,7 +174,7 @@ describe.skipIf(!RUN)('Matrix E2EE live decrypt (Synapse-gated)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'rc-mx-itw-'));
     const ac = new AbortController();
 
-    // The sender is a crypto client that records every message IT can decrypt —
+    // The sender is a crypto client that records every message IT can decrypt -
     // so seeing the bot's reply here proves the reply was genuine ciphertext.
     const senderClient = new MatrixClient(
       HS!,
@@ -190,7 +190,7 @@ describe.skipIf(!RUN)('Matrix E2EE live decrypt (Synapse-gated)', () => {
     });
 
     // The bot's gateway client is faked so we can observe the prompts/votes the
-    // bridge drives — the rest of the bridge is the real runner + dispatch.
+    // bridge drives - the rest of the bridge is the real runner + dispatch.
     const prompts: Array<{ sessionId: string; prompt: string }> = [];
     const votesSeen: Array<{
       sessionId: string;
@@ -253,7 +253,7 @@ describe.skipIf(!RUN)('Matrix E2EE live decrypt (Synapse-gated)', () => {
       });
 
       // Real fresh-room path: the bot is INVITED and AutojoinRoomsMixin joins it
-      // after start() (we do NOT pre-join) — verifying that a room joined post-
+      // after start() (we do NOT pre-join) - verifying that a room joined post-
       // start still decrypts. Bind the session; then start + settle before send.
       await rooms.bind(roomId, 'sess_e2ee');
       await bridge.start(ac.signal); // runInbound → adapter prepare + sync + autojoin

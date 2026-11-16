@@ -80,7 +80,7 @@ function authHeader(token: string) {
 }
 
 // ---------------------------------------------------------------------------
-// GET /rc/cors — list origins
+// GET /rc/cors - list origins
 // ---------------------------------------------------------------------------
 
 describe('GET /rc/cors', () => {
@@ -123,7 +123,7 @@ describe('GET /rc/cors', () => {
     expect(cfg?.source).toBe('config');
   });
 
-  it('requires owner scope — session:read token gets 403', async () => {
+  it('requires owner scope - session:read token gets 403', async () => {
     const url = await mount();
     const { token: readToken } = await store.issue(['session:read'], 'read');
     const res = await fetch(`${url}/rc/cors`, {
@@ -132,7 +132,7 @@ describe('GET /rc/cors', () => {
     expect(res.status).toBe(403);
   });
 
-  it('requires auth — unauthenticated gets 401', async () => {
+  it('requires auth - unauthenticated gets 401', async () => {
     const url = await mount();
     const res = await fetch(`${url}/rc/cors`);
     expect(res.status).toBe(401);
@@ -140,7 +140,7 @@ describe('GET /rc/cors', () => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /rc/cors — add origin
+// POST /rc/cors - add origin
 // ---------------------------------------------------------------------------
 
 describe('POST /rc/cors', () => {
@@ -248,7 +248,7 @@ describe('POST /rc/cors', () => {
 });
 
 // ---------------------------------------------------------------------------
-// DELETE /rc/cors/:origin — remove origin
+// DELETE /rc/cors/:origin - remove origin
 // ---------------------------------------------------------------------------
 
 describe('DELETE /rc/cors/:origin', () => {

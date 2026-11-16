@@ -169,7 +169,7 @@ describe('/rc/tokens routes', () => {
       scopes: string[];
       id: string;
     };
-    // Expanded, deduped bundle — bridge marker retained, plus the functional trio.
+    // Expanded, deduped bundle - bridge marker retained, plus the functional trio.
     expect([...scopes].sort()).toEqual(
       [BRIDGE, SESSION_READ, APPROVE, WRITE].sort(),
     );
@@ -198,7 +198,7 @@ describe('/rc/tokens routes', () => {
       body: JSON.stringify({ scopes: [BRIDGE] }),
     });
     // requireScope(OWNER) gates the route, so a non-owner is 403 before the
-    // grant logic — proving bridge is never reachable without owner.
+    // grant logic - proving bridge is never reachable without owner.
     expect(res.status).toBe(403);
   });
 
@@ -360,7 +360,7 @@ describe('POST /rc/tokens/revoke-all', () => {
   it('revoke-all with no tokens returns 200 and empty revokedIds', async () => {
     const owner = await store.issue([OWNER, SESSION_READ], 'owner');
     // revoke everything first so only the caller's token might remain but we
-    // use except:self and there is only the owner — empty result.
+    // use except:self and there is only the owner - empty result.
     const url = await mount();
     const res = await fetch(`${url}/rc/tokens/revoke-all`, {
       method: 'POST',

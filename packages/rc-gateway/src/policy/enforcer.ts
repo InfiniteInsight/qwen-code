@@ -28,11 +28,11 @@ function readString(
 
 /**
  * The site-derivable "why" token for a resolved decision (P4). Derived
- * purely from the decision the enforcer already holds — no trace recompute.
+ * purely from the decision the enforcer already holds - no trace recompute.
  * `eval-error` is NOT produced here (that branch has no PolicyDecision); the
  * catch site sets it literally. Near-miss causes (quota-exhausted, expired,
  * outside-time-window) make a rule fall through to source:'default', so they
- * are indistinguishable here from a genuine no-match — they surface only in
+ * are indistinguishable here from a genuine no-match - they surface only in
  * the explain trace, never in this token.
  */
 export function policyDecisionReason(d: PolicyDecision): string {
@@ -69,13 +69,13 @@ export interface PermissionOutcome {
  *   decision, rather than escaping this method.
  * - **Audit hygiene:** `policy_decision` detail carries only
  *   `{requestId, action, tool?, ruleId?, overlayId?, voted, decisionSource,
- *   reason, quotaRemaining?}` — NEVER the tool args/paths/prompt. `tool` is
+ *   reason, quotaRemaining?}` - NEVER the tool args/paths/prompt. `tool` is
  *   the tool's kind/name from the frame (absent when the frame carries none)
  *   so rule hits can be checked per tool. `decisionSource` is `'policy'|'default'`
  *   (a fixed token); `reason` is the closed-enum "why" token from
  *   {@link policyDecisionReason} (or the literal `'eval-error'` on the
  *   eval-error fail-safe path). `overlayId` (issue #33) is set only when a
- *   session-scoped overlay rule produced the decision — `ruleId` already
+ *   session-scoped overlay rule produced the decision - `ruleId` already
  *   carries the overlay id, so the decisions feed's `rule=` filter works on
  *   overlays too.
  * - **Overlays (issue #33):** when constructed with a
@@ -106,7 +106,7 @@ export class PolicyEnforcer {
     /**
      * Lazily-read project-root resolver, anchoring `pathGlob` matching
      * (frameContext.ts). MUST resolve to a value sourced from daemon
-     * capabilities/config — NEVER from the frame's `rawInput` — or a
+     * capabilities/config - NEVER from the frame's `rawInput` - or a
      * prompt-injected model could move the anchor out from under a
      * `pathGlob` deny on a literal path (see frameContext.ts / evaluator.ts).
      * A closure (rather than a value captured at construction) so callers
@@ -115,7 +115,7 @@ export class PolicyEnforcer {
      */
     private readonly projectRootFn: () => string = () => process.cwd(),
     /**
-     * Optional session-scoped permission overlays (issue #33) — TTL-bound
+     * Optional session-scoped permission overlays (issue #33) - TTL-bound
      * dashboard-set rules that preempt the file policy for one session (or
      * all sessions) until they auto-expire. Absent → the enforcer behaves
      * exactly as before (no overlay evaluation at all).
@@ -162,7 +162,7 @@ export class PolicyEnforcer {
         ? (event.data as Record<string, unknown>)
         : {};
     const requestId = readString(data, 'requestId');
-    // The ONE-TIME approve option (kind 'allow_once'), never options[0] — that
+    // The ONE-TIME approve option (kind 'allow_once'), never options[0] - that
     // is typically 'allow_always', which would persist a standing grant / flip
     // the session to auto-edit, escalating a single policy match into a blanket
     // bypass of all future gateway evaluation. Absent → we do NOT vote (below).
@@ -177,13 +177,13 @@ export class PolicyEnforcer {
       : undefined;
 
     // projectRoot MUST come from the daemon/config resolver (this.projectRootFn),
-    // NEVER from the frame's rawInput — see the constructor doc above.
+    // NEVER from the frame's rawInput - see the constructor doc above.
     // `ctx` is declared outside the try so the audit sites below can record
     // the frame's tool (issue #32). If frameToContext itself throws, ctx
     // stays undefined and the tool is simply omitted.
     let ctx: FrameContext | undefined;
     let d: ReturnType<typeof evaluate>;
-    // The overlay id that produced `d` (issue #33) — undefined when the
+    // The overlay id that produced `d` (issue #33) - undefined when the
     // file policy decided. Set together with `d` inside the try, so the
     // eval-error path (either evaluation throws) never carries a stale one.
     let overlayId: string | undefined;
@@ -195,7 +195,7 @@ export class PolicyEnforcer {
       // Session-scoped overlays (issue #33) preempt the file policy: the
       // per-session overlay policy is evaluated WITHOUT the quota oracle
       // (overlays never offer maxPerWindow). A matched overlay rule
-      // (source 'policy') wins — including an overlay 'prompt', which
+      // (source 'policy') wins - including an overlay 'prompt', which
       // downgrades a file 'allow'; otherwise the file decision stands.
       if (this.overlays) {
         const od = evaluate(
@@ -211,7 +211,7 @@ export class PolicyEnforcer {
     } catch {
       // NEVER THROWS (class docstring): an unexpected extraction/evaluation
       // failure must not crash the caller. Fall through to the same no-vote
-      // path a `prompt` decision takes — never vote, audit it, return false.
+      // path a `prompt` decision takes - never vote, audit it, return false.
       void this.audit?.record({
         action: 'policy_decision',
         target: sessionId,
@@ -236,11 +236,11 @@ export class PolicyEnforcer {
       if (requestId && approveOptionId) {
         // Reserve-at-decision (closes the maxPerWindow check-then-consume race
         // across concurrent sessions, quotas.ts#reserve): commit the slot HERE,
-        // synchronously, the instant the decision is 'allow' — strictly before
+        // synchronously, the instant the decision is 'allow' - strictly before
         // the vote's `await` below. Everything from the `evaluate()` call
         // above through this line is synchronous (no `await`), so by JS
-        // run-to-completion no OTHER `handlePermission` call — even one
-        // racing the SAME ruleId from a different session — can run in
+        // run-to-completion no OTHER `handlePermission` call - even one
+        // racing the SAME ruleId from a different session - can run in
         // between. That other call's own `evaluate()` check therefore either
         // runs entirely before this reservation (and reserves the slot
         // itself) or entirely after (and sees this reservation via the same
@@ -264,7 +264,7 @@ export class PolicyEnforcer {
             { outcome: { outcome: 'selected', optionId: approveOptionId } },
           );
           if (ok) {
-            // CONFIRM the reservation made above — persist it durably (WAL).
+            // CONFIRM the reservation made above - persist it durably (WAL).
             // The in-memory count was already committed by reserve(), so this
             // is append-only, never a second in-memory consume.
             let quotaRemaining: number | undefined;
@@ -289,14 +289,14 @@ export class PolicyEnforcer {
             });
             return outcome(true);
           }
-          // Vote returned false (not thrown): RELEASE the reservation — a
+          // Vote returned false (not thrown): RELEASE the reservation - a
           // failed vote must not permanently consume a slot (fail-safe,
           // preserved from before this fix).
           if (reservedRuleId) {
             this.quota!.releaseReserved(reservedRuleId, nowMs);
           }
         } catch {
-          // Swallow — a thrown vote is the same fail-safe as a `false` vote:
+          // Swallow - a thrown vote is the same fail-safe as a `false` vote:
           // release any reservation, then fall through to the audit below.
           if (reservedRuleId) {
             this.quota!.releaseReserved(reservedRuleId, nowMs);
@@ -346,7 +346,7 @@ export class PolicyEnforcer {
             return outcome(true);
           }
         } catch {
-          // Swallow — fall through to the fail-safe below.
+          // Swallow - fall through to the fail-safe below.
         }
       }
       void this.audit?.record({
@@ -368,7 +368,7 @@ export class PolicyEnforcer {
 
     // prompt (incl. fail-closed default): never vote, fall through to push.
     // decisionSource discriminates a rule-caused prompt ('policy') from the
-    // no-rule-match default fall-through ('default') — which `ruleId` cannot,
+    // no-rule-match default fall-through ('default') - which `ruleId` cannot,
     // since a matched rule may be id-less.
     void this.audit?.record({
       action: 'policy_decision',

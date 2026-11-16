@@ -107,7 +107,7 @@ describe('searchTranscripts', () => {
 
   it('searches tool_result content carried under functionResponse (not parts[].text)', async () => {
     // Real tool_result records store their output under functionResponse, not
-    // text — search must reach into it or tool output is invisible.
+    // text - search must reach into it or tool output is invisible.
     writeJsonl('s1.jsonl', [
       rec({
         uuid: 'tr',
@@ -294,7 +294,7 @@ describe('searchTranscripts', () => {
   });
 });
 
-describe('searchTranscripts — per-query scan timeout (cycle 34)', () => {
+describe('searchTranscripts - per-query scan timeout (cycle 34)', () => {
   beforeEach(() => {
     writeJsonl('s1.jsonl', [
       textRec({ uuid: 'a', sessionId: 's1', type: 'assistant' }, 'oauth here'),
@@ -342,7 +342,7 @@ describe('searchTranscripts — per-query scan timeout (cycle 34)', () => {
   it('trips the per-1024-line inner check on a single large file', async () => {
     // Fresh dir with ONLY this file so readdir order can't let a file-loop-top
     // check trip first: with one file the clock reads are #1 start, #2
-    // file-top (within budget), #3 the inner (every-1024-lines) check — which
+    // file-top (within budget), #3 the inner (every-1024-lines) check - which
     // jumps past the deadline, exercising that specific throw site.
     const bigDir = mkdtempSync(join(tmpdir(), 'rc-search-big-'));
     const lines: string[] = [];
@@ -365,7 +365,7 @@ describe('searchTranscripts — per-query scan timeout (cycle 34)', () => {
   });
 });
 
-describe('searchTranscriptsDetailed — truncated (cycle 37)', () => {
+describe('searchTranscriptsDetailed - truncated (cycle 37)', () => {
   /** Write `n` distinct assistant records all matching `oauth`. */
   function writeMatches(n: number): void {
     const recs = Array.from({ length: n }, (_, i) =>

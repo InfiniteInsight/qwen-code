@@ -5,7 +5,7 @@
  */
 
 /**
- * Assemble a ready-to-run {@link AcmeManager} from config + env — the single place
+ * Assemble a ready-to-run {@link AcmeManager} from config + env - the single place
  * the cli (Slice 4) and the staging-test script build the ACME stack. Provider
  * selection, the LE directory choice (staging vs production), and the
  * env-credential checks live here (and are unit-tested); the actual `acme-client`
@@ -35,7 +35,7 @@ export interface AcmeStackConfig {
   email: string;
   /** `route53` | `cloudflare`. */
   dnsProvider: string;
-  /** Use LE staging (loose limits, untrusted certs) — default false (production). */
+  /** Use LE staging (loose limits, untrusted certs) - default false (production). */
   staging?: boolean;
   /** Explicit ACME directory URL (private CA / Pebble); overrides staging/prod. */
   directoryUrl?: string;

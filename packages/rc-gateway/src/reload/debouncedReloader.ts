@@ -22,7 +22,7 @@ export interface DebouncedReloaderOptions<T> {
   onReloaded: (value: T) => void;
   /** Called when a reload FAILS (old value retained); e.g. audit the error. */
   onError: (err: unknown) => void;
-  /** Debounce window in ms (default 250 — spec). */
+  /** Debounce window in ms (default 250 - spec). */
   debounceMs?: number;
   /**
    * Floor between the START of one reload and the start of the next (default 0,
@@ -46,7 +46,7 @@ export interface DebouncedReloaderOptions<T> {
  * Debounced hot-reloader for a single watched resource. `trigger()` (called by a
  * filesystem watcher) coalesces rapid edits into a single reload `debounceMs`
  * later. A reload that throws/rejects RETAINS the previous value (apply is never
- * called) and reports via `onError` — a running gateway must never crash or
+ * called) and reports via `onError` - a running gateway must never crash or
  * widen because the operator saved a half-typed edit. Every method is total
  * (never throws to the caller).
  *

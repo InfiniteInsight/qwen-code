@@ -40,7 +40,7 @@ function fakeRes(): { res: Response; captured: Captured } {
 /**
  * A daemon double that records what it was asked for. Each method is a spy so
  * a test can prove a refusal happened BEFORE any daemon call, which is the
- * whole point of the confirm guard — a guard that runs after the destructive
+ * whole point of the confirm guard - a guard that runs after the destructive
  * call is not a guard.
  */
 function fakeDaemon(behaviour: { fail?: boolean } = {}) {
@@ -105,7 +105,7 @@ describe('POST /rc/sessions/{archive,unarchive,delete} (#111)', () => {
       archived: [SESS, OTHER],
     });
     // The cwd must reach the pool as the workspace argument (3rd position),
-    // not the clientId slot — swapping those two is the silent misroute this
+    // not the clientId slot - swapping those two is the silent misroute this
     // signature exists to prevent.
     expect(calls[0]).toMatchObject({
       action: 'archive',

@@ -11,7 +11,7 @@ import { writeFileAtomic } from '../../atomicWrite.js';
 /**
  * Load the ACME account key from `<baseDir>/account.key`, or create it once via
  * `generate` and persist it 0600 under a 0700 dir. The account key is reused
- * across all renewals — re-registering an account per issuance is wasteful and
+ * across all renewals - re-registering an account per issuance is wasteful and
  * risks ACME account rate limits. The key is security-sensitive (it authenticates
  * every order), hence the strict mode.
  */

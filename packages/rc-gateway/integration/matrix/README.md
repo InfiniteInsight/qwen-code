@@ -3,8 +3,8 @@
 This closes the Matrix E2EE ceiling end-to-end: it runs the real `cryptoAdapter`
 
 - `MatrixBridge` against a real Synapse homeserver. The test file
-  (`src/bridges/matrix/crypto.integration.test.ts`) is **env-gated** — it skips in
-  the normal suite and runs only when pointed at a homeserver — and asserts:
+  (`src/bridges/matrix/crypto.integration.test.ts`) is **env-gated** - it skips in
+  the normal suite and runs only when pointed at a homeserver - and asserts:
 
 1. the bot decrypts a message sent into an encrypted room;
 2. a decrypted message reaches a **bound session** through dispatch;
@@ -27,9 +27,9 @@ docker compose run --rm synapse generate
 
 # Shared-secret registration provisions the throwaway test users. The current
 # matrixdotorg/synapse image ALREADY writes a random `registration_shared_secret`
-# into ./data/homeserver.yaml during `generate` — just read it:
+# into ./data/homeserver.yaml during `generate` - just read it:
 #     grep registration_shared_secret ./data/homeserver.yaml
-# (Only if it is absent: add exactly one such line — never a duplicate key, which
+# (Only if it is absent: add exactly one such line - never a duplicate key, which
 # makes Synapse error. /_synapse/admin/v1/register needs only this key; public
 # registration can stay off.)
 
@@ -56,16 +56,16 @@ an encrypted room, and asserts the bot decrypts.
 1. **Key-share ordering.** Megolm shares the room session key to _known_ devices
    at send time and does **not** re-key history. The test therefore joins the bot,
    prepares crypto, and starts syncing **before** the sender sends. If you adapt
-   it, preserve that order — a decrypt failure here is almost always sequencing,
+   it, preserve that order - a decrypt failure here is almost always sequencing,
    not crypto.
 2. **Unverified-device policy.** The sender must be willing to share keys to the
    bot's (unverified) device. If your Synapse / SDK build withholds keys from
-   unverified devices, the bot never decrypts — verify the device or enable
+   unverified devices, the bot never decrypts - verify the device or enable
    share-to-unverified on the sender. (@vector-im/matrix-bot-sdk's default
-   shares to unverified, so this passed out of the box — but it's the #1 silent
+   shares to unverified, so this passed out of the box - but it's the #1 silent
    failure if a build changes the policy.)
 3. **Runtime-erased const enum.** @vector-im/matrix-bot-sdk's
-   `RustSdkCryptoStoreType` is a `const enum` — it type-checks but is **erased
+   `RustSdkCryptoStoreType` is a `const enum` - it type-checks but is **erased
    at runtime** under esbuild (`.Sqlite` → `undefined`), which silently makes
    the adapter degrade to `null`. The store-type value is sourced from the
    native `@matrix-org/matrix-sdk-crypto-nodejs` `StoreType` instead; don't
@@ -74,7 +74,7 @@ an encrypted room, and asserts the bot decrypts.
 ## Status
 
 Verified **green** end-to-end against a self-hosted Synapse container: both tests
-pass (~25 s total) — bot decrypt, decrypted→bound-session dispatch, sender-decrypts
+pass (~25 s total) - bot decrypt, decrypted→bound-session dispatch, sender-decrypts
 the bot's encrypted reply, and reaction→vote.
 
 ## Teardown

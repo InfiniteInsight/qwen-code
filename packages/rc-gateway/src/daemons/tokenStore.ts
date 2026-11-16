@@ -71,7 +71,7 @@ export class FileTokenStore implements TokenStore {
       // the spec requires the one-time stderr warning to carry that literal so
       // scripts can detect the fallback mode.
       this.warn(
-        'qwen-rc: os_keyring_unavailable_using_file_fallback — no OS keyring ' +
+        'qwen-rc: os_keyring_unavailable_using_file_fallback - no OS keyring ' +
           'available, storing daemon tokens as 0600 files ' +
           `under ${this.dir}`,
       );

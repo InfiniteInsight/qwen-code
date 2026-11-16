@@ -189,7 +189,7 @@ describe('AcmeManager', () => {
     expect(mgr.getCurrent()?.cert).toBe('cert1');
   });
 
-  it('keeps the current cert and re-arms (backoff) when a renewal fails — no throw', async () => {
+  it('keeps the current cert and re-arms (backoff) when a renewal fails - no throw', async () => {
     let clock = NOW;
     const store = fakeStore(storedBundle(NOW + 90 * DAY));
     const t = fakeTimers();

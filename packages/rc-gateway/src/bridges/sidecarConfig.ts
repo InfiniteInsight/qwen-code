@@ -11,12 +11,12 @@
  * EXCLUSIVELY from environment variables; this module turns that env into a typed,
  * validated config or fails fast with a specific message.
  *
- * Pure — no fs, no network, no `process` access (env + home dir are passed in) —
+ * Pure - no fs, no network, no `process` access (env + home dir are passed in) -
  * so the fail-fast scenarios (a missing required var → exact stderr) are unit-
  * testable without spawning a process.
  *
  * The two QWEN_DAEMON_URL meanings collapse here: for a sidecar it is BOTH the
- * gateway transport target (loopback meaning is gone — the gateway is elsewhere)
+ * gateway transport target (loopback meaning is gone - the gateway is elsewhere)
  * AND the user-facing deeplink base. In-process the transport is loopback and
  * QWEN_DAEMON_URL is deeplink-only; that distinction does not exist out-of-process.
  */
@@ -32,7 +32,7 @@ export const BRIDGE_KINDS: readonly BridgeKind[] = [
   'matrix',
 ];
 
-/** A required-variable / malformed-config failure — caught by the entrypoint to
+/** A required-variable / malformed-config failure - caught by the entrypoint to
  * print the message and exit non-zero (the spec's fail-fast contract). */
 export class SidecarConfigError extends Error {
   constructor(message: string) {
@@ -71,7 +71,7 @@ export interface MatrixSidecarConfig extends SidecarConfigBase {
   userId: string;
   accessToken: string;
   commandPrefix: string;
-  /** `MATRIX_ENABLE_E2EE` — opt-in encrypted-room support (default OFF). */
+  /** `MATRIX_ENABLE_E2EE` - opt-in encrypted-room support (default OFF). */
   e2eeEnabled: boolean;
 }
 
@@ -99,7 +99,7 @@ function optional(env: Env, name: string): string | undefined {
  * {@link SidecarConfigError} (message = `"<VAR> is required"`) on a missing
  * required variable. Bridge-specific creds are checked BEFORE the shared vars so
  * the pinned "<KIND>_BOT_TOKEN is required" scenarios win regardless of what else
- * is unset. `whoami`/MXID validation is NOT done here (it needs the network) —
+ * is unset. `whoami`/MXID validation is NOT done here (it needs the network) -
  * the entrypoint does it after token bootstrap.
  */
 export function resolveSidecarConfig(
@@ -175,7 +175,7 @@ export function resolveSidecarConfig(
  * Matrix MXID fail-fast check (spec: "fail-fast … if `whoami` returns an MXID that
  * does not match `MATRIX_USER_ID`"). Returns an error message to print + exit on,
  * or `null` to proceed. A missing/unresolved `whoami.userId` is fail-OPEN (return
- * null) — a hung/old homeserver shouldn't block boot; only a CONFIRMED mismatch
+ * null) - a hung/old homeserver shouldn't block boot; only a CONFIRMED mismatch
  * aborts. Pure so the entrypoint glue stays a one-liner and this is unit-tested.
  */
 export function checkMxid(

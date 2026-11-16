@@ -7,19 +7,19 @@
 import type { DiscordActionRow } from './render.js';
 
 /**
- * Thin Discord REST client over `fetch` — NO SDK dependency (the REST API is
+ * Thin Discord REST client over `fetch` - NO SDK dependency (the REST API is
  * plain HTTPS JSON), so no new supply-chain surface enters the gateway process
  * (the same hybrid tradeoff the Telegram bridge made for the Bot API). This
  * covers only the OUTBOUND calls the bridge needs: post a channel message with
  * components, edit a message (to disable buttons on resolve), and the two-step
  * interaction reply (defer → edit) used for ephemeral vote feedback.
  *
- * This is the testable half of Discord transport. The INBOUND half — the gateway
- * WebSocket that delivers INTERACTION_CREATE / MESSAGE_CREATE — is a separate,
+ * This is the testable half of Discord transport. The INBOUND half - the gateway
+ * WebSocket that delivers INTERACTION_CREATE / MESSAGE_CREATE - is a separate,
  * stateful protocol and is NOT built here.
  *
  * Snowflakes (channel/message/interaction/application ids) are STRINGS throughout
- * — never coerced to numbers.
+ * - never coerced to numbers.
  */
 
 /** Discord interaction-response callback types (the subset the bridge uses). */
@@ -107,7 +107,7 @@ export class DiscordRestApi {
     // `allowed_mentions` is absent, so relayed agent output (a streamed
     // reply, a tool call's argsSummaryShort) containing "@everyone" would
     // ping the whole server using the bot's permissions. Suppress ALL
-    // mention parsing — this is a relay of untrusted content, not a
+    // mention parsing - this is a relay of untrusted content, not a
     // deliberate human ping.
     const body: Record<string, unknown> = {
       content,
@@ -122,7 +122,7 @@ export class DiscordRestApi {
   }
 
   /**
-   * Edit an existing channel message — used on `permission_resolved` to disable
+   * Edit an existing channel message - used on `permission_resolved` to disable
    * the vote buttons and append the outcome. Pass the already-disabled component
    * rows (the renderer owns producing them).
    */
@@ -197,7 +197,7 @@ export class DiscordRestApi {
   }
 
   /**
-   * Edit the (deferred) original interaction reply — sets the "You voted approve"
+   * Edit the (deferred) original interaction reply - sets the "You voted approve"
    * text after the vote round-trips. Targets the application webhook's @original
    * message, which is how a deferred interaction reply is later populated.
    */

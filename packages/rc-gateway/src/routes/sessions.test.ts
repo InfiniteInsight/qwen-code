@@ -253,7 +253,7 @@ describe('GET /rc/sessions?cwd', () => {
   });
 });
 
-// Mounts behind requireScope(OWNER) — the production posture — to lock the
+// Mounts behind requireScope(OWNER) - the production posture - to lock the
 // single riskiest line: a downgrade to SESSION_READ would 200 a non-owner the
 // whole workspace topology.
 async function mountGuarded(
@@ -277,7 +277,7 @@ async function mountGuarded(
   return `http://127.0.0.1:${port}`;
 }
 
-describe('GET /rc/sessions — OWNER gate', () => {
+describe('GET /rc/sessions - OWNER gate', () => {
   it('403s a non-owner (session:read) token before the handler runs', async () => {
     await writeTranscript(ROOT);
     const audit = fakeAudit();
@@ -299,7 +299,7 @@ describe('GET /rc/sessions — OWNER gate', () => {
   });
 });
 
-describe('GET /rc/sessions — ?archiveState=archived (issue #111)', () => {
+describe('GET /rc/sessions - ?archiveState=archived (issue #111)', () => {
   it('lists the archived transcripts, marked, and leaves the active one out', async () => {
     await writeTranscript(ROOT);
     await writeTranscriptAt(archiveChatsDirOf(chatsDir), FORK);

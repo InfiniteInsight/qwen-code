@@ -69,7 +69,7 @@ afterEach(async () => {
 describe('rewind integration', () => {
   it('attach (real SESSION_READ mount) -> rewind (real OWNER auth mount) -> WAL marker + owner-bus frame both carry the correct truncatedEventId; a write-scope token is refused', async () => {
     // 3 single-record user turns (u0, u1, u2) written directly to the parent
-    // transcript, so `resolveTurn`'s `userTurnIndices` is exactly [0, 1, 2] —
+    // transcript, so `resolveTurn`'s `userTurnIndices` is exactly [0, 1, 2] -
     // the record-array index IS the turn number. Rewinding to toTurn: 1 must
     // therefore yield truncatedEventId 1 (userTurnIndices[1]); this is the
     // value turnResolver.ts computes, not anything read back post hoc from the
@@ -102,7 +102,7 @@ describe('rewind integration', () => {
 
     // Real app: real TokenStore, real requireScope(OWNER)/bearerResolve mount
     // (server.ts wires POST /session/:id/rewind behind requireScope(OWNER),
-    // GET /session/:id/events behind requireScope(SESSION_READ)) — no
+    // GET /session/:id/events behind requireScope(SESSION_READ)) - no
     // hand-rolled express() app and no req.rcClient injection.
     const store = await TokenStore.open(join(runtimeBase, 'tokens.json'));
     const { token: ownerToken, id: ownerTokenId } = await store.issue(
@@ -153,7 +153,7 @@ describe('rewind integration', () => {
 
     // 1b. A write-scope token issuing the SAME rewind request through the
     //     SAME mounted route must be refused. This proves requireScope(OWNER)
-    //     is actually in the request path — a write-scope token carries
+    //     is actually in the request path - a write-scope token carries
     //     `session:read` (via SCOPE_IMPLIES) but never `owner`, so this can
     //     only pass if the real auth mount is exercised, not bypassed.
     const forbiddenRes = await fetch(
@@ -170,7 +170,7 @@ describe('rewind integration', () => {
     expect(forbiddenRes.status).toBe(403);
     // No daemon call, no WAL marker: the write-scope attempt must be a total
     // no-op, not a partial rewind. The WAL holds exactly the two frames the
-    // step-1 attach relayed (see note there) — no session_rewound marker yet.
+    // step-1 attach relayed (see note there) - no session_rewound marker yet.
     const walAfterForbidden = new SessionWal({
       dir: walDir,
       sessionId: SESSION_ID,
@@ -201,7 +201,7 @@ describe('rewind integration', () => {
     expect(rewindBody.truncatedEventId).toBe(EXPECTED_TRUNCATED_EVENT_ID);
 
     // The real SDK client rewound to the promptId of the snapshot whose
-    // turnIndex is 1 — the toTurn→promptId mapping happened end to end, not
+    // turnIndex is 1 - the toTurn→promptId mapping happened end to end, not
     // by passing the raw turn number upstream.
     expect(stub.lastRewindBody).toMatchObject({
       promptId: `${SESSION_ID}########1`,
@@ -230,8 +230,8 @@ describe('rewind integration', () => {
     // 4. The SAME marker, on the owner-bus production emit surface
     //    (createGatewayApp's `bus: ownerEvents` wiring), also carries the
     //    correct truncatedEventId, and its rewoundByTokenId is the
-    //    AUTHENTICATED owner token's id — never anything from the request
-    //    body — tying the real-auth actor to the real-marker coordinate.
+    //    AUTHENTICATED owner token's id - never anything from the request
+    //    body - tying the real-auth actor to the real-marker coordinate.
     const ownerMarker = ownerFrames.find(
       (f): f is Extract<OwnerEvent, { type: 'session_event' }> =>
         f.type === 'session_event' && f.event.type === 'session_rewound',

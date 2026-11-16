@@ -170,7 +170,7 @@ describe('RecoveryOrchestrator', () => {
     expect(orch.recoveryState('s1')).toBe('unrecoverable');
     expect(orch.recoveryState('s2')).toBe('unrecoverable');
     expect(orch.recoveryState('s3')).toBe('unrecoverable');
-    // The saga ended at s1 — s2/s3 were never attempted.
+    // The saga ended at s1 - s2/s3 were never attempted.
     expect(resumeSession).toHaveBeenCalledTimes(1);
     expect(resumeSession.mock.calls[0][0]).toBe('s1');
   });
@@ -211,7 +211,7 @@ describe('RecoveryOrchestrator', () => {
       release = resolve;
     });
     const resumeSession = vi.fn(async () => {
-      await gate; // the just-respawned daemon is slow — the saga is in flight
+      await gate; // the just-respawned daemon is slow - the saga is in flight
       return {};
     });
     const reportOutcome = vi.fn();
@@ -226,7 +226,7 @@ describe('RecoveryOrchestrator', () => {
     expect(orch.recoveryState('s1')).toBe('recovering');
 
     // Second death of the same workspace mid-recovery (the respawned daemon
-    // died again), then a third — both must land in ONE queued run.
+    // died again), then a third - both must land in ONE queued run.
     const second = orch.recover(
       '/proj/a',
       ['s1', 's2'],
@@ -239,7 +239,7 @@ describe('RecoveryOrchestrator', () => {
     await second;
     await third;
 
-    // One initial saga + one coalesced follow-up run — not one run per death.
+    // One initial saga + one coalesced follow-up run - not one run per death.
     expect(getOrSpawn).toHaveBeenCalledTimes(2);
     const coalesced = resumeSession.mock.calls.slice(1).map(([id]) => id);
     expect([...coalesced].sort()).toEqual(['s1', 's2']);

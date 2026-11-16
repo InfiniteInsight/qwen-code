@@ -96,7 +96,7 @@ describe('frameToContext', () => {
   });
 });
 
-describe('frameToContext — shell enrichment', () => {
+describe('frameToContext - shell enrichment', () => {
   it('adds paths a shell command reads', () => {
     const ctx = frameToContext(frame('execute', { command: 'cat .env' }), {
       projectRoot: '/proj',
@@ -141,8 +141,8 @@ describe('frameToContext — shell enrichment', () => {
   // Regression: a `cd` in an earlier subcommand must carry forward to the
   // ones that follow. Before the fix, every split subcommand was resolved
   // against the SAME static `directory`, so `cd config && cat
-  // secrets/creds.txt` produced `/proj/secrets/creds.txt` as a candidate —
-  // never the real path bash touches, `/proj/config/secrets/creds.txt` —
+  // secrets/creds.txt` produced `/proj/secrets/creds.txt` as a candidate -
+  // never the real path bash touches, `/proj/config/secrets/creds.txt` -
   // which let a `pathGlob:'config/secrets/**'` deny rule silently miss it.
   it('tracks a `cd` across compound subcommands so later relative paths resolve against the post-cd directory', () => {
     const ctx = frameToContext(
@@ -175,7 +175,7 @@ describe('frameToContext — shell enrichment', () => {
   // (a shell variable here), the running cwd becomes a best-effort guess
   // rather than the real post-cd directory. The fix must still keep the
   // ORIGINAL static-cwd candidate around so a deny rule that already
-  // matched pre-fix (anchored on the static cwd) keeps matching — the
+  // matched pre-fix (anchored on the static cwd) keeps matching - the
   // enrichment must only ever ADD candidates, never drop one silently.
   it('keeps the static-cwd candidate when the cd target is not statically resolvable (e.g. a shell variable)', () => {
     const ctx = frameToContext(

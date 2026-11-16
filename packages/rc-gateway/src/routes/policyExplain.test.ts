@@ -130,7 +130,7 @@ describe('createPolicyExplainRoute', () => {
       detail: { tool: 'write_file', decision: 'deny' },
     });
     // exact detail shape: a matched deny rule contributes ONLY
-    // tool/decision/ruleId — no path/args/scope/tag ever sneak in.
+    // tool/decision/ruleId - no path/args/scope/tag ever sneak in.
     const detail = (audited[0] as { detail: Record<string, unknown> }).detail;
     expect(Object.keys(detail).sort()).toEqual(['decision', 'ruleId', 'tool']);
     expect(detail).not.toHaveProperty('path');

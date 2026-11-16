@@ -12,7 +12,7 @@
  *
  * This exercises the actual pump→onEvent→ingester→store path (not fakes). The one
  * link it CANNOT verify in this environment is whether a live `qwen serve`
- * actually emits usage at `data.update._meta.usage` — there is no model-credentialed
+ * actually emits usage at `data.update._meta.usage` - there is no model-credentialed
  * daemon in CI (the rc-gateway e2e only routes prompts, never runs a model turn).
  * So the frame here is hand-built in the shape `extractUsage` reads; the real
  * daemon's exact shape remains a documented verification ceiling.

@@ -131,7 +131,7 @@
           })();
 
         if (!tok) {
-          setStatus('no share token — open the share link again');
+          setStatus('no share token - open the share link again');
           return;
         }
 
@@ -206,7 +206,7 @@
         }
 
         // Render an approve(once)/deny card for a permission_request. A GUEST is
-        // limited to the one-time 'allow_once' option — NEVER allow_always (a
+        // limited to the one-time 'allow_once' option - NEVER allow_always (a
         // standing grant that would outlive the share). If no allow_once option
         // exists, only Deny is offered. All server fields via textContent.
         function renderPermissionCard(data, sessionId) {
@@ -346,7 +346,7 @@
           });
 
         // Read-only watch of the locked session's event stream (fetch-SSE;
-        // EventSource can't set Authorization). Approve/prompt deferred — this
+        // EventSource can't set Authorization). Approve/prompt deferred - this
         // is a view. Event data is rendered via textContent (XSS-safe).
         function watch(sessionId) {
           authed('/session/' + encodeURIComponent(sessionId) + '/events')

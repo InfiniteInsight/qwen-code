@@ -211,7 +211,7 @@ export interface DaemonEndpoint {
   url: string;
   /** The daemon's `QWEN_SERVER_TOKEN`; undefined when it has none. */
   token: string | undefined;
-  /** The workspace this daemon is bound to — the directory a host terminal
+  /** The workspace this daemon is bound to - the directory a host terminal
    * opens in, so the terminal and the conversation share one cwd. */
   workspaceCwd: string;
 }
@@ -251,7 +251,7 @@ export type WorkflowControlAction =
 
 /**
  * The session-routing surface of `DaemonClient` that the gateway's routes
- * actually call through `deps.daemon` — signatures copied verbatim from
+ * actually call through `deps.daemon` - signatures copied verbatim from
  * `DaemonClient` (packages/sdk-typescript/src/daemon/DaemonClient.ts) so a
  * real `DaemonClient` structurally satisfies this interface with zero
  * changes. `DaemonPool` is the other implementation: a drop-in that routes
@@ -773,7 +773,7 @@ export interface SessionDaemon {
   sessionHooks(sessionId: string): Promise<DaemonSessionHooksStatus>;
 
   // -- Workspace control (rc-workspace-permissions) --------------------
-  // Daemon-global methods: no session id, but workspace-scoped — each takes
+  // Daemon-global methods: no session id, but workspace-scoped - each takes
   // an optional trailing `workspaceCwd` (rc-workspace-scoping, #28) naming
   // the workspace to act on; omitted/empty/the default workspace's cwd
   // targets the default/boot daemon. A `DaemonClient`'s own workspace
@@ -987,12 +987,12 @@ export interface SessionDaemon {
     workspaceCwd?: string,
   ): Promise<DaemonDeleteSessionsResult>;
 
-  /** The session's recovery state (add-mid-turn-recovery §3). Optional — a
+  /** The session's recovery state (add-mid-turn-recovery §3). Optional - a
    * plain `DaemonClient` has no recovery behind it, so the events route
    * treats a missing implementation as `'idle'`. */
   recoveryState?(sessionId: string): RecoveryState;
   /** Live pooled workspace cwds, excl. the default (rc-workspace-scoping,
-   * #28). Optional — a plain `DaemonClient` has no pool behind it, so the
+   * #28). Optional - a plain `DaemonClient` has no pool behind it, so the
    * workspace listing route treats a missing implementation as `[]`. */
   workspaces?(): string[];
   /** Last known workspace cwd for a session id, even after the session or
@@ -1254,10 +1254,10 @@ export class WorkspacePoolFullError extends Error {
 }
 
 /** Per-session recovery state after its owning daemon died (add-mid-turn-
- * recovery §2/§3). `'recovering'` — a recovery saga is in flight for this
+ * recovery §2/§3). `'recovering'` - a recovery saga is in flight for this
  * session (the events route holds the connection); `'recovered'` /
- * `'unrecoverable'` — the saga finished and the outcome cache keeps the
- * branch sticky for late reconnects; `'idle'` — no recovery involved (the
+ * `'unrecoverable'` - the saga finished and the outcome cache keeps the
+ * branch sticky for late reconnects; `'idle'` - no recovery involved (the
  * default when no orchestrator is wired). */
 export type RecoveryState =
   | 'recovering'
@@ -1265,7 +1265,7 @@ export type RecoveryState =
   | 'unrecoverable'
   | 'idle';
 
-/** Backing for {@link DaemonPool.recoveryState} — implemented by the
+/** Backing for {@link DaemonPool.recoveryState} - implemented by the
  * recovery orchestrator, which owns the lock map + outcome cache (the pool
  * cannot keep the session→state map itself: `markDead` scrubs the affected
  * ids from `ownerOf`). Absent (never wired) → every session reports
@@ -1285,7 +1285,7 @@ export interface RecoveryStateProvider {
  * workspace daemons (evicting the LRU idle one, or refusing when all are
  * busy).
  *
- * This is a drop-in for the session-routing surface of `DaemonClient` —
+ * This is a drop-in for the session-routing surface of `DaemonClient` -
  * routes can hold a `DaemonPool` wherever they previously held a single
  * `DaemonClient`.
  */
@@ -1320,7 +1320,7 @@ export class DaemonPool implements SessionDaemon {
   private readonly idleReapMs: number;
   private readonly probeTimeoutMs: number;
   private readonly reapTimer: ReturnType<typeof setInterval>;
-  /** The normalized (see `normalizeCwd`) default workspace cwd — computed
+  /** The normalized (see `normalizeCwd`) default workspace cwd - computed
    * once so every `isDefault`/key comparison compares like-for-like. */
   private readonly defaultWorkspaceCwd: string;
   /** Set at the top of `stopAll`; a spawn that resolves after shutdown must
@@ -1330,7 +1330,7 @@ export class DaemonPool implements SessionDaemon {
    * post-construction by cli.ts once the gateway app has built it. */
   private audit: AuditRecorder | undefined;
   /** Recovery-state backing (add-mid-turn-recovery), injected post-
-   * construction — the orchestrator depends on this pool, so it cannot be
+   * construction - the orchestrator depends on this pool, so it cannot be
    * passed in the options. Absent → `recoveryState` reports `'idle'`. */
   private recoveryProvider: RecoveryStateProvider | undefined;
   /**
@@ -1627,7 +1627,7 @@ export class DaemonPool implements SessionDaemon {
         const s = await promiseFrom(() => this.opts.spawn(key));
         const entry = this.newEntry(s);
         if (this.stopped) {
-          // `stopAll()` ran while this spawn was in flight — the pool's
+          // `stopAll()` ran while this spawn was in flight - the pool's
           // maps are already cleared and the gateway is shutting down.
           // Registering this entry now would leak a daemon (children are
           // spawned `detached`) that nothing will ever stop again.
@@ -1637,7 +1637,7 @@ export class DaemonPool implements SessionDaemon {
         // Identity-guarded exit wiring (see `markDead`'s `expectedEntry`):
         // the callback captures THIS entry so a stale exit of a superseded
         // entry (same key re-spawned after a death) can't kill the new one.
-        // Setting it synchronously before `byWorkspace.set` is race-free —
+        // Setting it synchronously before `byWorkspace.set` is race-free -
         // the spawner's `whenExited` settles on a later 'exit' event, never
         // in this microtask.
         s.onExit = (info) => this.markDead(key, info, entry);
@@ -1645,7 +1645,7 @@ export class DaemonPool implements SessionDaemon {
         this.stopSuperseded(key);
         return entry;
       } finally {
-        // Runs on both success AND rejection — a failed spawn must not
+        // Runs on both success AND rejection - a failed spawn must not
         // leave a stuck entry in `spawning` that poisons this cwd forever;
         // the next getOrSpawn(cwd) needs to be able to retry.
         this.spawning.delete(key);
@@ -1696,7 +1696,7 @@ export class DaemonPool implements SessionDaemon {
   }
 
   /** Stop the daemon, drop its entry, and scrub any of its session ids out
-   * of `ownerOf` (defensive — under the current invariants an idle entry's
+   * of `ownerOf` (defensive - under the current invariants an idle entry's
    * `sessions` set is already empty, but this keeps `ownerOf` from ever
    * accumulating a stale mapping if that invariant is ever violated). */
   private discardEntry(key: string, entry: Entry): void {
@@ -1940,23 +1940,23 @@ export class DaemonPool implements SessionDaemon {
   }
 
   /**
-   * Mark the daemon for `key` dead — idempotent (a second trigger, e.g. the
+   * Mark the daemon for `key` dead - idempotent (a second trigger, e.g. the
    * exit event and a transport error racing, is a no-op):
    *
    * - removes the pooled entry IMMEDIATELY (frees the `maxDaemons` slot
    *   for the recovery respawn; the zombie can no longer wedge the cap),
-   * - collects the affected session ids — `entry.sessions` ∪ the
+   * - collects the affected session ids - `entry.sessions` ∪ the
    *   `ownerOf` entries mapping to `key` (the union guards against an id
    *   recorded in one structure but not the other),
    * - scrubs them from `ownerOf` (they 404 until recovery re-registers
    *   them via `resumeSession`),
-   * - writes ONE `daemon_died` audit row — detail
+   * - writes ONE `daemon_died` audit row - detail
    *   `{ exitCode, signal, sessionCount }`, no workspace path (the
    *   session-create/resume audit rule), plus `reason` when the dead daemon
    *   is an attached one nothing will replace (#203),
    * - hands the affected list to `opts.onDaemonDeath` (the recovery
    *   orchestrator; absent → the sessions are simply dropped, 404s as
-   *   today — the audit row is still written).
+   *   today - the audit row is still written).
    *
    * `expectedEntry` (set by the pool's own exit wiring at spawn, by
    * `handleDaemonExit` for the boot daemon, and by `callOn` for the daemon a
@@ -2121,7 +2121,7 @@ export class DaemonPool implements SessionDaemon {
    * the target workspace's daemon: the default workspace's daemon when
    * `workspaceCwd` is omitted/empty/normalizes to the default workspace,
    * otherwise the pooled daemon for that cwd (spawned on demand via
-   * `getOrSpawn`, exactly like session creation — a controllable workspace
+   * `getOrSpawn`, exactly like session creation - a controllable workspace
    * does not need a live session). Marks that daemon dead on a
    * transport-level error (then rethrow; routes keep their 502 mapping). A
    * `WorkspacePoolFullError` or a failed spawn from `getOrSpawn` is not a
@@ -2178,7 +2178,7 @@ export class DaemonPool implements SessionDaemon {
    * terminal can attach to the SAME session and mirror it both ways. Returns
    * undefined when the owning daemon was registered without endpoint material
    * (a stub spawner in tests, or a boot daemon the gateway cannot authenticate
-   * to) — callers refuse the request rather than hand a terminal a URL it
+   * to) - callers refuse the request rather than hand a terminal a URL it
    * cannot use. Throws `UnknownSessionError` like `ownerEntry`. A session on
    * a respawned default daemon gets that daemon's endpoint, not the dead boot
    * daemon's.
@@ -2186,7 +2186,7 @@ export class DaemonPool implements SessionDaemon {
   daemonEndpointForSession(sessionId: string): DaemonEndpoint | undefined {
     const { key, entry } = this.ownerEntry(sessionId);
     // The pool's key is the canonicalized cwd, so it wins over whatever the
-    // spawner recorded — a terminal must `cd` to the same path the daemon binds.
+    // spawner recorded - a terminal must `cd` to the same path the daemon binds.
     return entry.endpoint
       ? { ...entry.endpoint, workspaceCwd: key }
       : undefined;
@@ -2238,13 +2238,13 @@ export class DaemonPool implements SessionDaemon {
    * session id so later session-keyed calls route correctly.
    *
    * `key` is held (see `hold`) SYNCHRONOUSLY, before the
-   * `getOrSpawn` await — not after it resolves. Even when `getOrSpawn`
+   * `getOrSpawn` await - not after it resolves. Even when `getOrSpawn`
    * resolves an already-spawned entry (no internal await needed), `await
    * this.getOrSpawn(...)` still defers the rest of this function to a
    * later microtask; marking pending only after that await would leave a
    * window where a concurrent `getOrSpawn`'s cap eviction can see this
    * entry as idle (`sessions.size === 0`) and reclaim it mid-registration
-   * — stopping the daemon while this call still returns what looks like a
+   * - stopping the daemon while this call still returns what looks like a
    * successful `DaemonSession`. */
   async createOrAttachSession(
     req: CreateSessionRequest,
@@ -2318,9 +2318,9 @@ export class DaemonPool implements SessionDaemon {
 
   /**
    * `session_died` and `session_closed` are the SDK's own definition of a
-   * session-lifecycle terminal — see `isSessionLifecycleTerminal` in
+   * session-lifecycle terminal - see `isSessionLifecycleTerminal` in
    * `@qwen-code/sdk`'s `daemon/events.ts` (`type === 'session_died' ||
-   * type === 'session_closed'`) — so both reliably mean the daemon session
+   * type === 'session_closed'`) - so both reliably mean the daemon session
    * itself ended; pruning on them lets the entry become reapable.
    *
    * `client_evicted` is deliberately NOT included here, despite also being
@@ -2333,7 +2333,7 @@ export class DaemonPool implements SessionDaemon {
    * OTHER clients); treating that as session-terminal would drop the id
    * from tracking and let `reapIdle`/`evictLruIdle` reclaim (and `stop()`)
    * a daemon that is still serving a live session out from under those
-   * other clients — worse than the wedge this pruning exists to prevent.
+   * other clients - worse than the wedge this pruning exists to prevent.
    *
    * A dropped stream is not, by itself, a dead daemon (#153). The daemon
    * evicts a slow subscriber by writing `client_evicted` and destroying the
@@ -2662,7 +2662,7 @@ export class DaemonPool implements SessionDaemon {
 
   /**
    * Abort the session's in-flight turn. Unlike {@link closeSession} the session
-   * SURVIVES — only the running prompt is cancelled — so the pool entry is
+   * SURVIVES - only the running prompt is cancelled - so the pool entry is
    * deliberately left in place and `removeSession` is NOT called.
    */
   async cancel(sessionId: string, clientId?: string): Promise<void> {
@@ -2847,7 +2847,7 @@ export class DaemonPool implements SessionDaemon {
 
   /**
    * Cancels one running subagent, leaving the parent turn alive. Distinct from
-   * `cancel`, which aborts the whole turn — that difference is the reason this
+   * `cancel`, which aborts the whole turn - that difference is the reason this
    * route exists. `subagentRef` is the PARENT transcript's tool-call id (the
    * daemon matches it against `task.toolUseId`), the same value the viewer
    * already holds as `_meta.parentToolCallId`, so no new identifier needs
@@ -2921,7 +2921,7 @@ export class DaemonPool implements SessionDaemon {
    *
    * The daemon's verdict is returned rather than collapsed. A workflow kind on
    * an untrusted workspace answers `{cancelled: false, reason: 'disabled'}`,
-   * which is an answer about policy, not a failure to reach the daemon — the
+   * which is an answer about policy, not a failure to reach the daemon - the
    * caller has to be able to tell those apart.
    */
   async cancelSessionTask(
@@ -3766,7 +3766,7 @@ export class DaemonPool implements SessionDaemon {
   // -- Sessions at rest (add-capability-parity #111) --------------------
   // The daemon's batch transcript actions. `workspaceCwd` resolves the target
   // daemon the same way the workspace-control block above does and is never
-  // forwarded — the client's own second parameter is a daemon clientId, so
+  // forwarded - the client's own second parameter is a daemon clientId, so
   // passing the cwd there would be read as an identity, not a target. The
   // daemon's per-id outcome is returned untouched so a partial failure stays
   // visible.
@@ -3834,14 +3834,14 @@ export class DaemonPool implements SessionDaemon {
    * and is stopped like a pooled one (#163), and so is a pooled or
    * replacement daemon a transport error took that nothing replaced yet
    * (#203). Tolerates an individual entry's
-   * `stop()` rejecting (`Promise.allSettled`) — one stuck daemon must not
+   * `stop()` rejecting (`Promise.allSettled`) - one stuck daemon must not
    * block the others from being asked to stop. Intended for shutdown; not
    * safe to call mid-lifetime (any in-flight session routing is dropped).
    *
    * Sets `stopped` FIRST, synchronously, before anything else: a spawn that
    * was in flight when shutdown began resolves after this returns, and its
    * `getOrSpawn` closure checks this flag to avoid registering a fresh
-   * entry into the (already-cleared) pool — which would otherwise leak a
+   * entry into the (already-cleared) pool - which would otherwise leak a
    * detached daemon process that nothing will ever stop.
    */
   async stopAll(): Promise<void> {

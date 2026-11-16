@@ -20,12 +20,12 @@ describe('isActive', () => {
     expect(await isActive(stub('active'), 'qwen-rc-gateway')).toBe(true);
   });
 
-  it('is true for "activating" — a unit systemd accepted but hasn\'t finished starting', async () => {
+  it('is true for "activating" - a unit systemd accepted but hasn\'t finished starting', async () => {
     // `systemd-run` returning success only means the job was accepted; the
     // unit reads back as "activating" (nonzero exit code) for a beat after.
     // A second `up` during that window must NOT decide the unit is down and
     // re-issue `systemd-run --unit=<name>`, which systemd would refuse as a
-    // duplicate — hence "activating" counts as active.
+    // duplicate - hence "activating" counts as active.
     expect(await isActive(stub('activating'), 'qwen-rc-gateway')).toBe(true);
   });
 

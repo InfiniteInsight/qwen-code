@@ -12,7 +12,7 @@
  *
  * The load-bearing subtlety is **code-fence balancing**: if a fenced block (```)
  * spans a cut, the message that ends mid-block MUST close the fence, and the
- * next message MUST reopen it with the SAME language tag — otherwise Discord
+ * next message MUST reopen it with the SAME language tag - otherwise Discord
  * renders the tail as prose and the head as an unterminated block. Critically,
  * the closing/reopening fence characters COUNT against the 2000 budget, so the
  * packer reserves that overhead rather than filling to 2000 and then overflowing
@@ -138,7 +138,7 @@ export function splitForDiscord(
       }
     }
 
-    // The line alone exceeds the budget — split it. A toggle line is short and
+    // The line alone exceeds the budget - split it. A toggle line is short and
     // always fits, so here the line is plain content and fence state is unchanged
     // (nextInFence === inFence). Each piece is its own message.
     const budget = max - overhead(openedInFence, inFence);

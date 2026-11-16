@@ -21,15 +21,15 @@ export interface InsecurePolicyFile {
  */
 export const NON_OWNER_WRITE_MASK = 0o022;
 
-/** Minimal stat surface this check needs — injected in tests. */
+/** Minimal stat surface this check needs - injected in tests. */
 type StatLike = (path: string) => Promise<{ mode: number }>;
 
 /**
  * Boot-time hygiene check: which of `paths` are group/world-writable. Purely
- * advisory — it never changes whether a policy loads (fail-closed parsing is
+ * advisory - it never changes whether a policy loads (fail-closed parsing is
  * unchanged), it only lets the operator notice a tampering-exposed file.
  *
- * Best-effort and total: a missing file (ENOENT — the normal no-policy case) or
+ * Best-effort and total: a missing file (ENOENT - the normal no-policy case) or
  * ANY stat error is skipped, so a permission CHECK can never itself break boot.
  * The returned mode is masked to the permission bits.
  */

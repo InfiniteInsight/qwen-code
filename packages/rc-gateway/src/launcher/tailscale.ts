@@ -44,7 +44,7 @@ export async function nodeIdentity(
 
 /**
  * Ensure the tailnet node is up. Checks status first; only invokes `tailscale up`
- * (bounded, so it cannot hang) when not already Running. Classifies the outcome —
+ * (bounded, so it cannot hang) when not already Running. Classifies the outcome -
  * on a logged-out node it surfaces the auth URL for the operator's one-time
  * browser authorization (they authenticate, then re-run `qwen-rc up`).
  */

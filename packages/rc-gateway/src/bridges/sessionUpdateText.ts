@@ -11,7 +11,7 @@
  * The gateway relays the daemon's ACP `SessionNotification` verbatim as the frame
  * `data`: `{ sessionId, update }` where `update.sessionUpdate` is the kind and
  * `update.content.text` is the chunk (confirmed against the reference web client).
- * We render ONLY `agent_message_chunk` — the assistant's prose — and deliberately
+ * We render ONLY `agent_message_chunk` - the assistant's prose - and deliberately
  * skip `agent_thought_chunk`, `tool_call`, plan, etc., to keep the chat surface
  * readable. Returns '' for any other kind or a malformed frame, so the caller can
  * simply `if (!text) return`.

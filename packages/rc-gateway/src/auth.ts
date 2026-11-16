@@ -22,7 +22,7 @@ const SUB_ACTOR_MAX = 128;
  * whitespace and control characters so an asserted value can never inject a
  * newline into a JSONL audit line or smuggle markup into a client that renders
  * it. It DOES include `/ = +` because Matrix MXID localparts legally use them
- * (the extended grammar) — rejecting those would silently drop federated/legacy
+ * (the extended grammar) - rejecting those would silently drop federated/legacy
  * users' prompts and votes. None of `/ = +` is a control/whitespace char, so the
  * audit-injection guard is unaffected.
  */
@@ -42,7 +42,7 @@ export function parseSubActor(raw: string | undefined): string | null {
 /**
  * Resolve an asserted sub-actor (the underlying human behind a bridge) onto
  * `req.rcClient.subActor`. SECURITY: a sub-actor is attached ONLY when the
- * resolved token holds the `bridge` scope AND the header value is valid — a
+ * resolved token holds the `bridge` scope AND the header value is valid - a
  * regular client sending `X-RC-SubActor` is silently ignored, so no client can
  * forge "acting for someone else" in the audit log. Mount AFTER `bearerResolve`.
  * Never rejects (a bad/absent header just yields no attribution); total.
@@ -63,7 +63,7 @@ export function resolveSubActor(): RequestHandler {
  * Reject a non-bridge authenticated token that sends `X-RC-SubActor`. Bridges
  * use this header to name the chat user acting through them; any other token
  * sending it is either confused or attempting to spoof attribution. Unauthenticated
- * requests (no `rcClient`) pass through — they'll fail auth downstream anyway.
+ * requests (no `rcClient`) pass through - they'll fail auth downstream anyway.
  * Mount BEFORE `resolveSubActor`.
  */
 export function enforceSubActorScope(): RequestHandler {
@@ -172,7 +172,7 @@ export function enforceSessionLock(audit?: AuditRecorder): RequestHandler {
  * through. A banned sub-actor → 403 `sub_actor_banned`. Mount on write routes
  * AFTER `resolveSubActor` and BEFORE the rate limiter (a banned user shouldn't
  * even consume rate budget). The rejection is NOT audited per-hit (a banned bot
- * could hammer) — the ban/lift actions are audited at creation instead. Never
+ * could hammer) - the ban/lift actions are audited at creation instead. Never
  * throws.
  */
 export function enforceSubActorBan(bans: SubActorBanStore): RequestHandler {

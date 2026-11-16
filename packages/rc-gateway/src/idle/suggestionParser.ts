@@ -22,7 +22,7 @@ function coerce(s: string): unknown {
 
 /**
  * Parse a model reply into a clean list of suggestion strings. TOTAL and
- * never-throws — ANY malformed reply yields `[]` (spec I5: "bad model response
+ * never-throws - ANY malformed reply yields `[]` (spec I5: "bad model response
  * is dropped", no UI breakage, no transcript pollution). Handles the realistic
  * failure modes:
  *
@@ -51,7 +51,7 @@ export function parseSuggestions(
   if (fence) s = fence[1].trim();
 
   // Primary: parse the whole string. An array is accepted; an object (or any
-  // non-array) is NOT — so `{"suggestions":[...]}` deliberately drops to [].
+  // non-array) is NOT - so `{"suggestions":[...]}` deliberately drops to [].
   let parsed = coerce(s);
   // Fallback for a prose preamble around the array: only when the whole-string
   // parse failed (so a valid non-array object is never bracket-mined).

@@ -70,8 +70,8 @@ function parseRecordLine(line: string): ForkRecord | null {
 }
 
 /**
- * Reads ONLY the first JSONL record of `<chatsDir>/<id>.jsonl` — the
- * `forkedFrom` source a listing needs — without pulling the whole (possibly
+ * Reads ONLY the first JSONL record of `<chatsDir>/<id>.jsonl` - the
+ * `forkedFrom` source a listing needs - without pulling the whole (possibly
  * multi-MB) transcript into memory.
  *
  * Accumulates raw BYTES up to the first `\n` (or EOF, or `maxBytes`), then
@@ -208,7 +208,7 @@ export async function readHeadRecords(
 
 /**
  * Reads a session's human title (core's `custom_title` system record) by a
- * BOUNDED TAIL scan — the mirror of {@link readFirstRecord} from EOF. `stat`s
+ * BOUNDED TAIL scan - the mirror of {@link readFirstRecord} from EOF. `stat`s
  * the size, reads the last `min(size, maxBytes)` bytes at an explicit offset,
  * decodes once, drops a possibly-partial leading line when the window did not
  * start at byte 0, then scans BACKWARDS for the most recent line whose parsed
@@ -276,7 +276,7 @@ export async function readSessionTitleInfo(
     }
     const lines = buf.subarray(0, off).toString('utf8').split('\n');
     // When the window did not start at byte 0, its first line may be a partial
-    // record — drop it so JSON.parse only ever sees complete lines.
+    // record - drop it so JSON.parse only ever sees complete lines.
     if (start > 0) lines.shift();
     for (let i = lines.length - 1; i >= 0; i--) {
       const line = lines[i].trim();
@@ -428,7 +428,7 @@ export interface SessionEntry {
 }
 
 /**
- * Pure: turn flat `{sessionId, parentSessionId}` entries into the listing —
+ * Pure: turn flat `{sessionId, parentSessionId}` entries into the listing -
  * nodes + the reverse `forks[]` index + a deterministic order. No disk.
  *
  * A child whose parent is NOT among the entries (orphan / deleted / beyond the

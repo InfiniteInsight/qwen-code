@@ -11,7 +11,7 @@ import type { AuditRecorder } from '../auditLog.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
 
 /**
- * GET /session/:id/export — hand the caller a copy of the whole conversation.
+ * GET /session/:id/export - hand the caller a copy of the whole conversation.
  *
  * This is the gap the route exists to close: a phone holding a token can watch
  * a session and type into it, but it has no way to get the conversation OUT of
@@ -26,8 +26,8 @@ import { isValidSessionId } from '../sessions/chatsPath.js';
  * programmatic anchor click), which is the same download the terminal would
  * have produced, from a token that never leaves the header.
  *
- * `format` is RELAYED, never re-listed here. The daemon owns the vocabulary —
- * four today — and answers a format it does not know with 400 plus
+ * `format` is RELAYED, never re-listed here. The daemon owns the vocabulary -
+ * four today - and answers a format it does not know with 400 plus
  * `allowedFormats`. A copy of that list in this file would read as authority
  * and go stale the day the daemon grows a fifth, so the caller's string is
  * carried to the validator that actually decides. Omitted means the daemon's
@@ -35,7 +35,7 @@ import { isValidSessionId } from '../sessions/chatsPath.js';
  *
  * Audited as a read, because it is the one read that moves the entire
  * conversation out of the gateway. The record carries the format and the byte
- * count, never the content — the same rule that keeps paths out of every other
+ * count, never the content - the same rule that keeps paths out of every other
  * record. No failure twin: `search_performed` established that a read records
  * what left, not what was refused.
  */
@@ -45,7 +45,7 @@ export function createSessionExportRoute(
 ): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;
-    // Reject a malformed/path-traversal-shaped id before any daemon call —
+    // Reject a malformed/path-traversal-shaped id before any daemon call -
     // mirrors the sibling session routes (events, fork, rewind, context).
     if (!isValidSessionId(sessionId)) {
       res

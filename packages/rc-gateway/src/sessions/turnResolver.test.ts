@@ -47,11 +47,11 @@ describe('resolveTurn', () => {
 
   it('a mid-conversation toTurn truncates at the Nth user record', () => {
     const records = [
-      userRec('u0'), // index 0 — turn 0
+      userRec('u0'), // index 0 - turn 0
       assistantRec('a0'), // index 1
-      userRec('u1'), // index 2 — turn 1
+      userRec('u1'), // index 2 - turn 1
       assistantRec('a1'), // index 3
-      userRec('u2'), // index 4 — turn 2
+      userRec('u2'), // index 4 - turn 2
       assistantRec('a2'), // index 5
     ];
     const result = resolveTurn(records, 1);
@@ -88,10 +88,10 @@ describe('resolveTurn', () => {
 
   it('turns at or before a compression checkpoint are not addressable', () => {
     const records = [
-      userRec('u0'), // index 0 — compressed away
+      userRec('u0'), // index 0 - compressed away
       assistantRec('a0'), // index 1
-      compressionCheckpoint('ck'), // index 2 — checkpoint
-      userRec('u1'), // index 3 — turn 0 (first addressable turn)
+      compressionCheckpoint('ck'), // index 2 - checkpoint
+      userRec('u1'), // index 3 - turn 0 (first addressable turn)
       assistantRec('a1'), // index 4
     ];
     // Only 1 addressable turn exists after the checkpoint; toTurn=1 (the tip)

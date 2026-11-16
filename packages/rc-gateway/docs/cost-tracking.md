@@ -6,7 +6,7 @@ per-model aggregates (`add-cost-tracking`).
 
 ## How it works
 
-- **Rate table** — `~/.qwen/rc/model-rates.yaml` maps `(modelServiceId, modelId)`
+- **Rate table** - `~/.qwen/rc/model-rates.yaml` maps `(modelServiceId, modelId)`
   to per-million-token cent prices (`inputPerMTok`, `outputPerMTok`,
   `cachedReadPerMTok`) plus a `currencyLabel`. Built-in Qwen defaults apply when
   the file is absent; a malformed edit retains the last good table and audits
@@ -26,7 +26,7 @@ per-model aggregates (`add-cost-tracking`).
   cachedReadTokens * cachedReadPerMTok + outputTokens * outputPerMTok`; the stored
   `tokens_in` / `tokens_cached` keep what the daemon reported. `cachedReadPerMTok`
   is required in the table (there is no implicit fraction of the input rate).
-- **Ingestion** — the always-on session-event pump (which runs whenever push OR
+- **Ingestion** - the always-on session-event pump (which runs whenever push OR
   cost tracking is enabled) feeds every `session_update` to the usage feeder. When
   an `agent_message_chunk` frame carries usage (`data.update._meta.usage`), a row is
   written to `~/.qwen/rc/usage.db` (`usage_events`), attributed to the prompt's
@@ -42,7 +42,7 @@ per-model aggregates (`add-cost-tracking`).
   written, with its arrival time and attribution, once the id arrives. A frame
   that never gets one is written with an empty model id, i.e. visibly unpriced,
   and one `usage_model_unresolved` audit row says how many; it is not dropped.
-- **Storage** — SQLite via the optional native `better-sqlite3` (same isolation as
+- **Storage** - SQLite via the optional native `better-sqlite3` (same isolation as
   ranked search). If that dependency is not built, cost tracking is **disabled**
   (logged at boot) and the gateway runs normally.
 
@@ -90,7 +90,7 @@ After writing a row the ingester pushes a coalesced `usage_tick` (≤1 per 500 m
 per session) to a per-session broadcaster; each `/rc/session/:id/events` relay
 registers as a listener and injects a `{ type: "usage_tick", data: { sessionId,
 costCentsSessionTotal, costCentsPromptTotal, tokensInTotal, tokensOutTotal } }`
-frame onto its SSE stream — with **no `id:`** so it never advances the client's
+frame onto its SSE stream - with **no `id:`** so it never advances the client's
 Last-Event-ID cursor. `GET /rc/capabilities` advertises
 `remoteControl.costTracking { enabled, currencyLabel, rateTablePath }` (the
 gateway's `/rc`-prefixed surface, since the daemon's `/capabilities` is
@@ -105,7 +105,7 @@ qwen-rc usage prune --before <iso-8601> [--yes]
 qwen-rc usage reprice [--dry-run] [--db <path>] [--chats-dir <dir>]
 ```
 
-Both are daemon-free — they open the same `~/.qwen/rc/usage.db` the gateway writes.
+Both are daemon-free - they open the same `~/.qwen/rc/usage.db` the gateway writes.
 `usage` defaults to a 24h / by-session / table view; `prune` deletes rows older
 than `--before` (prompting unless `--yes`) and prints `<n> rows removed`.
 

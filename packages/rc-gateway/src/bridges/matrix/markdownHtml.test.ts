@@ -47,7 +47,7 @@ describe('markdownToHtml', () => {
   });
 
   it('drops a non-http(s) link scheme to plain text (no live javascript:/data: href)', () => {
-    // javascript: — the visible text survives (escaped), but no <a href> is emitted.
+    // javascript: - the visible text survives (escaped), but no <a href> is emitted.
     const js = markdownToHtml('[click](javascript:alert(1))');
     expect(js).not.toContain('<a');
     expect(js).not.toContain('javascript:');

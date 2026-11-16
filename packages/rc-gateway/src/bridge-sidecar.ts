@@ -18,7 +18,7 @@
  * `QWEN_BRIDGE_PAIRING_CODE` (redeemed + persisted at mode 0600). For Matrix the
  * access token's `whoami` MXID must match `MATRIX_USER_ID` or it exits 1.
  *
- * This file is process glue (argv, env, signals, exit) — the bug-prone logic is in
+ * This file is process glue (argv, env, signals, exit) - the bug-prone logic is in
  * the pure, unit-tested resolver / token bootstrap; this path is exercised
  * end-to-end by the sidecar spawn smoke.
  */
@@ -72,7 +72,7 @@ const tokenDeps: TokenBootstrapDeps = {
     });
     if (!res.ok) {
       throw new SidecarConfigError(
-        `pairing-code redemption failed (${res.status}) — mint a fresh code`,
+        `pairing-code redemption failed (${res.status}) - mint a fresh code`,
       );
     }
     const body = (await res.json()) as { token?: unknown };
@@ -114,7 +114,7 @@ async function main(): Promise<void> {
     const mismatch = checkMxid(who.userId, cfg.userId);
     if (mismatch) fail(mismatch);
     // E2EE crypto transport (opt-in via MATRIX_ENABLE_E2EE, OFF by default) is
-    // constructed, wired, and started inside startBridge — when on, the SDK
+    // constructed, wired, and started inside startBridge - when on, the SDK
     // crypto client owns /sync and outbound; when off, the plain fetch bridge
     // runs unchanged. Construction failure degrades to the plain bridge.
   }

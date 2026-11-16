@@ -17,12 +17,12 @@ export type BrowsePeers = (timeoutMs: number) => Promise<DaemonRecord[] | null>;
 /**
  * The gateway's default mDNS browse window. Matches the default the
  * `qwen-rc daemons discover` CLI uses (`parseDiscoverArgs` → `timeoutMs = 5000`).
- * The endpoint blocks for roughly this long — inherent to mDNS.
+ * The endpoint blocks for roughly this long - inherent to mDNS.
  */
 const PEERS_BROWSE_TIMEOUT_MS = 5000;
 
 /**
- * `GET /rc/peers` — owner-only (enforced at the mount), read-only LAN daemon
+ * `GET /rc/peers` - owner-only (enforced at the mount), read-only LAN daemon
  * discovery. Returns `200 { peers }` (the browse result verbatim; empty LAN →
  * `[]`), `503 mdns_unavailable` when discovery is unavailable, `500
  * peers_unavailable` on an unexpected browse failure. No daemon call, no

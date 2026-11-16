@@ -10,8 +10,8 @@
  *
  * The daemon never exposes a generic "who am I" for bearer tokens (`GET
  * /rc/tokens` is owner-scoped metadata WITHOUT the raw token, so a stored
- * token cannot be matched to a row). What IS known at pairing time — the
- * `POST /rc/pair/redeem` response `{ id, token, scopes }` — is persisted here
+ * token cannot be matched to a row). What IS known at pairing time - the
+ * `POST /rc/pair/redeem` response `{ id, token, scopes }` - is persisted here
  * next to the token file, so `whoami` can render it later.
  *
  * Layout: `~/.qwen/rc/tokens/<sanitised-key>.meta.json` (mode 0600, sibling

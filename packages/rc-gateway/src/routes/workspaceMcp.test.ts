@@ -376,7 +376,7 @@ describe('POST /rc/workspace/mcp/servers', () => {
   });
 });
 
-describe('POST /rc/workspace/mcp/servers — optimistic concurrency', () => {
+describe('POST /rc/workspace/mcp/servers - optimistic concurrency', () => {
   // Server shape with the full persisted fields the mcpVersion hash reads,
   // plus transient fields that MUST be excluded from the hash.
   const baseMcp = {
@@ -426,7 +426,7 @@ describe('POST /rc/workspace/mcp/servers — optimistic concurrency', () => {
     const body = await res.json();
     expect(body.code).toBe('stale_base');
     expect(typeof body.currentVersion).toBe('string');
-    // The daemon's setWorkspaceSetting was never called — the stale base
+    // The daemon's setWorkspaceSetting was never called - the stale base
     // caused the request to be rejected before the mutation.
     expect(ctx.stub.lastSetSettingBody).toBeUndefined();
   });
@@ -440,7 +440,7 @@ describe('POST /rc/workspace/mcp/servers — optimistic concurrency', () => {
     const { version } = (await getRes.json()) as { version: string };
     expect(version.length).toBeGreaterThan(0);
 
-    // POST with the fresh baseVersion — should succeed.
+    // POST with the fresh baseVersion - should succeed.
     const config = { command: 'uvx', args: ['memory-mcp'] };
     const res = await postMcp(ctx.baseUrl, ctx.ownerToken, {
       operation: 'set',
@@ -613,11 +613,11 @@ describe('workspace target (rc-workspace-scoping, #28)', () => {
   });
 });
 
-describe('workspace target — pool at cap (rc-workspace-scoping, #28)', () => {
+describe('workspace target - pool at cap (rc-workspace-scoping, #28)', () => {
   /**
    * A real DaemonPool wired in as the gateway's `daemon` dep: cap of 1
    * with one busy entry (a live session → not evictable), so a NEW
-   * workspace target cannot be spawned — the routes must map
+   * workspace target cannot be spawned - the routes must map
    * WorkspacePoolFullError to 503 `workspace_pool_full`, not 502.
    */
   async function setupPoolAtCap(): Promise<{
@@ -694,7 +694,7 @@ describe('workspace target — pool at cap (rc-workspace-scoping, #28)', () => {
       { workspaceCwd: '/proj/a', idle: false, state: 'busy' },
     ]);
     expect(body.next).toContain('idleReapMs');
-    // The default workspace is not pooled — it stays reachable at cap.
+    // The default workspace is not pooled - it stays reachable at cap.
     const ok = await fetch(`${ctx.baseUrl}/rc/workspace/mcp`, {
       headers: authed(ctx.writeToken),
     });

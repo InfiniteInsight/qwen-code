@@ -5,7 +5,7 @@
  */
 
 /**
- * Thin Matrix client-server REST client over `fetch` — NO SDK dependency for the
+ * Thin Matrix client-server REST client over `fetch` - NO SDK dependency for the
  * UNENCRYPTED path (the client-server API is plain HTTPS JSON). This is the
  * outbound + bootstrap surface the bridge needs: `whoami` (the startup
  * MXID-mismatch fail-fast), `joinRoom` (auto-accept invites), and `sendMessage`
@@ -15,7 +15,7 @@
  * NOTE: `@vector-im/matrix-bot-sdk`'s crypto (for E2EE rooms) is integrated
  * with its sync loop and would SUBSUME this fetch client + the sync loop if
  * E2EE is added later. That's why the render/dispatch/store/normalize layers
- * are kept transport-agnostic — they survive that swap; only this adapter is
+ * are kept transport-agnostic - they survive that swap; only this adapter is
  * replaceable.
  *
  * Matrix ids (rooms, users) are opaque STRINGS, URL-encoded into paths.

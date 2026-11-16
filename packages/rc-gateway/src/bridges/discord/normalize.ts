@@ -15,7 +15,7 @@ import type {
  * transport-agnostic shapes (`add-discord-bridge`). This is the seam that keeps
  * discord.js out of the dispatcher and out of the tests: the functions below read
  * only a minimal structural slice of each discord.js object (declared inline), so
- * they're exercised with plain literals — no Client, no socket, no bot token.
+ * they're exercised with plain literals - no Client, no socket, no bot token.
  * The thin gateway shell (`gateway.ts`) does nothing but hand real discord.js
  * objects to these functions and route the result to dispatch.
  *

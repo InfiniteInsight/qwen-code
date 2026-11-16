@@ -17,7 +17,7 @@ type TaskKind = DaemonSessionTaskWithWorkflowStatus['kind'];
  * because the route has to refuse anything else BEFORE the call. The daemon
  * answers a bad `kind` with a 400, the SDK surfaces that as a throw, and a
  * thrown daemon-400 reaching the catch below would be reported as
- * `502 daemon_unavailable` — the gateway accusing itself of being down because
+ * `502 daemon_unavailable` - the gateway accusing itself of being down because
  * a caller mistyped a body field. Refusing here is what keeps the two failures
  * distinguishable. Same set as the daemon's own guard
  * (packages/cli/src/serve/routes/session.ts:7451).
@@ -30,13 +30,13 @@ const CANCELLABLE_KINDS: readonly TaskKind[] = [
 ];
 
 /**
- * POST /session/:id/tasks/:taskId/cancel — stop ONE run while leaving the
+ * POST /session/:id/tasks/:taskId/cancel - stop ONE run while leaving the
  * session and every other run alive.
  *
  * This is the act half of the run log: D22 put the task list on the wire and
  * D24 drew it, so a reader could see a runaway shell or a stuck subagent but
  * could not stop it from the page. `taskId` is the id that row already prints,
- * so no new identifier is introduced — unlike `subagentCancel`, which reaches a
+ * so no new identifier is introduced - unlike `subagentCancel`, which reaches a
  * child through the PARENT's tool-call id.
  *
  * Write-scoped, and not owner-scoped at this layer, on the same reasoning as

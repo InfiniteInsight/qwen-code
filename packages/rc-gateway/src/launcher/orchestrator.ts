@@ -31,14 +31,14 @@ export interface Deps {
   unit: string; // e.g. qwen-rc-gateway
   serveCmd: string[]; // PATH-independent argv prefix for qwen-rc, e.g. [process.argv[0], process.argv[1]]
   // The gateway unit writes owner-bootstrap.code from inside the unit
-  // process, hundreds of ms after `systemd-run` merely accepts the job —
+  // process, hundreds of ms after `systemd-run` merely accepts the job -
   // `up` polls for it. These are injectable purely so tests don't incur
   // real multi-second waits; production uses the defaults below.
   bootstrapTimeoutMs?: number;
   bootstrapPollMs?: number;
 }
 
-/** Production polling defaults — see `Deps.bootstrapTimeoutMs`/`bootstrapPollMs`. */
+/** Production polling defaults - see `Deps.bootstrapTimeoutMs`/`bootstrapPollMs`. */
 const DEFAULT_BOOTSTRAP_TIMEOUT_MS = 15_000;
 const DEFAULT_BOOTSTRAP_POLL_MS = 200;
 
@@ -102,7 +102,7 @@ function readLiveBootstrapCode(dir: string): string | undefined {
  * Deliberately keyed on `readBootstrapCode`'s non-empty check, not
  * `existsSync`: the gateway creates-then-writes the file, so a bare
  * existence check can observe a truncated/zero-length file mid-write. That
- * would return an incomplete code instead of continuing to poll — so this
+ * would return an incomplete code instead of continuing to poll - so this
  * treats a present-but-empty file the same as absent and keeps polling.
  */
 async function waitForBootstrapCode(
@@ -206,7 +206,7 @@ export async function up(deps: Deps): Promise<UpResult> {
       const busDown =
         /failed to connect to bus|XDG_RUNTIME_DIR|no medium found/i.test(err);
       const hint = busDown
-        ? 'systemd --user is unavailable in this shell (no session D-Bus). Set `XDG_RUNTIME_DIR=/run/user/$(id -u)` and run `loginctl enable-linger $USER` once — this is the usual cause when launched via wsl.exe.'
+        ? 'systemd --user is unavailable in this shell (no session D-Bus). Set `XDG_RUNTIME_DIR=/run/user/$(id -u)` and run `loginctl enable-linger $USER` once - this is the usual cause when launched via wsl.exe.'
         : `Failed to start the gateway unit: ${err.trim().slice(0, 500)}`;
       return { ok: false, hint };
     }
@@ -235,7 +235,7 @@ export async function up(deps: Deps): Promise<UpResult> {
       );
   // Embed the pairing code in the URL fragment so a scanned QR auto-fills and
   // pairs (the /ui/ page reads `#code=`, then scrubs it). Human terminal output
-  // only — `upJson()` omits `qr`, so the code never reaches the `--json` stream;
+  // only - `upJson()` omits `qr`, so the code never reaches the `--json` stream;
   // it rides the fragment, which never hits server logs/Referer.
   const qrTarget =
     bootstrapCode === undefined
@@ -319,7 +319,7 @@ export async function down(
   clearState(dir);
   // Each gateway boot mints a fresh owner-bootstrap code. Leaving the old
   // file behind would let a subsequent `up` read a STALE code that doesn't
-  // match the next boot's — pairing would then fail. Removing it here means
+  // match the next boot's - pairing would then fail. Removing it here means
   // a following `up` only ever sees a code minted by the gateway it started.
   rmSync(join(dir, BOOTSTRAP_CODE_FILENAME), { force: true });
   return { ok: true };

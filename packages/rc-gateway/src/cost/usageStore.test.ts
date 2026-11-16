@@ -86,7 +86,7 @@ describe('UsageStore record + sessionTotals (microcents)', () => {
     expect(store.sessionTotals('b').costMicrocentsSesTotal).toBe(9 * MICRO);
   });
 
-  it('stores as INTEGER — fractional microcents are rounded', () => {
+  it('stores as INTEGER - fractional microcents are rounded', () => {
     // 0.6 microcents fractional part (sub-microcent) is rounded away
     store.record(row({ costMicrocents: 1.7 }));
     // We don't care about the exact value, only that it stored something

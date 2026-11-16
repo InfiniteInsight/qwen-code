@@ -184,7 +184,7 @@ describe('formatExplanation', () => {
 
   it('a deny + maxPerWindow rule: caveat never claims "allow"', () => {
     // A deny rule with a quota is valid policy; at runtime with room it stays
-    // deny — the caveat must NOT assert it could become allow.
+    // deny - the caveat must NOT assert it could become allow.
     const p = policy([
       {
         id: 'd',

@@ -51,7 +51,7 @@ export interface SessionEventPumpOptions {
    * is delivered only if the enforcer did NOT auto-handle it (a human is
    * actually needed), and after its decision rather than before. The subscriber-independent ingestion hook for cost tracking
    * (`add-cost-tracking`: "subscribe to every emitted session_update"). Must be
-   * total — invoked inside the loop's try, but should never throw.
+   * total - invoked inside the loop's try, but should never throw.
    */
   onEvent?: (sessionId: string, event: DaemonEvent) => void;
   /**
@@ -62,11 +62,11 @@ export interface SessionEventPumpOptions {
   /**
    * Optional idle handler (proposal `add-idle-suggestions`, slice 2). Called ONCE
    * per session whenever its `hasActivePrompt` transitions true→false across poll
-   * ticks — the daemon's authoritative "the agent just went idle" edge (the
+   * ticks - the daemon's authoritative "the agent just went idle" edge (the
    * bridge sets `hasActivePrompt = activePromptOriginatorClientId !== undefined`,
    * so it is true for the whole prompt turn INCLUDING tool calls; the falling edge
    * is genuine idle, never a mid-tool gap). Invoked synchronously inside a
-   * try/catch and expected to be fire-and-forget — it must never block or throw
+   * try/catch and expected to be fire-and-forget - it must never block or throw
    * into reconcile.
    */
   onSessionIdle?: (sessionId: string, workspaceCwd: string) => void;
@@ -111,7 +111,7 @@ const defaultSleep = (ms: number): Promise<void> =>
 /**
  * Holds the gateway's own persistent daemon-SSE subscriptions: discover sessions
  * via capabilities + workspace session list, subscribe per session, and fan each
- * event into the push notifier — so push fires with no browser open.
+ * event into the push notifier - so push fires with no browser open.
  *
  * Best-effort by construction: every failure path is caught and logged, and no
  * code path rethrows into the gateway. `start()` always resolves. `stop()` aborts
@@ -198,7 +198,7 @@ export class SessionEventPump {
     await this.reconcile();
     // A concurrent stop() during the awaits above would not have seen a timer
     // to clear (it's assigned below). Re-check so we don't install a live poll
-    // timer after stop() — honoring the "leaves no open handles" contract.
+    // timer after stop() - honoring the "leaves no open handles" contract.
     if (this.stopped) return;
     this.timer = this.setIntervalFn(() => {
       void this.reconcile();
@@ -241,7 +241,7 @@ export class SessionEventPump {
       }
     }
     if (!anySucceeded) return;
-    // stop() may have landed during the await — don't spawn loops post-stop.
+    // stop() may have landed during the await - don't spawn loops post-stop.
     if (this.stopped) return;
     const ids = new Set(list.map((s) => s.sessionId));
     for (const s of list) {
@@ -272,8 +272,8 @@ export class SessionEventPump {
    * on a true→false transition (the agent just went idle), and
    * {@link onSessionActive} once on a false→true one (a new prompt started).
    * The FIRST observation
-   * only seeds the state — a session first seen idle, or first seen mid-prompt,
-   * never fires until we actually witness the falling edge — so startup doesn't
+   * only seeds the state - a session first seen idle, or first seen mid-prompt,
+   * never fires until we actually witness the falling edge - so startup doesn't
    * emit a suggestion storm for every pre-existing session. No-op when neither
    * handler is wired (so the map stays empty and there's zero overhead).
    */
@@ -331,7 +331,7 @@ export class SessionEventPump {
           if (!deferEvent) this.emitEvent(s.sessionId, ev);
           // Consult the policy enforcer for permission_request events. An
           // auto-handled (voted) event is suppressed from push; everything else
-          // — non-permission events and prompt/fail-safe decisions — still
+          // - non-permission events and prompt/fail-safe decisions - still
           // notifies, identical to pre-policy behavior.
           let routing: RoutingEventContext | undefined;
           if (this.enforcer && ev.type === 'permission_request') {

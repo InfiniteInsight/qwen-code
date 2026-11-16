@@ -14,7 +14,7 @@ import type { TurnText } from './suggester.js';
 const DEFAULT_MAX_BYTES = 256 * 1024;
 
 /**
- * Reads the tail of a session transcript as complete JSONL lines — the shared
+ * Reads the tail of a session transcript as complete JSONL lines - the shared
  * EOF-window primitive behind {@link readRecentTurns} and
  * {@link readSessionModel}. A transcript can be many MB, so the read is bounded
  * to the last `maxBytes` and the partial leading line that window produces is
@@ -57,7 +57,7 @@ async function readTailLines(
     }
     const lines = buf.subarray(0, off).toString('utf8').split('\n');
     // When the window did not start at byte 0, its first line may be a partial
-    // record — drop it so JSON.parse only ever sees complete lines.
+    // record - drop it so JSON.parse only ever sees complete lines.
     if (start > 0) lines.shift();
     return lines;
   } catch {
@@ -70,7 +70,7 @@ async function readTailLines(
 /**
  * Reads the most recent user/assistant turns of a session transcript to feed the
  * idle suggester (proposal `add-idle-suggestions`, slice 2). A BOUNDED TAIL scan
- * — the same EOF-window technique as `readSessionTitle` — because a transcript
+ * - the same EOF-window technique as `readSessionTitle` - because a transcript
  * can be many MB and a single tool_result record can itself be enormous; the
  * suggester needs only the last few conversational turns, never the whole file.
  *
@@ -128,7 +128,7 @@ export async function readRecentTurns(
  *
  * Why the transcript and not the live session: `model` is a top-level field on
  * `assistant` records only (user/system/tool_result records do not carry it), so
- * the transcript is the record of which model the conversation ACTUALLY ran —
+ * the transcript is the record of which model the conversation ACTUALLY ran -
  * including after a mid-conversation `/model` switch, which a value captured at
  * session start would miss. The gateway keeps no per-session model state of its
  * own, so this is the source rather than a second copy to keep in sync.

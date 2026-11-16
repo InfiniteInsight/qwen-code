@@ -50,10 +50,10 @@ interface PersistShape {
 }
 
 /**
- * Persisted agent registry — JSON file store, same pattern as TokenStore
+ * Persisted agent registry - JSON file store, same pattern as TokenStore
  * (tokenStore.ts): private constructor, `open()` reads-or-starts-empty,
  * every mutation awaits `persist()` (0600 file inside an ensured dir).
- * Cost is deliberately NOT stored here — it is computed at read time from
+ * Cost is deliberately NOT stored here - it is computed at read time from
  * the cost tables keyed by sessionId (one source of truth).
  */
 export class AgentRegistry {
@@ -147,7 +147,7 @@ export class AgentRegistry {
 
   /**
    * Transition a record's status. Returns false (and changes nothing) when
-   * the id is unknown OR the record is already terminal — so a cancelled
+   * the id is unknown OR the record is already terminal - so a cancelled
    * agent's late `session_died` can never flip it to `failed`, and callers
    * can gate frame emission on the return value. Stamps `finishedAt` when
    * entering a terminal status.

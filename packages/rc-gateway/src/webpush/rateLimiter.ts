@@ -33,7 +33,7 @@ export interface RateLimitResult {
   /**
    * True ONLY on the transition INTO the rate-limited state (the first drop of a
    * burst). The caller audits `push_rate_limited` only when this is true, so a
-   * 1000-event/sec storm produces ONE audit row, not 1000 — the rate limit must
+   * 1000-event/sec storm produces ONE audit row, not 1000 - the rate limit must
    * not move the flood into the audit log.
    */
   firstDrop: boolean;
@@ -42,7 +42,7 @@ export interface RateLimitResult {
 /**
  * Per-subscription rolling-window push rate limiter (anti-fatigue, NOT security).
  * In-memory only: a restart resets the counters, which is the FAIL-OPEN
- * direction (a limiter glitch must never SUPPRESS a notification — at worst a
+ * direction (a limiter glitch must never SUPPRESS a notification - at worst a
  * small burst of extra pushes). Every method is pure/total (no I/O, never
  * throws), so the notifier's gate needs no try/catch to preserve fail-open.
  */

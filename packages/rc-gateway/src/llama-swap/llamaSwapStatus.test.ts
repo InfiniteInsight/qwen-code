@@ -55,7 +55,7 @@ describe('probeLlamaSwapStatus', () => {
     // setTimeout), so vi.useFakeTimers() can't fast-forward it. Instead,
     // stub AbortSignal.timeout itself to return a controller we fire
     // immediately, proving probeLlamaSwapStatus wires the signal into the
-    // fetch call and handles the resulting abort — without a real 5s wait.
+    // fetch call and handles the resulting abort - without a real 5s wait.
     const controller = new AbortController();
     const timeoutSpy = vi
       .spyOn(AbortSignal, 'timeout')

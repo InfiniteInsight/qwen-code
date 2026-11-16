@@ -10,7 +10,7 @@
  * as `*` (the MVP makes no depth distinction).
  *
  * Implemented as a linear two-pointer scan with greedy backtracking on the LAST
- * star only — NOT a RegExp. A regex of the form `^.*a.*b.*$` exhibits
+ * star only - NOT a RegExp. A regex of the form `^.*a.*b.*$` exhibits
  * catastrophic backtracking (ReDoS) on adversarial input, and tool-call args
  * are model/session-influenced, so a benign operator glob like `*a*b*c*` plus a
  * hostile arg string could otherwise hang the event loop. This algorithm is

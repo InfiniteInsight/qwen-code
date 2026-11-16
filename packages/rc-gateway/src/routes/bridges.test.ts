@@ -636,7 +636,7 @@ describe('invite routes (mint + redeem)', () => {
     ).toBe(true);
   });
 
-  it('does NOT gate on kind — a telegram invite redeems via any bridge id', async () => {
+  it('does NOT gate on kind - a telegram invite redeems via any bridge id', async () => {
     const { json } = await mint({ kind: 'telegram', sessionId: 'sess_k' });
     // redeemed through a bridge whose id differs from the invite kind: allowed.
     const r = await redeem('my-custom-bridge', { token: json.token });

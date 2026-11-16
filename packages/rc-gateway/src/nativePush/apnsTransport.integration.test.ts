@@ -7,7 +7,7 @@
 /**
  * Integration test for the REAL `createHttp2ApnsTransport` (closing the
  * transport-wiring half of the APNs ceiling): it drives the actual node:http2
- * client against an in-process HTTP/2 server impersonating APNs — hermetic, no
+ * client against an in-process HTTP/2 server impersonating APNs - hermetic, no
  * external service, runs in any lane. What stays unverified is only Apple's own
  * acceptance of the JWT + delivery to a device (needs Apple + a real device).
  */
@@ -86,7 +86,7 @@ function realJwt(): string {
   });
 }
 
-// Trust the self-signed fixture CA — TEST-ONLY; production passes no options.
+// Trust the self-signed fixture CA - TEST-ONLY; production passes no options.
 const trust = { ca: LOCALHOST_TEST_CERT };
 
 describe('createHttp2ApnsTransport (real http2 against a fake APNs)', () => {
@@ -179,7 +179,7 @@ describe('createHttp2ApnsTransport (real http2 against a fake APNs)', () => {
     expect(streamClosed).toBe(true);
   });
 
-  it('DEFAULTS to strict TLS — no connectOptions rejects the self-signed server', async () => {
+  it('DEFAULTS to strict TLS - no connectOptions rejects the self-signed server', async () => {
     const { host } = await startFakeApns(200);
     // Production path: no trust override → the self-signed cert must be refused.
     await expect(

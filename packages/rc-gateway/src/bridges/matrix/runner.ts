@@ -101,14 +101,14 @@ const RECONNECT_MAX_MS = 30_000;
  * Cap on room-invite auto-joins the bot will accept within the rolling window
  * (reuses {@link SubActorRateLimiter}'s default 60 s window). Anyone can invite
  * the bot to arbitrary rooms with no allowlist gate, so an unbounded auto-join
- * is a DoS/probing surface (the bot joining — and thus syncing state for —
+ * is a DoS/probing surface (the bot joining - and thus syncing state for -
  * unboundedly many rooms). Binding a session still requires an operator-minted
  * token posted IN the room, so this bounds probing/DoS, not session
  * compromise. Declining an invite is always safe (fail-safe): a legitimate
  * operator can just re-invite once the window rolls over.
  *
  * ACCEPTED TRADEOFF: the bucket is GLOBAL (one bot-wide counter, see
- * {@link MATRIX_INVITE_AUTOJOIN_KEY}), not per-inviter — `invite_state` does
+ * {@link MATRIX_INVITE_AUTOJOIN_KEY}), not per-inviter - `invite_state` does
  * not expose a trustworthy inviter identity to key on. A sustained attacker
  * who spends the full cap every window can therefore starve a legitimate
  * operator's invite for as long as the flood continues (re-invite-on-cooldown
@@ -139,7 +139,7 @@ interface SentRequest {
  * dispatch (messages → prompts/commands, reactions → votes, invites → auto-join,
  * encrypted rooms → a one-time refusal notice), while an outbound SSE echo loop
  * per bound session renders permission_request frames into room messages and
- * edits them (via `m.replace`) on resolve. It holds NO gateway internals — every
+ * edits them (via `m.replace`) on resolve. It holds NO gateway internals - every
  * daemon interaction goes through the injected {@link BridgeClient} over the
  * loopback contract, so the bridge is sidecar-extractable by config.
  *
@@ -248,11 +248,11 @@ export class MatrixBridge {
    * from the bot's MXID) and hand it to the shared {@link handleMessage}, so a
    * decrypted prompt reaches a bound session exactly like a cleartext one.
    *
-   * `powerLevel` defaults to 0 — sufficient for plain prompts (un-gated); command
+   * `powerLevel` defaults to 0 - sufficient for plain prompts (un-gated); command
    * power-gating (`!qwen attach`) needs the room's `m.room.power_levels`, which the
    * adapter resolves and passes. `startBridge` wires a STARTED adapter's `onMessage`
    * to this method and lets the SDK client SUBSUME the fetch `/sync` (one sync owner
-   * — see startBridge); this seam is also unit-tested directly.
+   * - see startBridge); this seam is also unit-tested directly.
    */
   async dispatchDecryptedMessage(
     m: { roomId: string; sender: string; body: string },
@@ -350,7 +350,7 @@ export class MatrixBridge {
         ? 'matrix bridge: registered with the gateway'
         : `matrix bridge: registration returned ${reg.status} (continuing)`,
     );
-    // The heartbeat loop uses its OWN (abort-aware) timer, not cfg.sleep — keeping
+    // The heartbeat loop uses its OWN (abort-aware) timer, not cfg.sleep - keeping
     // it independent of the /sync reconnect-backoff sleep.
     void runHeartbeatLoop({
       heartbeat: (id) => this.cfg.client.heartbeat(id),
@@ -382,7 +382,7 @@ export class MatrixBridge {
       }
       const initial = since === undefined; // first sync: load state, skip history
       const ex = extractSync(sync, this.ctx);
-      // A `/sync` that doesn't advance (no next_batch) is a failure — `syncOnce`
+      // A `/sync` that doesn't advance (no next_batch) is a failure - `syncOnce`
       // resolves (not rejects) on 401/429/network via the REST client, so without
       // this guard the loop would busy-spin and hammer the homeserver on exactly
       // the normal operational failures. Back off; a healthy sync resets it.
@@ -421,7 +421,7 @@ export class MatrixBridge {
         });
       }
 
-      // Skip replaying timeline history on the initial full sync — state
+      // Skip replaying timeline history on the initial full sync - state
       // (power levels, encryption, invites) is applied above regardless.
       if (!initial) {
         // Off the loop: a prompt holds its POST open for the whole turn, and

@@ -36,7 +36,7 @@ export interface ToolCallContext {
 /**
  * A READ-ONLY view of the quota store for the evaluator: does rule `ruleId` have
  * room within its rolling window at `nowMs`? `untracked` = no known limit (no
- * store entry / id-less). The evaluator must NEVER mutate quota state — consuming
+ * store entry / id-less). The evaluator must NEVER mutate quota state - consuming
  * happens in the enforcer AFTER a successful allow vote (design.md:68).
  */
 export interface QuotaOracle {
@@ -49,7 +49,7 @@ export interface PolicyDecision {
    * What produced this decision: `'policy'` when a rule matched (including a rule
    * downgraded to prompt), `'default'` when no rule matched and the policy default
    * action was used. Distinguishes a matched id-less rule from the default
-   * fall-through — `ruleId` cannot, since `id` is optional. Maps to the spec's
+   * fall-through - `ruleId` cannot, since `id` is optional. Maps to the spec's
    * audit `decision_source` (the `'client'` value is emitted by the human-vote
    * route, not the evaluator).
    */
@@ -61,10 +61,10 @@ export interface PolicyDecision {
   /** Carried for deny decisions. */
   reason?: string;
   /**
-   * True when the matched rule carried a condition we could NOT evaluate — a
+   * True when the matched rule carried a condition we could NOT evaluate - a
    * still-deferred field (`rule.maxPerWindow`) or a MALFORMED
    * `match.timeOfDay`/`rule.expiresAt` (unparseable HH:MM, bad IANA zone,
-   * unparseable instant). Such an allow/deny is downgraded to prompt — we never
+   * unparseable instant). Such an allow/deny is downgraded to prompt - we never
    * auto-decide on a constraint we could not evaluate. Well-formed timeOfDay /
    * expiresAt are now evaluated (false here): satisfied → real action,
    * unsatisfied → the rule does not match at all.
@@ -110,9 +110,9 @@ function canonicalArgString(args: unknown): string {
  * and path normalization, so an equivalent spelling (`./x`, `a/../x`) cannot
  * bypass a deny that the old hand-rolled glob would have missed.
  *
- * `filePath` is resolved against `cwd` first — `matchesPathPattern` normalizes
+ * `filePath` is resolved against `cwd` first - `matchesPathPattern` normalizes
  * the PATTERN (via `path.join` internally) but only forward-slashes the
- * candidate, never collapsing `.`/`..` segments in it — so that collapsing
+ * candidate, never collapsing `.`/`..` segments in it - so that collapsing
  * must happen here. Using the call's `cwd` for THIS resolution is correct: for
  * `run_shell_command` the daemon really does execute in `directory`, so a
  * relative candidate must resolve against it to name the file actually
@@ -121,18 +121,18 @@ function canonicalArgString(args: unknown): string {
  * Pattern ANCHORING is a separate concern and MUST use `projectRoot`, never
  * `cwd`, as the 4th (anchor) argument to `matchesPathPattern`: `cwd` here
  * ultimately traces back to `rawInput.directory`/`rawInput.cwd` in
- * `frameToContext` — fields the MODEL supplies in its own tool call. If an
+ * `frameToContext` - fields the MODEL supplies in its own tool call. If an
  * unprefixed pattern (e.g. `**\/.env*`) anchored to that model-controlled
  * value, the model could move the anchor and make a literal, unobfuscated
  * deny target silently mismatch (`path-mismatch`) on a call whose `directory`
- * simply differs from `projectRoot` — no path obfuscation needed. A policy
+ * simply differs from `projectRoot` - no path obfuscation needed. A policy
  * author writing `**\/.env*` means "anywhere in the project"; `src/auth/**`
- * means "relative to the project" — neither should move because the model
+ * means "relative to the project" - neither should move because the model
  * claimed a different working directory. `projectRoot` comes from the
  * daemon's own trusted capabilities, not from call arguments, so anchoring to
  * it cannot be steered by the model.
  *
- * A pattern picomatch rejects yields `false` — never an accidental match.
+ * A pattern picomatch rejects yields `false` - never an accidental match.
  */
 function pathMatchesAny(
   spec: string | string[] | undefined,
@@ -145,7 +145,7 @@ function pathMatchesAny(
   const patterns = Array.isArray(spec) ? spec : [spec];
   for (const pattern of patterns) {
     try {
-      // Anchor is ALWAYS projectRoot (trusted) — never the model-supplied cwd.
+      // Anchor is ALWAYS projectRoot (trusted) - never the model-supplied cwd.
       if (matchesPathPattern(pattern, resolved, projectRoot, projectRoot)) {
         return true;
       }
@@ -178,7 +178,7 @@ function specificity(rule: PolicyRule): number {
 
 /**
  * Why a rule's STATIC match fails, or `null` when it matches. The single source
- * of truth for both {@link ruleMatches} (the hot-path boolean — a `null` check,
+ * of truth for both {@link ruleMatches} (the hot-path boolean - a `null` check,
  * with NO string allocation on the matching branch) and {@link explainPolicy}'s
  * SKIPPED reason token, so the two can never disagree.
  */
@@ -270,7 +270,7 @@ function classifyConditionsDetailed(
   let unevaluable = false;
   let unevaluableReason = 'condition-unevaluable';
 
-  // 1. expiresAt — definitively dead when in the past.
+  // 1. expiresAt - definitively dead when in the past.
   if (rule.expiresAt !== undefined) {
     const expiresMs = parseExpiresAt(rule.expiresAt);
     if (expiresMs === null) {
@@ -281,7 +281,7 @@ function classifyConditionsDetailed(
     }
   }
 
-  // 2. timeOfDay — definitively dead when current time is outside the window.
+  // 2. timeOfDay - definitively dead when current time is outside the window.
   //    Checked even if expiresAt was malformed, so a no-match (out-of-window)
   //    still wins over the unevaluable expiresAt sibling.
   if (rule.match.timeOfDay !== undefined) {
@@ -294,14 +294,14 @@ function classifyConditionsDetailed(
     }
   }
 
-  // 3. maxPerWindow — consult the quota oracle when one is supplied (the enforcer
+  // 3. maxPerWindow - consult the quota oracle when one is supplied (the enforcer
   //    path). Without an oracle, or for an id-less rule (can't be tracked), it
   //    stays unevaluable → prompt (the backward-compatible default).
   if (rule.maxPerWindow !== undefined) {
     if (quota && rule.id !== undefined) {
       const q = quota.state(rule.id, now.getTime());
       if (q === 'exhausted') {
-        // An exhausted rule does NOT apply — wins over any unevaluable sibling.
+        // An exhausted rule does NOT apply - wins over any unevaluable sibling.
         return { kind: 'no-match', reason: 'quota-exhausted' };
       }
       if (q === 'untracked') {
@@ -508,7 +508,7 @@ export interface RuleTrace {
   downgraded?: boolean;
   /**
    * True when this matched winner carries a `maxPerWindow` whose quota was NOT
-   * consulted (no oracle / id-less / untracked) — the daemon-free dry-run case.
+   * consulted (no oracle / id-less / untracked) - the daemon-free dry-run case.
    * Set INDEPENDENTLY of the reason token (which a malformed sibling field can
    * win), so the renderer's quota caveat is never wrongly suppressed. The live
    * quota could change this rule's runtime outcome (its real action while it has
@@ -521,7 +521,7 @@ export interface RuleTrace {
 
 /** Result of {@link explainPolicy}: the authoritative decision + per-rule trace. */
 export interface PolicyExplanation {
-  /** The REAL decision from {@link evaluate} — can never drift from the trace. */
+  /** The REAL decision from {@link evaluate} - can never drift from the trace. */
   decision: PolicyDecision;
   /**
    * Rules in evaluation order (priority desc, specificity desc, index asc):
@@ -531,11 +531,11 @@ export interface PolicyExplanation {
 }
 
 /**
- * Dry-run a policy and produce a per-rule trace — the `qwen rc policy explain`
+ * Dry-run a policy and produce a per-rule trace - the `qwen rc policy explain`
  * inspector. PURE. Walks rules in the SAME order as {@link evaluate} via
  * {@link orderedRuleIndices}, reusing the SAME {@link matchReason} /
  * {@link classifyConditionsDetailed} internals, and computes the authoritative
- * `decision` by CALLING `evaluate` — so the printed decision can never diverge
+ * `decision` by CALLING `evaluate` - so the printed decision can never diverge
  * from what the enforcer would do. Without a {@link QuotaOracle} (the
  * daemon-free CLI), a `maxPerWindow` rule is `unevaluable` → prompt; pass an
  * oracle to reflect live quota state. A merged policy is traced per layer (the
@@ -607,7 +607,7 @@ function traceLayer(
     }
     // Winner: the first rule that statically matches with a non-no-match
     // condition. A non-prompt action with an unevaluable condition is
-    // downgraded to prompt — exactly as evaluate() does.
+    // downgraded to prompt - exactly as evaluate() does.
     const downgraded = cc.kind === 'unevaluable' && rule.action !== 'prompt';
     // A maxPerWindow whose quota we could not consult here (no oracle / id-less
     // / untracked). Computed independently of `cc.reason` so a malformed sibling

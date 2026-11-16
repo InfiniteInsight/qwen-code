@@ -14,7 +14,7 @@ import { dirname } from 'node:path';
  * `~/.qwen/rc/bridges/matrix/rooms.json`) so bindings survive a restart. The
  * reverse lookup (session → rooms) drives where a session's permission_request
  * messages are sent. Load/save never throw (a corrupt/missing file fails open to
- * empty). Room ids are opaque strings (`!abcd:home.example.com`) — never coerced.
+ * empty). Room ids are opaque strings (`!abcd:home.example.com`) - never coerced.
  */
 
 /** A persisted room→session binding. */

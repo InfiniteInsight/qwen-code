@@ -147,11 +147,11 @@ function wrap(failed: {
 }
 
 /**
- * GET /rc/workspace/permissions — read the workspace's permission rule
+ * GET /rc/workspace/permissions - read the workspace's permission rule
  * lists (user/workspace/merged). Mounted at the WRITE floor (server.ts);
  * no in-handler scope check.
  *
- * POST /rc/workspace/permissions — replace ONE rule list (`{scope,
+ * POST /rc/workspace/permissions - replace ONE rule list (`{scope,
  * ruleType, rules}` full replacement). Mounted OWNER-only (server.ts); the
  * mount's `requireScope` writes the `scope_denied` audit row on denial, so
  * the daemon is never touched by an under-scoped caller.
@@ -163,7 +163,7 @@ function wrap(failed: {
  *
  * On a successful POST, audits `workspace_permission_rules_set` with ONLY
  * `{scope, ruleType, rules}` plus the resolved `workspace` cwd when a
- * non-default workspace was targeted — never session or prompt content —
+ * non-default workspace was targeted - never session or prompt content -
  * and the actor is always the AUTHENTICATED `req.rcClient`.
  */
 export function createWorkspacePermissionsRoutes(
@@ -262,12 +262,12 @@ export function createWorkspacePermissionsRoutes(
     // Optimistic concurrency: when a `baseVersion` is supplied (from the
     // prior GET's `version`), re-fetch the current rules and confirm the
     // client's view is still fresh. A mismatch means another writer
-    // changed the rules in the window — reject with the current version
+    // changed the rules in the window - reject with the current version
     // so the caller can reload and retry instead of silently clobbering.
     if (baseVersion !== undefined) {
       let current: DaemonWorkspacePermissionsStatus;
       try {
-        // Same target as the mutation below — a baseVersion from one
+        // Same target as the mutation below - a baseVersion from one
         // workspace must not be checked against another's rules.
         current = await daemon.workspacePermissions(undefined, target.cwd);
       } catch (err) {
@@ -277,7 +277,7 @@ export function createWorkspacePermissionsRoutes(
       const currentVersion = permissionsVersion(current);
       if (currentVersion !== baseVersion) {
         res.status(409).json({
-          error: 'Stale permission rules — reload and try again',
+          error: 'Stale permission rules - reload and try again',
           code: 'stale_base',
           currentVersion,
         });

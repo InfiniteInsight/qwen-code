@@ -179,7 +179,7 @@ describe('gateway app', () => {
     // permission,...}, but commit 6ae9154d4 (2026-07-09) migrated those routes
     // to the BARE /session/:id/* namespace and the web UI was never updated.
     // This locks the mismatch: authenticated, so a 404 is a *routing* miss (no
-    // such route), not an auth rejection — proving the phone UI's per-session
+    // such route), not an auth rejection - proving the phone UI's per-session
     // calls are dead until repointed. See task #37.
     const { url, pairing } = await boot();
     const { code } = pairing.mint([SESSION_READ]);
@@ -311,7 +311,7 @@ describe('gateway app', () => {
   it('a bridge-scope token can stream a session (the bundle includes session:read)', async () => {
     // add-bridge-protocol slice 1: a `bridge` grant expands to the concrete
     // {bridge, session:read, approve, write} bundle, so a bridge can subscribe
-    // to the very stream it bridges — 200, not 403.
+    // to the very stream it bridges - 200, not 403.
     const { url, pairing } = await boot();
     const { code } = pairing.mint([BRIDGE]);
     const redeem = await fetch(`${url}/rc/pair/redeem`, {
@@ -1219,7 +1219,7 @@ describe('gateway app', () => {
 
     // No on-disk transcript was written for this id, so the handler answers
     // 404 (session/parent transcript not found). The assertion is that OWNER
-    // scope reaches the handler at all — i.e. NOT 403.
+    // scope reaches the handler at all - i.e. NOT 403.
     const res = await fetch(
       `${url}/session/11111111111111111111111111111111/rewind`,
       {
@@ -1239,7 +1239,7 @@ describe('gateway app', () => {
     // into both the prompt route and the rewind route. The prompt route
     // acquires the per-session FIFO slot BEFORE calling the daemon and holds it
     // until the daemon responds; a long promptDelayMs keeps it held. The rewind
-    // route's guard is a zero-wait acquire on that same session slot — if (and
+    // route's guard is a zero-wait acquire on that same session slot - if (and
     // only if) it is the same queue object, a held slot makes rewind fail
     // immediately with 409 rewind_in_progress (a separate queue would let the
     // rewind proceed to a 404 transcript-not-found instead). The delay is long
@@ -1268,7 +1268,7 @@ describe('gateway app', () => {
 
     // The stub records the prompt body the instant the request arrives (before
     // the delay), which is strictly after the gateway has acquired the queue
-    // slot — so this poll proves the slot is held before we probe the rewind.
+    // slot - so this poll proves the slot is held before we probe the rewind.
     // The 5s deadline matches the prompt delay: a round-trip stalling longer
     // than that is a hard stall, not a slot race.
     const deadline = Date.now() + 5000;
@@ -1533,7 +1533,7 @@ describe('gateway app', () => {
     };
     expect(share.url).toBe('/ui/share/' + share.token);
 
-    // The share token reaches its own locked session (passes the lock — not 403).
+    // The share token reaches its own locked session (passes the lock - not 403).
     const ok = await fetch(`${url}/session/s1/events`, {
       headers: { Authorization: `Bearer ${share.token}` },
     });
@@ -1674,7 +1674,7 @@ describe('gateway app', () => {
 
   it('403s GET /rc/commands for a token lacking session:read', async () => {
     const { url, pairing } = await boot();
-    // `share` is a pure marker scope with no functional implications — it does
+    // `share` is a pure marker scope with no functional implications - it does
     // NOT imply session:read (unlike write/approve/owner which all do via the
     // implication hierarchy). Use it to exercise the 403 path.
     const { code } = pairing.mint([SHARE]);
@@ -1735,7 +1735,7 @@ describe('gateway app', () => {
 
   it('403s the push vapid route for a token lacking session:read', async () => {
     const { url, pairing } = await boot();
-    // `share` is a pure marker scope with no functional implications — it does
+    // `share` is a pure marker scope with no functional implications - it does
     // NOT imply session:read (unlike owner/write/approve which all do). Use it
     // to exercise the 403 path on the vapid route.
     const { code } = pairing.mint([SHARE]);
@@ -1822,7 +1822,7 @@ describe('APNs registration auth floor (native-mobile-shells)', () => {
     shellVersion: '1.0.0',
   };
 
-  it('requires session:read — a zero-scope token is 403', async () => {
+  it('requires session:read - a zero-scope token is 403', async () => {
     const apnsDir = mkdtempSync(join(tmpdir(), 'rc-apns-floor-'));
     const apnsStore = await ApnsStore.open(join(apnsDir, 'apns.json'));
     const { url, pairing } = await boot(undefined, { apnsStore });

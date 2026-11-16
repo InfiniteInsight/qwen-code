@@ -11,7 +11,7 @@
  * real library + a live CA), so the smallest possible surface keeps any on-box fix
  * localized. The pure `splitPemChain` and the missing-dep path ARE tested.
  *
- * Pinned to acme-client v5 — its crypto surface differs from v4 (`crypto.*` vs
+ * Pinned to acme-client v5 - its crypto surface differs from v4 (`crypto.*` vs
  * `forge.*`). The `auto()` flow places the order, solves each authorization's
  * dns-01 challenge via the {@link DnsProvider}, finalizes with a fresh cert key,
  * and returns the fullchain PEM.
@@ -69,7 +69,7 @@ export async function loadAcmeLib(): Promise<AcmeClientLib> {
       /acme-client/.test(String((err as Error).message))
     ) {
       throw new Error(
-        'ACME auto-TLS needs the optional acme-client dependency — run: ' +
+        'ACME auto-TLS needs the optional acme-client dependency - run: ' +
           'npm install acme-client',
       );
     }
@@ -79,7 +79,7 @@ export async function loadAcmeLib(): Promise<AcmeClientLib> {
 
 /**
  * Split a fullchain PEM (leaf + issuer chain, as `auto()` returns) into the leaf
- * and the remaining issuer chain — the https server wants them separately.
+ * and the remaining issuer chain - the https server wants them separately.
  */
 export function splitPemChain(fullchain: string): {
   leaf: string;

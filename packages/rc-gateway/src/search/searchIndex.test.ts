@@ -37,7 +37,7 @@ function rec(o: {
 describe('toFtsMatch (pure, injection guard)', () => {
   it('quotes each term so FTS5 operators/syntax are inert', () => {
     expect(toFtsMatch('oauth token')).toBe('"oauth" "token"');
-    // Bare OR/NOT would be FTS5 operators if unquoted — they must be literal.
+    // Bare OR/NOT would be FTS5 operators if unquoted - they must be literal.
     expect(toFtsMatch('cats OR dogs')).toBe('"cats" "OR" "dogs"');
     // A stray double-quote can't break out of the wrapping quote.
     expect(toFtsMatch('a"b" c')).toBe('"ab" "c"');
@@ -45,7 +45,7 @@ describe('toFtsMatch (pure, injection guard)', () => {
     expect(toFtsMatch('oauth ***')).toBe('"oauth"');
   });
 
-  it('keeps non-ASCII (CJK/Cyrillic) terms — any-script letters/numbers', () => {
+  it('keeps non-ASCII (CJK/Cyrillic) terms - any-script letters/numbers', () => {
     // A Qwen product is CJK-heavy; an ASCII-only keep-predicate would drop these.
     expect(toFtsMatch('令牌')).toBe('"令牌"');
     expect(toFtsMatch('刷新 令牌')).toBe('"刷新" "令牌"');
@@ -292,7 +292,7 @@ describe('SearchIndex', () => {
     // Case-insensitive substring on a mid-word ASCII match (OAuth).
     expect(idx.query('auth').hits.map((h) => h.eventId)).toEqual(['zh']);
     // The trigram floor is uniform across scripts: a <3-char term (incl. the
-    // 2-char word 令牌) can't match via the index — documented, hinted by the CLI.
+    // 2-char word 令牌) can't match via the index - documented, hinted by the CLI.
     expect(idx.query('令牌').hits).toHaveLength(0);
     expect(idx.query('ok').hits).toHaveLength(0);
   });

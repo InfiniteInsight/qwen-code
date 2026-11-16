@@ -245,7 +245,7 @@ async function mountGuarded(
   return `http://127.0.0.1:${port}`;
 }
 
-describe('GET /session/:id/lineage — OWNER gate', () => {
+describe('GET /session/:id/lineage - OWNER gate', () => {
   it('403s a non-owner (session:read) token before the handler runs', async () => {
     await writeTranscript(PARENT);
     const audit = fakeAudit();

@@ -264,7 +264,7 @@ describe('TokenStore', () => {
   it('listShares returns only share records, with expired computed', async () => {
     let now = 1_000_000;
     const store = await TokenStore.open(path, () => now);
-    await store.issue([SESSION_READ], 'normal'); // not a share — excluded
+    await store.issue([SESSION_READ], 'normal'); // not a share - excluded
     const a = await store.issueShare({
       scopes: [SHARE, SESSION_READ],
       label: 'short',
@@ -622,7 +622,7 @@ describe('TokenStore', () => {
     const store = await TokenStore.open(path, () => now);
     const a = await store.issue([SESSION_READ], 'a');
     expect(store.verifyTokenDetailed(a.token).ok).toBe(true);
-    // Same secret, same record — only the clock moved past the ceiling.
+    // Same secret, same record - only the clock moved past the ceiling.
     now += 400 * 24 * 60 * 60 * 1000;
     expect(store.verifyTokenDetailed(a.token)).toEqual({
       ok: false,

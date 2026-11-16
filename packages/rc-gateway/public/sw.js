@@ -32,7 +32,7 @@ async function originDaemonName() {
       try {
         if (new URL(d.url).origin === self.location.origin) return d.name;
       } catch {
-        /* malformed url entry — skip it */
+        /* malformed url entry - skip it */
       }
     }
   } catch {

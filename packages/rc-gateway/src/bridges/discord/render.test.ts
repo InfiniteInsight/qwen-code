@@ -15,9 +15,9 @@ import {
   COMPONENT_TYPE,
 } from './render.js';
 
-describe('discord render — sub-actor identity', () => {
+describe('discord render - sub-actor identity', () => {
   it('carries a 19-digit snowflake verbatim as a string (never Number())', () => {
-    // 111122223333444455 > Number.MAX_SAFE_INTEGER — coercion would corrupt it.
+    // 111122223333444455 > Number.MAX_SAFE_INTEGER - coercion would corrupt it.
     const snowflake = '111122223333444455';
     expect(subActorOf(snowflake)).toBe('discord:111122223333444455');
     // Round-trip through the rendered id must not have rounded.
@@ -25,7 +25,7 @@ describe('discord render — sub-actor identity', () => {
   });
 });
 
-describe('discord render — custom_id round-trip', () => {
+describe('discord render - custom_id round-trip', () => {
   it('builds and parses vote custom_ids', () => {
     expect(buildCustomId('approve', 'req_xyz')).toBe('vote:approve:req_xyz');
     expect(parseCustomId('vote:approve:req_xyz')).toEqual({
@@ -51,7 +51,7 @@ describe('discord render — custom_id round-trip', () => {
   });
 });
 
-describe('discord render — permission_request (inline)', () => {
+describe('discord render - permission_request (inline)', () => {
   it('renders content + an ActionRow with Approve/Deny buttons', () => {
     const msg = renderPermissionRequest(
       {
@@ -111,7 +111,7 @@ describe('discord render — permission_request (inline)', () => {
   });
 });
 
-describe('discord render — permission_request (deeplink)', () => {
+describe('discord render - permission_request (deeplink)', () => {
   it('renders a single Link button to the web client and OMITS argsSummaryFull', () => {
     const full = 'SECRET-FULL-ARGS-' + 'z'.repeat(800);
     const msg = renderPermissionRequest(

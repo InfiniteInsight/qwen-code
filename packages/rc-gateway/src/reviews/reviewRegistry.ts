@@ -26,7 +26,7 @@ export const TERMINAL_REVIEW_STATUSES: ReadonlySet<ReviewStatus> = new Set([
 
 /**
  * The reviewed scope. Kept structurally identical to
- * `ReviewLifecyclePayload['target']` in ownerEvents.ts (Task B.1) — the two
+ * `ReviewLifecyclePayload['target']` in ownerEvents.ts (Task B.1) - the two
  * types are defined independently (no shared import) but MUST stay in sync.
  */
 export type ReviewTarget =
@@ -36,7 +36,7 @@ export type ReviewTarget =
 
 /**
  * Metadata-safe view of a `ReviewTarget` for any sink OUTSIDE the daemon that
- * ran the review — the owner events stream and the audit log. A `pr` target's
+ * ran the review - the owner events stream and the audit log. A `pr` target's
  * number is not sensitive and is kept; a `path` target's raw, caller-supplied
  * filesystem path is dropped, leaving only its `kind` (mirrors
  * `webpush/payload.ts`'s review branch, which likewise never lets a `path`
@@ -76,7 +76,7 @@ interface PersistShape {
 }
 
 /**
- * Persisted review registry — JSON file store, same pattern as AgentRegistry
+ * Persisted review registry - JSON file store, same pattern as AgentRegistry
  * (agentRegistry.ts): private constructor, `open()` reads-or-starts-empty,
  * every mutation awaits `persist()` (0600 file inside an ensured dir).
  */
