@@ -153,6 +153,12 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'GET',
+    path: '/session/:id/tasks/:taskId/output',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/tasks/:taskId/output',
+  },
+  {
+    method: 'GET',
     path: '/session/:id/agents',
     attribution: 'handler_resolved',
     route: 'GET /session/:id/agents',
@@ -180,6 +186,12 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/subagents/:subagentRef/message',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/subagents/:subagentRef/message',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/subagents/:subagentRef/pause',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/subagents/:subagentRef/pause',
   },
   {
     method: 'POST',

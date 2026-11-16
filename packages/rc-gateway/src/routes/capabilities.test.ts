@@ -643,3 +643,37 @@ describe('subagentControls (#267)', () => {
     }
   });
 });
+
+describe('sessionTaskOutput (#110)', () => {
+  it('reports true iff daemon capabilities include session_task_output', async () => {
+    const withOutput = await mount({
+      daemonStatus: async () => ({
+        v: 1,
+        mode: 'http-bridge',
+        features: ['session_tasks', 'session_task_output'],
+        modelServices: [],
+      }),
+    });
+    const withoutOutput = await mount({
+      daemonStatus: async () => ({
+        v: 1,
+        mode: 'http-bridge',
+        features: ['session_tasks'],
+        modelServices: [],
+      }),
+    });
+    try {
+      const on = await (
+        await fetch(`${withOutput.base}/rc/capabilities`)
+      ).json();
+      expect(on.remoteControl.sessionTaskOutput).toBe(true);
+      const off = await (
+        await fetch(`${withoutOutput.base}/rc/capabilities`)
+      ).json();
+      expect(off.remoteControl.sessionTaskOutput).toBe(false);
+    } finally {
+      await withOutput.close();
+      await withoutOutput.close();
+    }
+  });
+});

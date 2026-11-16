@@ -3669,6 +3669,26 @@ export interface DaemonSessionTasksStatus {
   tasks: DaemonSessionTaskStatus[];
 }
 
+export type DaemonSessionTaskOutputReason =
+  | 'no_output_file'
+  | 'missing_output_file'
+  | 'unreadable_output_file';
+
+export interface DaemonSessionTaskOutputStatus {
+  v: 1;
+  sessionId: string;
+  taskId: string;
+  kind: 'agent' | 'shell' | 'monitor' | 'workflow';
+  label: string;
+  status: string;
+  available: boolean;
+  reason?: DaemonSessionTaskOutputReason;
+  content: string;
+  truncated: boolean;
+  byteLength: number;
+  totalBytes: number;
+}
+
 export interface DaemonSessionAgentsStatus {
   v: 1;
   sessionId: string;

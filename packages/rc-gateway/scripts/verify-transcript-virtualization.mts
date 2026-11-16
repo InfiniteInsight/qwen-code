@@ -37028,6 +37028,152 @@ PAGE_SCENARIOS.push({
   });
 }
 
+// #110: bounded task output tail in Runs and workflows.
+{
+  const sid = '60460460-4604-4604-8604-604604604604';
+  let shellReads = 0;
+  PAGE_SCENARIOS.push({
+    name: 'P604 Runs and workflows offers >=44px output buttons on shell and agent tasks (not monitor), opens #task-output-sheet without host paths, refreshes live tail, and restores focus',
+    waitView: false,
+    stub: {
+      capabilitiesFeatures: ['session_tasks', 'session_task_output'],
+      runs: {
+        tasks: [
+          {
+            kind: 'shell',
+            id: 'sh-tail-1',
+            label: 'pytest suite',
+            description: 'run pytest',
+            status: 'running',
+            command: 'pytest -q',
+            cwd: '/home/evan/secret-host-dir',
+            outputFile: '/home/evan/secret-host-dir/tmp/sh-tail-1.log',
+            startTime: 1_700_000_000_000,
+            runtimeMs: 3200,
+          },
+          {
+            kind: 'agent',
+            id: 'ag-tail-1',
+            label: 'Verifier',
+            description: 'check build',
+            status: 'completed',
+            subagentType: 'research',
+            isBackgrounded: true,
+            outputFile: '/home/evan/secret-host-dir/tmp/ag-tail-1.jsonl',
+            startTime: 1_700_000_000_000,
+            runtimeMs: 5000,
+          },
+          {
+            kind: 'monitor',
+            id: 'mon-tail-1',
+            label: 'tail server',
+            description: 'watch server',
+            status: 'running',
+            command: 'tail -f server.log',
+            eventCount: 12,
+            droppedLines: 3,
+            lastEventTime: 1_700_000_002_000,
+            startTime: 1_700_000_000_000,
+            runtimeMs: 4000,
+          },
+        ],
+        taskOutputs: (_sessionId, taskId) => {
+          if (taskId === 'sh-tail-1') {
+            shellReads += 1;
+            return {
+              v: 1,
+              sessionId: sid,
+              taskId,
+              kind: 'shell',
+              label: 'pytest suite',
+              status: 'running',
+              available: true,
+              content:
+                shellReads === 1
+                  ? 'collected 42 items\n20 passed'
+                  : 'collected 42 items\n42 passed in 3.8s',
+              truncated: true,
+              byteLength: 4096,
+              totalBytes: 16384,
+            };
+          }
+          return undefined;
+        },
+      },
+    },
+    run: async ({ page }) => {
+      shellReads = 0;
+      const rows = await wrList(page, sid);
+      expect(
+        rows.length === 3,
+        `expected 3 task rows in #runs-body, got ${rows.length}: ${JSON.stringify(rows)}`,
+      );
+      expect(
+        rows[2]!.includes('3 dropped'),
+        `expected monitor row to report dropped lines, got ${JSON.stringify(rows[2])}`,
+      );
+
+      const outBtns = page.locator('#runs-body button.run-act[data-act="output"]');
+      expect(
+        (await outBtns.count()) === 2,
+        `expected output buttons on shell and agent rows only (2), got ${await outBtns.count()}`,
+      );
+      const firstBtn = outBtns.first();
+      const box = await firstBtn.boundingBox();
+      expect(
+        Boolean(box && box.height >= 44 && box.width >= 44),
+        `expected output button >= 44x44px, got ${JSON.stringify(box)}`,
+      );
+
+      await firstBtn.click();
+      await page.waitForFunction(
+        () => {
+          const sheet = document.getElementById('task-output-sheet');
+          return (
+            Boolean(sheet && !sheet.hidden) &&
+            (sheet?.textContent ?? '').includes('20 passed')
+          );
+        },
+        null,
+        { timeout: 5_000 },
+      );
+
+      const sheetText = (await page.locator('#task-output-sheet').textContent()) ?? '';
+      expect(
+        sheetText.includes('showing last 4 KB of 16 KB'),
+        `expected truncation summary in sheet, got ${JSON.stringify(sheetText)}`,
+      );
+      expect(
+        !sheetText.includes('secret-host-dir'),
+        `sheet must not leak host outputFile path: ${JSON.stringify(sheetText)}`,
+      );
+
+      const refreshBtn = page.locator('#task-output-refresh');
+      const refreshBox = await refreshBtn.boundingBox();
+      expect(
+        Boolean(refreshBox && refreshBox.height >= 44 && refreshBox.width >= 44),
+        `expected Refresh button >= 44x44px, got ${JSON.stringify(refreshBox)}`,
+      );
+      await refreshBtn.click();
+      await page.waitForFunction(
+        () =>
+          (document.getElementById('task-output-sheet')?.textContent ?? '').includes(
+            '42 passed in 3.8s',
+          ),
+        null,
+        { timeout: 5_000 },
+      );
+
+      await page.click('#task-output-close');
+      const hiddenAfter = await page.evaluate(
+        () => document.getElementById('task-output-sheet')?.hidden === true,
+      );
+      expect(hiddenAfter, 'expected #task-output-sheet to close');
+      return `shell + agent rows rendered >=44px output buttons (monitor showed "3 dropped"), sheet displayed truncated tail without host paths, Refresh loaded read #${shellReads}`;
+    },
+  });
+}
+
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));
   const results: Result[] = [];

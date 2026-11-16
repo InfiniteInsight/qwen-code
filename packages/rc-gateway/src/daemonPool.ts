@@ -34,6 +34,7 @@ import type {
   DaemonWorkspaceTrustStatusV2,
   DaemonSubagentSessionResolution,
   DaemonSessionTasksStatus,
+  DaemonSessionTaskOutputStatus,
   DaemonSessionWorkflowTasksStatus,
   DaemonSessionWorkflowTaskStatus,
   DaemonSessionTaskWithWorkflowStatus,
@@ -580,6 +581,17 @@ export interface SessionDaemon {
     sessionId: string,
     clientId?: string,
   ): Promise<DaemonSessionTasksStatus>;
+  sessionTaskOutput(
+    sessionId: string,
+    taskId: string,
+    opts?: {
+      kind?: 'agent' | 'shell' | 'monitor' | 'workflow';
+      maxBytes?: number;
+      includeWorkflows?: boolean;
+      clientId?: string;
+      signal?: AbortSignal;
+    },
+  ): Promise<DaemonSessionTaskOutputStatus>;
   /**
    * The daemon's per-conversation roll-up: how long it ran, how many prompts
    * it took, what each model spent, and which tools were called. Read
@@ -2585,6 +2597,27 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<DaemonSessionTasksStatus> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.sessionTasks(sessionId, clientId),
+    );
+  }
+
+  /**
+   * `GET /session/:id/tasks/:taskId/output` relay (#110). The caller names a
+   * `taskId`, never a filesystem path; the daemon resolves `outputFile` from
+   * its own task registry and strips paths from the response.
+   */
+  async sessionTaskOutput(
+    sessionId: string,
+    taskId: string,
+    opts?: {
+      kind?: 'agent' | 'shell' | 'monitor' | 'workflow';
+      maxBytes?: number;
+      includeWorkflows?: boolean;
+      clientId?: string;
+      signal?: AbortSignal;
+    },
+  ): Promise<DaemonSessionTaskOutputStatus> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.sessionTaskOutput(sessionId, taskId, opts),
     );
   }
 
