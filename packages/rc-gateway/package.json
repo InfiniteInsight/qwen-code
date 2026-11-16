@@ -9,7 +9,7 @@
     "qwen-rc-bridge": "dist/bridge-sidecar.js"
   },
   "scripts": {
-    "build": "tsc --build",
+    "build": "tsc --build && node scripts/write-build-stamp.mjs",
     "test": "vitest run",
     "test:ci": "vitest run",
     "typecheck": "tsc --noEmit",

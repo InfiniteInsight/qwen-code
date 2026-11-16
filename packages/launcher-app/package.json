@@ -12,7 +12,10 @@
     "test:ci": "vitest run",
     "typecheck": "tsc --noEmit",
     "package:win": "electron-builder --win --x64",
-    "metadata:win": "node scripts/apply-exe-metadata.mjs"
+    "metadata:win": "node scripts/apply-exe-metadata.mjs",
+    "dist:win": "npm run build && npm run package:win && npm run metadata:win",
+    "install:win": "npm run dist:win && node scripts/install-win.mjs",
+    "check:install:win": "node scripts/install-win.mjs --check"
   },
   "dependencies": {
     "qrcode": "^1.5.3"
