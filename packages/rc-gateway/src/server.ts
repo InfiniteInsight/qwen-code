@@ -107,6 +107,8 @@ import { createWorkspaceSettingsRoute } from './routes/workspaceSettings.js';
 import {
   createWorkspaceEnvRoute,
   createWorkspacePreflightRoute,
+  createWorkspaceSessionInfoRoute,
+  createWorkspaceVoiceRoute,
 } from './routes/workspaceDiagnostics.js';
 import {
   createWorkspaceHooksRoute,
@@ -114,6 +116,8 @@ import {
   createWorkspaceSkillsRoute,
 } from './routes/workspaceInventory.js';
 import {
+  createWorkspaceAgentCreateRoute,
+  createWorkspaceAgentDeleteRoute,
   createWorkspaceAgentsRoute,
   createWorkspaceMemoryRoute,
 } from './routes/workspaceContext.js';
@@ -320,6 +324,9 @@ import {
 } from './routing/workingDevice.js';
 import {
   createSessionGroupCreateRoute,
+  createSessionGroupDeleteRoute,
+  createSessionGroupListRoute,
+  createSessionGroupUpdateRoute,
   createSessionOrganizationRoute,
 } from './routes/sessionOrganization.js';
 import {
@@ -2882,6 +2889,38 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorRateLimit,
     createWorkspaceAgentsRoute(deps.daemon),
   );
+  app.post(
+    '/rc/workspace/agents',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceAgentCreateRoute(deps.daemon, audit),
+  );
+  app.delete(
+    '/rc/workspace/agents/:agentType',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceAgentDeleteRoute(deps.daemon, audit),
+  );
+  app.get(
+    '/rc/workspace/voice',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceVoiceRoute(deps.daemon),
+  );
+  app.get(
+    '/rc/workspace/session-info',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createWorkspaceSessionInfoRoute(deps.daemon),
+  );
   app.get(
     '/rc/workspace/tools',
     requireScope(WRITE, audit),
@@ -3062,6 +3101,14 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // filed under a name nobody has used yet. WRITE, the floor of the
   // PATCH /session/:id/organization that files under it; every share token
   // is refused by requireScope. Audited without the name or the folder.
+  app.get(
+    '/rc/workspace/session-groups',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createSessionGroupListRoute(deps.daemon),
+  );
   app.post(
     '/rc/workspace/session-groups',
     requireScope(WRITE, audit),
@@ -3069,6 +3116,22 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan,
     subActorRateLimit,
     createSessionGroupCreateRoute(deps.daemon, audit),
+  );
+  app.patch(
+    '/rc/workspace/session-groups/:groupId',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createSessionGroupUpdateRoute(deps.daemon, audit),
+  );
+  app.delete(
+    '/rc/workspace/session-groups/:groupId',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    subActorBan,
+    subActorRateLimit,
+    createSessionGroupDeleteRoute(deps.daemon, audit),
   );
 
   if (deps.snooze) {

@@ -761,6 +761,14 @@ export interface StubDaemonOptions {
   mcpReloadStatus?: number;
   /** Full body for POST /workspace/mcp/reload on success. */
   mcpReloadResult?: { accepted: boolean };
+  /** Status for GET /workspace/voice (#123, default 200). */
+  workspaceVoiceStatus?: number;
+  /** Full body for GET /workspace/voice (#123). */
+  workspaceVoiceResult?: unknown;
+  /** Status for GET /workspaces/:id/session-info (#123, default 200). */
+  workspaceSessionInfoStatus?: number;
+  /** Full body for GET /workspaces/:id/session-info (#123). */
+  workspaceSessionInfoResult?: unknown;
   /** Status for GET /list (default 200). Non-200 -> error body. */
   listStatus?: number;
   /** JSON body to return on a non-200 GET /list response. */
@@ -1663,45 +1671,125 @@ export async function startStubDaemon(
     );
   });
 
+  const dynamicAgents: Array<Record<string, unknown>> = [];
+  const deletedAgentNames = new Set<string>();
+
   app.get('/workspace/agents', (_req, res) => {
     const status = opts.workspaceAgentsStatus ?? 200;
     if (status !== 200) {
       res.status(status).json({ error: 'stub error' });
       return;
     }
-    // Shaped off DaemonWorkspaceAgentsStatus (:2977) and
-    // DaemonWorkspaceAgentSummary (:2948). Levels are the real union
-    // (project|user|builtin|extension|session). The first entry carries
-    // `filePath`, a host path, plus the tool and MCP names it may reach; the
-    // second is a builtin with no file at all, so a page that assumed every
-    // agent has a definition file would break on it.
+    if (opts.workspaceAgentsResult) {
+      res.json(opts.workspaceAgentsResult);
+      return;
+    }
+    const baseAgents = [
+      {
+        kind: 'agent',
+        name: 'reviewer',
+        description: 'reviews the current diff',
+        level: 'project',
+        isBuiltin: false,
+        hasTools: true,
+        tools: ['read_file', 'grep_search'],
+        model: 'qwen3.6-plus',
+        mcpServerNames: ['memory'],
+        hookEvents: ['PreToolUse'],
+        filePath: '/proj/.qwen/agents/reviewer.md',
+      },
+      {
+        kind: 'agent',
+        name: 'Explore',
+        description: 'fast codebase exploration',
+        level: 'builtin',
+        isBuiltin: true,
+        hasTools: false,
+      },
+    ].filter((a) => !deletedAgentNames.has(a.name));
+    res.json({
+      v: 1,
+      workspaceCwd: opts.workspaceCwd ?? '/proj',
+      agents: [...baseAgents, ...dynamicAgents],
+    });
+  });
+
+  app.post('/workspace/agents', (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const name = String(body['name'] ?? '');
+    const description = String(body['description'] ?? '');
+    const systemPrompt = String(body['systemPrompt'] ?? '');
+    if (dynamicAgents.some((a) => a['name'] === name) || (name === 'reviewer' && !deletedAgentNames.has('reviewer'))) {
+      res.status(409).json({
+        error: `Agent already exists: ${name}`,
+        code: 'agent_already_exists',
+      });
+      return;
+    }
+    deletedAgentNames.delete(name);
+    const created = {
+      kind: 'agent',
+      name,
+      description,
+      systemPrompt,
+      level: body['scope'] === 'global' ? 'user' : 'project',
+      isBuiltin: false,
+      hasTools: Array.isArray(body['tools']) && body['tools'].length > 0,
+      ...(Array.isArray(body['tools']) ? { tools: body['tools'] } : {}),
+      filePath: `${opts.workspaceCwd ?? '/proj'}/.qwen/agents/${name}.md`,
+    };
+    dynamicAgents.push(created);
+    res.status(201).json({ agent: created });
+  });
+
+  app.delete('/workspace/agents/:agentType', (req, res) => {
+    const name = String(req.params.agentType);
+    deletedAgentNames.add(name);
+    const idx = dynamicAgents.findIndex((a) => a['name'] === name);
+    if (idx >= 0) dynamicAgents.splice(idx, 1);
+    res.status(204).end();
+  });
+
+  app.get('/workspace/voice', (_req, res) => {
+    const status = opts.workspaceVoiceStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
     res.json(
-      opts.workspaceAgentsResult ?? {
+      opts.workspaceVoiceResult ?? {
         v: 1,
         workspaceCwd: opts.workspaceCwd ?? '/proj',
-        agents: [
+        enabled: true,
+        mode: 'tap',
+        language: 'en-US',
+        voiceModel: 'qwen-asr-turbo',
+        availableVoiceModels: [
           {
-            kind: 'agent',
-            name: 'reviewer',
-            description: 'reviews the current diff',
-            level: 'project',
-            isBuiltin: false,
-            hasTools: true,
-            tools: ['read_file', 'grep_search'],
-            model: 'qwen3.6-plus',
-            mcpServerNames: ['memory'],
-            hookEvents: ['PreToolUse'],
-            filePath: '/proj/.qwen/agents/reviewer.md',
-          },
-          {
-            kind: 'agent',
-            name: 'Explore',
-            description: 'fast codebase exploration',
-            level: 'builtin',
-            isBuiltin: true,
-            hasTools: false,
+            id: 'qwen-asr-turbo',
+            name: 'Qwen ASR Turbo',
+            transport: 'qwen-asr-chat',
           },
         ],
+      },
+    );
+  });
+
+  app.get('/workspaces/:id/session-info', (_req, res) => {
+    const status = opts.workspaceSessionInfoStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json({ error: 'stub error' });
+      return;
+    }
+    const list = opts.sessions ?? [];
+    res.json(
+      opts.workspaceSessionInfoResult ?? {
+        active: list.length,
+        archived: 1,
+        total: list.length + 1,
+        live: 0,
+        expensive: true,
+        cost: 'disk_scan',
       },
     );
   });
@@ -4648,6 +4736,67 @@ export async function startStubDaemon(
     };
     groups.push(group);
     res.status(201).json({ group });
+  });
+
+  app.get('/workspace/:id/session-groups', (req, res) => {
+    const ws = req.params.id;
+    res.status(200).json({
+      groups: s110Groups(ws),
+      colorOptions: S110_COLORS,
+    });
+  });
+
+  app.patch('/workspace/:id/session-groups/:groupId', (req, res) => {
+    const ws = req.params.id;
+    const groupId = req.params.groupId;
+    const groups = s110Groups(ws);
+    const found = groups.find((g) => g['id'] === groupId);
+    if (!found) {
+      res.status(404).json({
+        error: `Group not found: ${groupId}`,
+        code: 'group_not_found',
+      });
+      return;
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (typeof body['name'] === 'string') {
+      const nextName = body['name'].trim();
+      const lower = nextName.toLowerCase();
+      if (
+        groups.some(
+          (g) =>
+            g['id'] !== groupId &&
+            String(g['name']).trim().toLowerCase() === lower,
+        )
+      ) {
+        res.status(409).json({
+          error: `Group name already exists: ${nextName}`,
+          code: 'group_name_conflict',
+        });
+        return;
+      }
+      found['name'] = nextName;
+    }
+    if (typeof body['color'] === 'string') found['color'] = body['color'];
+    if (typeof body['order'] === 'number') found['order'] = body['order'];
+    found['updatedAt'] = new Date().toISOString();
+    res.status(200).json({ group: found });
+  });
+
+  app.delete('/workspace/:id/session-groups/:groupId', (req, res) => {
+    const ws = req.params.id;
+    const groupId = req.params.groupId;
+    const groups = s110Groups(ws);
+    const idx = groups.findIndex((g) => g['id'] === groupId);
+    if (idx < 0) {
+      res.status(404).json({
+        error: `Group not found: ${groupId}`,
+        code: 'group_not_found',
+      });
+      return;
+    }
+    groups.splice(idx, 1);
+    res.status(200).json({ deleted: true });
   });
 
   const s110SourcesOf = (sessionId: string) => {

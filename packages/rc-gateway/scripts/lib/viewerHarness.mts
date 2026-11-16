@@ -204,6 +204,14 @@ export interface BootViewerOptions {
   workspacePreflightResult?: unknown;
   /** Status the stub answers GET /workspace/preflight with (default 200). */
   workspacePreflightStatus?: number;
+  /** Body the stub answers GET /workspace/voice with (#123). */
+  workspaceVoiceResult?: unknown;
+  /** Status the stub answers GET /workspace/voice with (#123). */
+  workspaceVoiceStatus?: number;
+  /** Body the stub answers GET /workspaces/:id/session-info with (#123). */
+  workspaceSessionInfoResult?: unknown;
+  /** Status the stub answers GET /workspaces/:id/session-info with (#123). */
+  workspaceSessionInfoStatus?: number;
   /** Body the stub answers GET /workspace/skills with. */
   workspaceSkillsResult?: unknown;
   /** Status the stub answers GET /workspace/skills with. */
@@ -761,6 +769,10 @@ export async function bootViewer(
     workspaceEnvStatus: opts.workspaceEnvStatus,
     workspacePreflightResult: opts.workspacePreflightResult,
     workspacePreflightStatus: opts.workspacePreflightStatus,
+    workspaceVoiceResult: opts.workspaceVoiceResult,
+    workspaceVoiceStatus: opts.workspaceVoiceStatus,
+    workspaceSessionInfoResult: opts.workspaceSessionInfoResult,
+    workspaceSessionInfoStatus: opts.workspaceSessionInfoStatus,
     workspaceSkillsResult: opts.workspaceSkillsResult,
     workspaceSkillsStatus: opts.workspaceSkillsStatus,
     workspaceProvidersResult: opts.workspaceProvidersResult,

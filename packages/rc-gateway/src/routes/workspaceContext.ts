@@ -5,9 +5,15 @@
  */
 
 import type { RequestHandler } from 'express';
+import type { DaemonCreateAgentRequest } from '@qwen-code/sdk/daemon';
+import type { AuditRecorder } from '../auditLog.js';
 import type { SessionDaemon } from '../daemonPool.js';
 import { WorkspacePoolFullError } from '../daemonPool.js';
-import { workspacePoolFullBody } from '../daemonHttpError.js';
+import {
+  asDaemonHttpError,
+  daemonErrorBody,
+  workspacePoolFullBody,
+} from '../daemonHttpError.js';
 import { relayDaemonAuthFailure } from './daemonAuth.js';
 
 /** The daemon surface these two routes need. */
@@ -150,4 +156,260 @@ export function createWorkspaceAgentsRoute(
   daemon: WorkspaceContextDaemon,
 ): RequestHandler {
   return contextRead(daemon, 'agents');
+}
+
+const MAX_AGENT_NAME_LENGTH = 64;
+const MAX_AGENT_DESCRIPTION_LENGTH = 1024;
+const MAX_AGENT_PROMPT_LENGTH = 65_536;
+const AGENT_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
+
+/**
+ * POST /rc/workspace/agents?workspace=<cwd> (#123).
+ *
+ * WRITE floor, audited. Restricted strictly to `scope: 'workspace'` (project
+ * `.qwen/agents/`), mirroring `workspaceMemoryWrite.ts` refusing `global` so a
+ * remote token cannot write outside the target workspace, and refusing inline
+ * `mcpServers` and `hooks` process definitions.
+ */
+export function createWorkspaceAgentCreateRoute(
+  daemon: Pick<SessionDaemon, 'createWorkspaceAgent'>,
+  audit?: AuditRecorder,
+): RequestHandler {
+  return async (req, res) => {
+    const actorTokenId = req.rcClient?.id;
+    const target = parseWorkspaceTarget(req.query.workspace);
+    if (!target.ok) {
+      res.status(400).json({
+        error: 'Invalid workspace target',
+        code: 'invalid_workspace',
+      });
+      return;
+    }
+    const body = req.body;
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      res.status(400).json({
+        error: 'Body must be an object',
+        code: 'invalid_agent_config',
+      });
+      return;
+    }
+    const b = body as Record<string, unknown>;
+    if (b['scope'] !== undefined && b['scope'] !== 'workspace') {
+      res.status(400).json({
+        error: 'Only workspace-scoped subagents can be created remotely',
+        code: 'global_scope_not_supported',
+      });
+      return;
+    }
+    if (b['mcpServers'] !== undefined || b['hooks'] !== undefined) {
+      res.status(400).json({
+        error: 'Remote agent definitions cannot embed mcpServers or hooks',
+        code: 'agent_host_config_forbidden',
+      });
+      return;
+    }
+    const name = typeof b['name'] === 'string' ? b['name'].trim() : '';
+    if (
+      !name ||
+      name.length > MAX_AGENT_NAME_LENGTH ||
+      !AGENT_NAME_RE.test(name)
+    ) {
+      res.status(400).json({
+        error:
+          'Agent name must be 1 to 64 alphanumeric, dash, or underscore characters',
+        code: 'invalid_agent_name',
+      });
+      return;
+    }
+    const description =
+      typeof b['description'] === 'string' ? b['description'].trim() : '';
+    if (!description || description.length > MAX_AGENT_DESCRIPTION_LENGTH) {
+      res.status(400).json({
+        error: 'Agent description must be 1 to 1024 characters',
+        code: 'invalid_agent_description',
+      });
+      return;
+    }
+    const systemPrompt =
+      typeof b['systemPrompt'] === 'string' ? b['systemPrompt'] : '';
+    if (!systemPrompt.trim() || systemPrompt.length > MAX_AGENT_PROMPT_LENGTH) {
+      res.status(400).json({
+        error: 'Agent systemPrompt must be 1 to 65536 characters',
+        code: 'invalid_agent_prompt',
+      });
+      return;
+    }
+    const payload: DaemonCreateAgentRequest = {
+      name,
+      description,
+      systemPrompt,
+      scope: 'workspace',
+      ...(Array.isArray(b['tools']) &&
+      b['tools'].every((t): t is string => typeof t === 'string')
+        ? { tools: b['tools'] }
+        : {}),
+      ...(Array.isArray(b['disallowedTools']) &&
+      b['disallowedTools'].every((t): t is string => typeof t === 'string')
+        ? { disallowedTools: b['disallowedTools'] }
+        : {}),
+      ...(typeof b['model'] === 'string' && b['model'].trim()
+        ? { model: b['model'].trim() }
+        : {}),
+      ...(typeof b['color'] === 'string' && b['color'].trim()
+        ? { color: b['color'].trim() }
+        : {}),
+    };
+
+    try {
+      const result = await daemon.createWorkspaceAgent(
+        payload,
+        undefined,
+        target.cwd,
+      );
+      void audit?.record({ action: 'workspace_agent_created', actorTokenId });
+      res.status(201).json(result);
+    } catch (err) {
+      if (err instanceof WorkspacePoolFullError) {
+        void audit?.record({
+          action: 'workspace_agent_create_failed',
+          actorTokenId,
+          detail: { reason: 'pool_full' },
+        });
+        res.status(503).json(workspacePoolFullBody(req, err));
+        return;
+      }
+      if (relayDaemonAuthFailure(res, err, 'workspace_agents')) return;
+      const http = asDaemonHttpError(err);
+      const dBody = daemonErrorBody(err);
+      const code =
+        typeof dBody?.['code'] === 'string' ? dBody['code'] : undefined;
+      if (http?.status === 409) {
+        void audit?.record({
+          action: 'workspace_agent_create_failed',
+          actorTokenId,
+          detail: { reason: 'conflict' },
+        });
+        res.status(409).json({
+          error: 'A workspace agent with that name already exists',
+          code: code ?? 'agent_already_exists',
+        });
+        return;
+      }
+      if (http !== undefined && http.status >= 400 && http.status < 500) {
+        void audit?.record({
+          action: 'workspace_agent_create_failed',
+          actorTokenId,
+          detail: { reason: 'rejected' },
+        });
+        res.status(http.status).json({
+          error:
+            typeof dBody?.['error'] === 'string'
+              ? dBody['error']
+              : 'The daemon refused this agent definition',
+          code: code ?? 'invalid_config',
+        });
+        return;
+      }
+      void audit?.record({
+        action: 'workspace_agent_create_failed',
+        actorTokenId,
+        detail: { reason: 'daemon_unavailable' },
+      });
+      res
+        .status(502)
+        .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
+    }
+  };
+}
+
+/**
+ * DELETE /rc/workspace/agents/:agentType?workspace=<cwd> (#123).
+ *
+ * Restricted to `scope: 'workspace'` so global user agents in `~/.qwen/agents`
+ * cannot be deleted remotely.
+ */
+export function createWorkspaceAgentDeleteRoute(
+  daemon: Pick<SessionDaemon, 'deleteWorkspaceAgent'>,
+  audit?: AuditRecorder,
+): RequestHandler {
+  return async (req, res) => {
+    const actorTokenId = req.rcClient?.id;
+    const target = parseWorkspaceTarget(req.query.workspace);
+    if (!target.ok) {
+      res.status(400).json({
+        error: 'Invalid workspace target',
+        code: 'invalid_workspace',
+      });
+      return;
+    }
+    const rawScope = req.query.scope;
+    if (rawScope !== undefined && rawScope !== 'workspace') {
+      res.status(400).json({
+        error: 'Only workspace-scoped subagents can be deleted remotely',
+        code: 'global_scope_not_supported',
+      });
+      return;
+    }
+    const agentType = req.params.agentType;
+    if (
+      typeof agentType !== 'string' ||
+      !agentType ||
+      agentType.length > MAX_AGENT_NAME_LENGTH ||
+      !AGENT_NAME_RE.test(agentType)
+    ) {
+      res.status(400).json({
+        error: 'Invalid agentType parameter',
+        code: 'invalid_agent_name',
+      });
+      return;
+    }
+    try {
+      await daemon.deleteWorkspaceAgent(
+        agentType,
+        { scope: 'workspace' },
+        undefined,
+        target.cwd,
+      );
+      void audit?.record({ action: 'workspace_agent_deleted', actorTokenId });
+      res.status(200).json({ deleted: true, name: agentType });
+    } catch (err) {
+      if (err instanceof WorkspacePoolFullError) {
+        void audit?.record({
+          action: 'workspace_agent_delete_failed',
+          actorTokenId,
+          detail: { reason: 'pool_full' },
+        });
+        res.status(503).json(workspacePoolFullBody(req, err));
+        return;
+      }
+      if (relayDaemonAuthFailure(res, err, 'workspace_agents')) return;
+      const http = asDaemonHttpError(err);
+      const dBody = daemonErrorBody(err);
+      const code =
+        typeof dBody?.['code'] === 'string' ? dBody['code'] : undefined;
+      if (http !== undefined && http.status >= 400 && http.status < 500) {
+        void audit?.record({
+          action: 'workspace_agent_delete_failed',
+          actorTokenId,
+          detail: { reason: 'rejected' },
+        });
+        res.status(http.status).json({
+          error:
+            typeof dBody?.['error'] === 'string'
+              ? dBody['error']
+              : 'The daemon refused to delete that agent',
+          code: code ?? 'daemon_rejected',
+        });
+        return;
+      }
+      void audit?.record({
+        action: 'workspace_agent_delete_failed',
+        actorTokenId,
+        detail: { reason: 'daemon_unavailable' },
+      });
+      res
+        .status(502)
+        .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
+    }
+  };
 }

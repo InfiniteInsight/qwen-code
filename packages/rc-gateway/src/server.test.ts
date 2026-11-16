@@ -2848,3 +2848,37 @@ describe('#110 runs and control closeout (task output relay + refused web-shell 
     }
   });
 });
+
+describe('#123 workspace family closeout (refused host-mutating routes)', () => {
+  it('refuses host-mutating workspace routes even for owner tokens (#123)', async () => {
+    const { url, store } = await boot();
+    const { token } = await store.issue(['owner'], 'owner-123');
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    };
+
+    for (const path of [
+      '/rc/workspace/trust/grant',
+      '/rc/workspace/init',
+      '/rc/workspace/setup-github',
+      '/rc/workspace/mcp/manage',
+      '/rc/workspace/skills/manage',
+      '/rc/workspace/extensions/install',
+      '/rc/workspace/settings',
+    ] as const) {
+      const res = await fetch(`${url}${path}`, {
+        method: 'POST',
+        headers,
+        body: '{}',
+      });
+      expect(res.status).toBe(404);
+    }
+
+    const deviceFlowRes = await fetch(`${url}/rc/auth/device-flow/df-1`, {
+      method: 'DELETE',
+      headers,
+    });
+    expect(deviceFlowRes.status).toBe(404);
+  });
+});

@@ -4110,6 +4110,32 @@
       #org-groups .org-row[aria-pressed='true'] .tick {
         visibility: visible;
       }
+      #org-groups .org-item {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding-right: 8px;
+        border-top: 1px solid var(--g1-line);
+      }
+      #org-groups .org-item .org-row {
+        flex: 1 1 auto;
+        min-width: 0;
+        border-top: 0;
+      }
+      #org-groups .org-grp-act {
+        flex: none;
+        min-width: 44px;
+        min-height: 44px;
+        padding: 0 10px;
+        border: 1px solid var(--g1-line);
+        border-radius: 8px;
+        background: transparent;
+        color: var(--g1-ink-mid);
+        font-size: 12px;
+      }
+      #org-groups .org-grp-act.danger {
+        color: var(--danger);
+      }
       #org-new {
         display: flex;
         align-items: center;
@@ -5276,6 +5302,7 @@
               <div id="ctx-body" style="max-height: 140px; overflow-y: auto">
                 (not loaded)
               </div>
+              <div id="ctx-agent-tools" hidden></div>
             </section>
             <!-- #123. What is installed and configured on this machine: skills,
                  model providers, hooks. Host facts, so the routes behind this sit at
@@ -5516,7 +5543,7 @@
               <div class="ops-note">
                 (this machine's own state; requires write scope)
               </div>
-              <div>
+              <div style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center">
                 <label
                   ><input type="radio" name="diag-kind" value="preflight" checked />
                   startup checks</label
@@ -5524,6 +5551,14 @@
                 <label
                   ><input type="radio" name="diag-kind" value="env" />
                   environment</label
+                >
+                <label
+                  ><input type="radio" name="diag-kind" value="voice" />
+                  voice</label
+                >
+                <label
+                  ><input type="radio" name="diag-kind" value="session-info" />
+                  session store</label
                 >
                 <button id="diag-load">Read diagnostics</button>
               </div>
@@ -18933,13 +18968,23 @@
         return orgSheet.colors.find((c) => !used.has(c)) ||
           orgSheet.colors[(orgSheet.groups || []).length % orgSheet.colors.length];
       }
+      function orgGroupCrudOn() {
+        return !!(
+          caps &&
+          caps.remoteControl &&
+          caps.remoteControl.workspaceSessionGroups === true &&
+          caps.remoteControl.writeScope !== false &&
+          orgSheet.cwd
+        );
+      }
       function renderOrgSheet() {
         if (!orgSheet.open) return;
         const cur = orgSheet.current;
         h1Text($('org-now'), cur ? orgFiledText(cur) : 'Reading where this conversation is filed...');
         const box = $('org-groups');
         box.textContent = '';
-        const row = (key, label, color, pressed) => {
+        const canManage = orgGroupCrudOn();
+        const makeRowBtn = (key, label, color, pressed) => {
           const b = orgEl('button', 'org-row');
           b.type = 'button';
           b.dataset.org = key;
@@ -18950,11 +18995,31 @@
           const tick = orgEl('span', 'tick', '✓');
           tick.setAttribute('aria-hidden', 'true');
           b.appendChild(tick);
-          box.appendChild(b);
+          return b;
         };
-        row('none', 'None', undefined, cur && !cur.groupId && !cur.color);
+        box.appendChild(makeRowBtn('none', 'None', undefined, cur && !cur.groupId && !cur.color));
         for (const g of orgSheet.groups || []) {
-          row('group:' + g.id, strOr(g.name, g.id), g.color, cur && !cur.color && cur.groupId === g.id);
+          const gName = strOr(g.name, g.id);
+          const b = makeRowBtn('group:' + g.id, gName, g.color, cur && !cur.color && cur.groupId === g.id);
+          if (canManage) {
+            const item = orgEl('div', 'org-item');
+            item.appendChild(b);
+            const ren = orgEl('button', 'org-grp-act', 'Rename');
+            ren.type = 'button';
+            ren.dataset.groupRename = g.id;
+            ren.disabled = orgSheet.busy;
+            ren.setAttribute('aria-label', 'Rename ' + gName);
+            const del = orgEl('button', 'org-grp-act danger', 'Delete');
+            del.type = 'button';
+            del.dataset.groupDelete = g.id;
+            del.disabled = orgSheet.busy;
+            del.setAttribute('aria-label', 'Delete ' + gName);
+            item.appendChild(ren);
+            item.appendChild(del);
+            box.appendChild(item);
+          } else {
+            box.appendChild(b);
+          }
         }
         h1Text($('org-groups-note'), orgSheet.groups === null ? 'Reading this folder\'s groups...' : orgSheet.groupsNote);
         $('org-new').hidden = !orgSheet.cwd;
@@ -19026,8 +19091,35 @@
         if (!cwd) {
           return done('This conversation\'s folder is not known here, so its groups cannot be listed. A colour tag still works.');
         }
+        const readDirectGroups = async () => {
+          if (!(caps && caps.remoteControl && caps.remoteControl.workspaceSessionGroups === true)) {
+            return null;
+          }
+          return convCall('/rc/workspace/session-groups?workspace=' + encodeURIComponent(cwd));
+        };
         if (!sessionCatalogOn()) {
-          return done('This gateway cannot list groups. A colour tag still works.');
+          const gr = await readDirectGroups();
+          if (gen !== orgSheet.gen || !orgSheet.open) return;
+          if (!gr) {
+            return done('This gateway cannot list groups. A colour tag still works.');
+          }
+          if (!gr.ok) {
+            return done('The groups could not be read (' + gr.code + ').');
+          }
+          const gb = gr.body || {};
+          const glist = Array.isArray(gb.groups) ? gb.groups : [];
+          orgSheet.groups = glist
+            .filter((g) => g && typeof g.id === 'string' && typeof g.name === 'string')
+            .sort((x, y) => (Number(x.order) || 0) - (Number(y.order) || 0));
+          const goffered = Array.isArray(gb.colorOptions)
+            ? gb.colorOptions.filter((c) => typeof c === 'string' && GROUP_SWATCHES[c])
+            : [];
+          if (goffered.length) orgSheet.colors = goffered;
+          return done(
+            orgSheet.groups.length
+              ? ''
+              : 'No groups in this folder yet. Type a name below to make one.',
+          );
         }
         const r = await convCall('/rc/sessions/catalog', {
           method: 'POST',
@@ -19039,6 +19131,26 @@
         });
         if (gen !== orgSheet.gen || !orgSheet.open) return;
         if (!r.ok) {
+          if (r.status === 403) {
+            const gr = await readDirectGroups();
+            if (gen !== orgSheet.gen || !orgSheet.open) return;
+            if (gr && gr.ok) {
+              const gb = gr.body || {};
+              const glist = Array.isArray(gb.groups) ? gb.groups : [];
+              orgSheet.groups = glist
+                .filter((g) => g && typeof g.id === 'string' && typeof g.name === 'string')
+                .sort((x, y) => (Number(x.order) || 0) - (Number(y.order) || 0));
+              const goffered = Array.isArray(gb.colorOptions)
+                ? gb.colorOptions.filter((c) => typeof c === 'string' && GROUP_SWATCHES[c])
+                : [];
+              if (goffered.length) orgSheet.colors = goffered;
+              return done(
+                orgSheet.groups.length
+                  ? ''
+                  : 'No groups in this folder yet. Type a name below to make one.',
+              );
+            }
+          }
           return done(
             r.status === 403
               ? 'Listing groups needs an owner token. A colour tag still works.'
@@ -19169,6 +19281,107 @@
         $('org-new-name').value = '';
         await orgApply({ groupId: g.id, color: null });
       }
+      async function orgRenameGroup(gid) {
+        if (!orgSheet.cwd || orgSheet.busy) return;
+        const g = (orgSheet.groups || []).find((x) => x && x.id === gid);
+        if (!g) return;
+        const curName = strOr(g.name, g.id);
+        const next = await wsfAsk({
+          title: 'Rename group',
+          sub: 'Update this folder group name across filed conversations.',
+          go: 'Rename',
+          input: {
+            label: 'Group name',
+            value: curName,
+            placeholder: 'group name',
+            check: (v) =>
+              !v || v.length > 64 ? 'A group name is 1 to 64 characters.' : '',
+          },
+        });
+        if (!next || next === curName || !orgSheet.open || orgSheet.busy) return;
+        const gen = orgSheet.gen;
+        orgSheet.busy = true;
+        orgSheet.note = 'Renaming ' + curName + '...';
+        orgSheet.tone = '';
+        renderOrgSheet();
+        const r = await convCall(
+          '/rc/workspace/session-groups/' +
+            encodeURIComponent(gid) +
+            '?workspace=' +
+            encodeURIComponent(orgSheet.cwd),
+          { method: 'PATCH', body: JSON.stringify({ name: next }) },
+        );
+        if (gen !== orgSheet.gen || !orgSheet.open) return;
+        orgSheet.busy = false;
+        if (r.ok && r.body && r.body.group) {
+          const updated = r.body.group;
+          orgSheet.groups = (orgSheet.groups || []).map((x) =>
+            x && x.id === gid ? updated : x,
+          );
+          catalogState.groups.set(gid, updated);
+          catalogState.readAt = 0;
+          redrawWithCatalog();
+          if (listShown()) void refreshCatalog(false);
+          orgSheet.note = 'Renamed group to ' + strOr(updated.name, next) + '.';
+          orgSheet.tone = '';
+        } else {
+          orgSheet.note = 'Not renamed: ' + rcDetail(r);
+          orgSheet.tone = 'err';
+        }
+        renderOrgSheet();
+        renderConvRows();
+      }
+      async function orgDeleteGroup(gid) {
+        if (!orgSheet.cwd || orgSheet.busy) return;
+        const g = (orgSheet.groups || []).find((x) => x && x.id === gid);
+        if (!g) return;
+        const curName = strOr(g.name, g.id);
+        const ok = await wsfAsk({
+          title: 'Delete group ' + curName + '?',
+          sub: 'Conversations filed under it stay in the folder ungrouped.',
+          go: 'Delete',
+          danger: true,
+        });
+        if (!ok || !orgSheet.open || orgSheet.busy) return;
+        const gen = orgSheet.gen;
+        orgSheet.busy = true;
+        orgSheet.note = 'Deleting ' + curName + '...';
+        orgSheet.tone = '';
+        renderOrgSheet();
+        const r = await convCall(
+          '/rc/workspace/session-groups/' +
+            encodeURIComponent(gid) +
+            '?workspace=' +
+            encodeURIComponent(orgSheet.cwd),
+          { method: 'DELETE' },
+        );
+        if (gen !== orgSheet.gen || !orgSheet.open) return;
+        orgSheet.busy = false;
+        if (r.ok) {
+          orgSheet.groups = (orgSheet.groups || []).filter(
+            (x) => !x || x.id !== gid,
+          );
+          catalogState.groups.delete(gid);
+          for (const [sid, row] of catalogState.rows.entries()) {
+            if (row && row.groupId === gid) {
+              catalogState.rows.set(sid, { ...row, groupId: null });
+            }
+          }
+          if (orgSheet.current && orgSheet.current.groupId === gid) {
+            orgSheet.current = { ...orgSheet.current, groupId: null };
+          }
+          catalogState.readAt = 0;
+          redrawWithCatalog();
+          if (listShown()) void refreshCatalog(false);
+          orgSheet.note = 'Deleted group ' + curName + '.';
+          orgSheet.tone = '';
+        } else {
+          orgSheet.note = 'Not deleted: ' + rcDetail(r);
+          orgSheet.tone = 'err';
+        }
+        renderOrgSheet();
+        renderConvRows();
+      }
       $('more-organize').addEventListener('click', () => {
         setMoreOpen(false);
         openOrgSheet();
@@ -19182,6 +19395,16 @@
       });
       $('org-sheet').addEventListener('click', (e) => {
         if (e.target === $('org-sheet')) return closeOrgSheet(true);
+        const ren = e.target.closest('button[data-group-rename]');
+        if (ren && !ren.disabled) {
+          void orgRenameGroup(ren.dataset.groupRename);
+          return;
+        }
+        const del = e.target.closest('button[data-group-delete]');
+        if (del && !del.disabled) {
+          void orgDeleteGroup(del.dataset.groupDelete);
+          return;
+        }
         const t = e.target.closest('button[data-org]');
         if (!t || t.disabled) return;
         const k = t.dataset.org;
@@ -33793,18 +34016,48 @@
         const kindEl = document.querySelector(
           'input[name="diag-kind"]:checked',
         );
-        const kind = kindEl && kindEl.value === 'env' ? 'env' : 'preflight';
+        const rawKind = kindEl ? kindEl.value : 'preflight';
+        const kind =
+          rawKind === 'env' || rawKind === 'voice' || rawKind === 'session-info'
+            ? rawKind
+            : 'preflight';
         out.textContent = 'loading\u2026';
-        const r = await rcCall('/rc/workspace/' + kind);
+        const r = await rcCall(wsTargetQuery('/rc/workspace/' + kind));
         if (!r.ok) {
-          // env_unsupported and preflight_unsupported are two different
-          // verdicts from two routes, and the page passes both through rather
-          // than collapsing them, so a daemon that answers one and not the
-          // other says so (src/routes/workspaceDiagnostics.ts).
+          // Each route carries its own unsupported verdict
+          // (src/routes/workspaceDiagnostics.ts).
           out.textContent = 'diagnostics failed: ' + rcDetail(r);
           return;
         }
         const st = r.body || {};
+        if (kind === 'voice') {
+          const rows = ['voice: ' + (st.enabled === true ? 'enabled' : 'disabled')];
+          if (typeof st.mode === 'string') rows.push('  mode: ' + st.mode);
+          if (typeof st.language === 'string') rows.push('  language: ' + st.language);
+          const vm = st.voiceModel;
+          const vmLabel =
+            vm && typeof vm === 'object' && typeof vm.name === 'string'
+              ? vm.name
+              : typeof vm === 'string' && vm
+                ? vm
+                : '(none)';
+          rows.push('  model: ' + vmLabel);
+          if (Array.isArray(st.availableVoiceModels)) {
+            rows.push('  available models: ' + st.availableVoiceModels.length);
+          }
+          renderRows(out, rows);
+          return;
+        }
+        if (kind === 'session-info') {
+          const rows = [
+            'session store: ' + Number(st.total || 0) + ' total',
+            '  active: ' + Number(st.active || 0),
+            '  archived: ' + Number(st.archived || 0),
+            '  live: ' + Number(st.live || 0),
+          ];
+          renderRows(out, rows);
+          return;
+        }
         const cells = Array.isArray(st.cells) ? st.cells : [];
         const errs = Array.isArray(st.errors) ? st.errors : [];
         const rows = [];
@@ -33958,9 +34211,155 @@
         renderRows(out, rows);
       };
 
+      function wsaDrawAgents(st) {
+        const box = $('ctx-agent-tools');
+        if (!box) return;
+        box.textContent = '';
+        if (!wsmGate('workspaceAgentWrites', 'workspace_agents')) {
+          box.hidden = true;
+          return;
+        }
+        box.hidden = false;
+        const cwd = wsTargetCwd || '';
+        const targetUrl = (base) => {
+          if (!cwd) return base;
+          return (
+            base +
+            (base.includes('?') ? '&' : '?') +
+            'workspace=' +
+            encodeURIComponent(cwd)
+          );
+        };
+        const agents = (Array.isArray(st && st.agents) ? st.agents : []).filter(
+          (a) =>
+            a &&
+            a.level === 'project' &&
+            a.isBuiltin !== true &&
+            typeof a.name === 'string',
+        );
+        const bar = document.createElement('div');
+        bar.style.cssText =
+          'display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;align-items:center';
+        const status = document.createElement('div');
+        status.dataset.wsa = 'status';
+        status.setAttribute('role', 'status');
+        status.setAttribute('aria-live', 'polite');
+        status.style.cssText = 'font-size:12px;margin-top:6px';
+        for (const a of agents) {
+          const name = a.name;
+          const del = wsfFileButton('Delete ' + name, async () => {
+            const ok = await wsfAsk({
+              title: 'Delete project agent ' + name + '?',
+              sub: 'Removes the workspace subagent definition from .qwen/agents.',
+              go: 'Delete',
+              danger: true,
+            });
+            if (!ok) return;
+            status.textContent = 'deleting ' + name + '...';
+            const r = await rcCall(
+              targetUrl(
+                '/rc/workspace/agents/' +
+                  encodeURIComponent(name) +
+                  '?scope=workspace',
+              ),
+              { method: 'DELETE' },
+            );
+            if (!r.ok) {
+              status.textContent = 'delete failed: ' + rcDetail(r);
+              return;
+            }
+            setStatus('deleted agent ' + name);
+            const curKind = document.querySelector(
+              'input[name="ctx-kind"]:checked',
+            );
+            if (curKind && curKind.value === 'agents') $('ctx-load').click();
+          });
+          del.dataset.wsa = 'delete';
+          del.dataset.agentName = name;
+          del.style.minWidth = '44px';
+          bar.appendChild(del);
+        }
+        const form = document.createElement('div');
+        form.dataset.wsa = 'form';
+        form.hidden = true;
+        form.style.cssText =
+          'display:flex;flex-direction:column;gap:8px;margin-top:8px';
+        form.style.display = 'none';
+        const toggleForm = (show) => {
+          form.hidden = !show;
+          form.style.display = show ? 'flex' : 'none';
+        };
+        const newBtn = wsfFileButton('New project agent', () => {
+          toggleForm(form.hidden);
+        });
+        newBtn.dataset.wsa = 'new-toggle';
+        newBtn.style.minWidth = '44px';
+        bar.appendChild(newBtn);
+
+        const nameIn = document.createElement('input');
+        nameIn.type = 'text';
+        nameIn.dataset.wsa = 'name';
+        nameIn.placeholder = 'agent name (e.g. code-reviewer)';
+        nameIn.style.cssText =
+          'font-size:16px;min-height:44px;box-sizing:border-box;width:100%';
+        const descIn = document.createElement('input');
+        descIn.type = 'text';
+        descIn.dataset.wsa = 'desc';
+        descIn.placeholder = 'short description';
+        descIn.style.cssText =
+          'font-size:16px;min-height:44px;box-sizing:border-box;width:100%';
+        const promptIn = document.createElement('textarea');
+        promptIn.rows = 3;
+        promptIn.dataset.wsa = 'prompt';
+        promptIn.placeholder = 'system prompt instructions';
+        promptIn.style.cssText =
+          'font-size:16px;box-sizing:border-box;width:100%';
+        const saveBtn = wsfFileButton('Save project agent', async () => {
+          const name = (nameIn.value || '').trim();
+          const description = (descIn.value || '').trim();
+          const systemPrompt = promptIn.value || '';
+          if (!name || !description || !systemPrompt.trim()) {
+            status.textContent =
+              'Enter an agent name, description, and system prompt.';
+            return;
+          }
+          saveBtn.disabled = true;
+          status.textContent = 'saving ' + name + '...';
+          const r = await rcCall(targetUrl('/rc/workspace/agents'), {
+            method: 'POST',
+            body: JSON.stringify({
+              name,
+              description,
+              systemPrompt,
+              scope: 'workspace',
+            }),
+          });
+          saveBtn.disabled = false;
+          if (!r.ok) {
+            status.textContent = 'create failed: ' + rcDetail(r);
+            return;
+          }
+          setStatus('created agent ' + name);
+          const curKind = document.querySelector(
+            'input[name="ctx-kind"]:checked',
+          );
+          if (curKind && curKind.value === 'agents') $('ctx-load').click();
+        });
+        saveBtn.dataset.wsa = 'save';
+        saveBtn.style.minWidth = '44px';
+        saveBtn.style.alignSelf = 'flex-start';
+        form.append(nameIn, descIn, promptIn, saveBtn);
+        box.append(bar, form, status);
+      }
+
       $('ctx-load').onclick = async () => {
         if (!token()) return setStatus('pair first');
         const out = $('ctx-body');
+        const agentBox = $('ctx-agent-tools');
+        if (agentBox) {
+          agentBox.textContent = '';
+          agentBox.hidden = true;
+        }
         const kindEl = document.querySelector(
           'input[name="ctx-kind"]:checked',
         );
@@ -34049,6 +34448,7 @@
         }
         renderRows(out, rows);
         if (kind === 'memory') wsmDrawEdits(out, st);
+        else wsaDrawAgents(st);
       };
 
       $('fork-btn').onclick = async () => {

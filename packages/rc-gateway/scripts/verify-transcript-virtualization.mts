@@ -23074,6 +23074,10 @@ async function runPageScenario(
     workspaceConfigApprovals: s.stub?.workspaceConfigApprovals,
     promptBroadcastsEvents: s.stub?.promptBroadcastsEvents,
     promptReplyText: s.stub?.promptReplyText,
+    workspaceVoiceResult: s.stub?.workspaceVoiceResult,
+    workspaceVoiceStatus: s.stub?.workspaceVoiceStatus,
+    workspaceSessionInfoResult: s.stub?.workspaceSessionInfoResult,
+    workspaceSessionInfoStatus: s.stub?.workspaceSessionInfoStatus,
   });
   const { page, url } = viewer;
   const consoleErrors: string[] = [];
@@ -37404,6 +37408,227 @@ PAGE_SCENARIOS.push({
     );
 
     return `max_tokens showed "${nudgeText}" + ${Math.round(contBox!.height)}px Continue, sent "continue" -> end_turn, and prompt_timeout rendered concrete silence timeout`;
+  },
+});
+
+// #123: workspace family closeout - voice + session-info diagnostics reads,
+// session-group rename/delete + WRITE-token group list fallback, and project
+// subagent create/delete in More > Workspace > Memory and skills.
+PAGE_SCENARIOS.push({
+  name: 'P607 workspace diagnostics reads voice and session-info, Organize renames and deletes groups with >=44px controls, and Workspace context creates and deletes project agents',
+  noConsoleErrors: true,
+  stub: {
+    capabilitiesFeatures: [
+      'workspace_agents',
+      'session_organization',
+      'session_sources',
+      'workspace_session_catalog',
+    ],
+    workspaceVoiceResult: {
+      v: 1,
+      workspaceCwd: '/stub/workspace',
+      enabled: true,
+      mode: 'push-to-talk',
+      language: 'en-US',
+      voiceModel: 'whisper-large-v3',
+      availableVoiceModels: [
+        { modelId: 'whisper-large-v3', name: 'Whisper Large v3', authType: 'openai' },
+      ],
+    },
+    workspaceSessionInfoResult: {
+      active: 5,
+      archived: 2,
+      total: 7,
+      live: 1,
+    },
+    catalog: {
+      '/stub/workspace': {
+        groups: [
+          {
+            id: 'g-work',
+            name: 'Work',
+            color: 'blue',
+            order: 0,
+            createdAt: '2026-01-01T00:00:00Z',
+            updatedAt: '2026-01-01T00:00:00Z',
+          },
+          {
+            id: 'g-home',
+            name: 'Home',
+            color: 'green',
+            order: 1,
+            createdAt: '2026-01-01T00:00:00Z',
+            updatedAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+        sessions: [],
+      },
+    },
+  },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 1, 15_000);
+    await page.evaluate(() => {
+      watchedSessionCwd = '/stub/workspace';
+    });
+
+    // 1. Diagnostics: voice and session-info reads.
+    await openPanel(page, 'diag');
+    await page.click('input[name="diag-kind"][value="voice"]');
+    await page.click('#diag-load');
+    await page.waitForFunction(
+      () =>
+        (document.getElementById('diag-body')?.textContent ?? '').includes(
+          'whisper-large-v3',
+        ),
+      null,
+      { timeout: 5_000 },
+    );
+    const voiceText =
+      (await page.locator('#diag-body').textContent()) ?? '';
+    expect(
+      voiceText.includes('voice: enabled') &&
+        voiceText.includes('mode: push-to-talk') &&
+        voiceText.includes('available models: 1'),
+      `unexpected voice diagnostics text: ${JSON.stringify(voiceText)}`,
+    );
+
+    await page.click('input[name="diag-kind"][value="session-info"]');
+    await page.click('#diag-load');
+    await page.waitForFunction(
+      () =>
+        (document.getElementById('diag-body')?.textContent ?? '').includes(
+          'session store: 7 total',
+        ),
+      null,
+      { timeout: 5_000 },
+    );
+    const infoText =
+      (await page.locator('#diag-body').textContent()) ?? '';
+    expect(
+      infoText.includes('active: 5') &&
+        infoText.includes('archived: 2') &&
+        infoText.includes('live: 1'),
+      `unexpected session-info diagnostics text: ${JSON.stringify(infoText)}`,
+    );
+
+    // 2. Workspace context: create and delete project subagent.
+    await openPanel(page, 'memory');
+    await page.click('input[name="ctx-kind"][value="agents"]');
+    await page.click('#ctx-load');
+    await page.waitForSelector('#ctx-agent-tools button[data-wsa="new-toggle"]', {
+      state: 'visible',
+      timeout: 5_000,
+    });
+    const newToggle = page.locator(
+      '#ctx-agent-tools button[data-wsa="new-toggle"]',
+    );
+    const toggleBox = await newToggle.boundingBox();
+    expect(
+      Boolean(toggleBox && toggleBox.height >= 44 && toggleBox.width >= 44),
+      `expected New project agent >= 44x44px, got ${JSON.stringify(toggleBox)}`,
+    );
+    await newToggle.click();
+    await page.fill('#ctx-agent-tools input[data-wsa="name"]', 'qa-helper');
+    await page.fill(
+      '#ctx-agent-tools input[data-wsa="desc"]',
+      'Run targeted QA checks',
+    );
+    await page.fill(
+      '#ctx-agent-tools textarea[data-wsa="prompt"]',
+      'Inspect test output carefully.',
+    );
+    await page.click('#ctx-agent-tools button[data-wsa="save"]');
+    await page.waitForSelector(
+      '#ctx-agent-tools button[data-wsa="delete"][data-agent-name="qa-helper"]',
+      { state: 'visible', timeout: 5_000 },
+    );
+    const ctxAfterCreate =
+      (await page.locator('#ctx-body').textContent()) ?? '';
+    expect(
+      ctxAfterCreate.includes('qa-helper') && ctxAfterCreate.includes('[project]'),
+      `expected created project agent in #ctx-body, got ${JSON.stringify(ctxAfterCreate)}`,
+    );
+    const delAgentBtn = page.locator(
+      '#ctx-agent-tools button[data-wsa="delete"][data-agent-name="qa-helper"]',
+    );
+    const delAgentBox = await delAgentBtn.boundingBox();
+    expect(
+      Boolean(delAgentBox && delAgentBox.height >= 44 && delAgentBox.width >= 44),
+      `expected Delete qa-helper >= 44x44px, got ${JSON.stringify(delAgentBox)}`,
+    );
+    await delAgentBtn.click();
+    await page.waitForSelector('#wsf-ask button[data-wsf="go"]', {
+      state: 'visible',
+      timeout: 5_000,
+    });
+    await page.click('#wsf-ask button[data-wsf="go"]');
+    await page.waitForFunction(
+      () =>
+        !document.querySelector(
+          '#ctx-agent-tools button[data-wsa="delete"][data-agent-name="qa-helper"]',
+        ) &&
+        !(document.getElementById('ctx-body')?.textContent ?? '').includes(
+          'qa-helper',
+        ),
+      null,
+      { timeout: 5_000 },
+    );
+
+    // 3. Organize sheet: Rename and Delete group (>=44px controls).
+    await openPanel(page, 'chat');
+    await page.click('#h1-more');
+    await page.waitForSelector('#more-organize', { state: 'visible' });
+    await page.click('#more-organize');
+    await page.waitForSelector(
+      '#org-groups button[data-group-rename="g-work"]',
+      { state: 'visible', timeout: 5_000 },
+    );
+    const renBtn = page.locator(
+      '#org-groups button[data-group-rename="g-work"]',
+    );
+    const delGrpBtn = page.locator(
+      '#org-groups button[data-group-delete="g-work"]',
+    );
+    const renBox = await renBtn.boundingBox();
+    const delBox = await delGrpBtn.boundingBox();
+    expect(
+      Boolean(
+        renBox &&
+          renBox.height >= 44 &&
+          renBox.width >= 44 &&
+          delBox &&
+          delBox.height >= 44 &&
+          delBox.width >= 44,
+      ),
+      `expected group Rename/Delete >= 44x44px, got ${JSON.stringify({ renBox, delBox })}`,
+    );
+    await renBtn.click();
+    await page.waitForSelector('#wsf-ask input', { state: 'visible' });
+    await page.fill('#wsf-ask input', 'Focus');
+    await page.click('#wsf-ask button[data-wsf="go"]');
+    await page.waitForFunction(
+      () =>
+        (document.getElementById('org-note')?.textContent ?? '') ===
+        'Renamed group to Focus.',
+      null,
+      { timeout: 5_000 },
+    );
+    await delGrpBtn.click();
+    await page.waitForSelector('#wsf-ask button[data-wsf="go"]', {
+      state: 'visible',
+    });
+    await page.click('#wsf-ask button[data-wsf="go"]');
+    await page.waitForFunction(
+      () =>
+        (document.getElementById('org-note')?.textContent ?? '') ===
+          'Deleted group Focus.' &&
+        !document.querySelector('#org-groups button[data-group-delete="g-work"]'),
+      null,
+      { timeout: 5_000 },
+    );
+
+    return 'voice + session-info diagnostics drawn, project agent created + deleted, and session group renamed + deleted with >=44px controls';
   },
 });
 
