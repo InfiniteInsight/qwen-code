@@ -377,6 +377,11 @@ export function useDaemonSubagentSync(
         residentLoopsRef.current.add(agentId);
         registry.registerResidentAgent(agentId, {
           continue: (input) => {
+            const current = registry.get(agentId);
+            if (current && current.status === 'completed') {
+              current.status = 'running';
+              current.endTime = undefined;
+            }
             registry.queueExternalInput(agentId, input);
             return 'continued';
           },
@@ -593,7 +598,14 @@ export function useDaemonSubagentSync(
           } else if (task.status === 'running') {
             entry.status = 'running';
             entry.endTime = undefined;
+            entry.error = undefined;
+            entry.resumeBlockedReason = undefined;
+            entry.notified = false;
+            if (entry.abortController.signal.aborted) {
+              entry.abortController = new AbortController();
+            }
             wireCancelAndMessaging(task.id, entry.abortController, false);
+            registry.notifyActivityChange(task.id);
           }
           if (task.endTime !== undefined) {
             entry.endTime = task.endTime;
@@ -1063,16 +1075,12 @@ export function useDaemonSubagentSync(
           if (target) {
             flushStreamingBuffersToMessages(target, Date.now());
           }
-          if (
-            target &&
-            target.id.startsWith(PROVISIONAL_PREFIX) &&
-            !target.isBackgrounded
-          ) {
-            if (update.status === 'completed') {
+          if (target && target.id.startsWith(PROVISIONAL_PREFIX)) {
+            if (update.status === 'completed' && !target.isBackgrounded) {
               registry.complete(target.id, target.latestText ?? '');
             } else if (update.status === 'failed') {
               registry.fail(target.id, 'Subagent failed');
-            } else {
+            } else if (update.status === 'cancelled') {
               registry.cancel(target.id);
             }
           }

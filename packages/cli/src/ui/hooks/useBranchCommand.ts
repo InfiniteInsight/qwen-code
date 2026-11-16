@@ -76,6 +76,7 @@ export interface UseBranchCommandOptions {
   clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
+  switchDaemonSession?: (sessionId: string) => Promise<void>;
 }
 
 export interface UseBranchCommandResult {
@@ -107,6 +108,7 @@ export function useBranchCommand(
     clearPendingState,
     setSessionName,
     remount,
+    switchDaemonSession,
   } = options;
 
   const handleBranch = useCallback(
@@ -253,6 +255,9 @@ export function useBranchCommand(
         //    The transaction opened in step 0 covers the initialize()
         //    replay (#9833; see beginTelemetrySwap's JSDoc in core
         //    client.ts).
+        if (switchDaemonSession) {
+          await switchDaemonSession(newSessionId);
+        }
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
         await waitForGoalRuntime(config);
@@ -395,6 +400,7 @@ export function useBranchCommand(
       clearPendingState,
       setSessionName,
       remount,
+      switchDaemonSession,
       options.settings.merged.ui?.history?.collapseOnResume,
       options.settings.merged.ui?.history?.collapsePreviewCount,
     ],

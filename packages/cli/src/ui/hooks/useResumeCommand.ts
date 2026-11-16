@@ -47,6 +47,7 @@ export interface UseResumeCommandOptions {
   clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
+  switchDaemonSession?: (sessionId: string) => Promise<void>;
 }
 
 export interface UseResumeCommandResult {
@@ -98,6 +99,7 @@ export function useResumeCommand(
     clearPendingState,
     setSessionName,
     remount,
+    switchDaemonSession,
   } = options;
 
   const { addItem, clearItems } = historyManager;
@@ -211,6 +213,9 @@ export function useResumeCommand(
         //    user is not stranded with a half-live client. The transaction
         //    opened above covers the initialize() replay (#9833; see
         //    beginTelemetrySwap's JSDoc in core client.ts).
+        if (switchDaemonSession) {
+          await switchDaemonSession(sessionId);
+        }
         resetBackgroundStateForSessionSwitch(config);
         config.startNewSession(sessionId, sessionData);
         coreSwapped = true;
@@ -362,6 +367,7 @@ export function useResumeCommand(
       clearPendingState,
       setSessionName,
       remount,
+      switchDaemonSession,
       settings.merged.ui?.history?.collapseOnResume,
       settings.merged.ui?.history?.collapsePreviewCount,
     ],

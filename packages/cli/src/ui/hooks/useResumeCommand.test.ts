@@ -1256,4 +1256,112 @@ describe('useResumeCommand', () => {
       expect.any(Number),
     );
   });
+
+  it('invokes switchDaemonSession before mutating local config or background state on happy path', async () => {
+    resumeMocks.reset();
+
+    const callOrder: string[] = [];
+    const llmClient = makeSwapSlotClient();
+    const baseConfig = makeSwapSlotConfig(llmClient);
+    const bgReset = vi.fn(() => {
+      callOrder.push('bg.reset');
+    });
+    const config = {
+      ...baseConfig,
+      getBackgroundTaskRegistry: () => ({
+        hasRunningTasks: vi.fn().mockReturnValue(false),
+        reset: bgReset,
+      }),
+      startNewSession: vi.fn(() => {
+        callOrder.push('config.startNewSession');
+      }),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+    const switchDaemonSession = vi.fn(async (_id: string) => {
+      callOrder.push('switchDaemonSession');
+    });
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const startNewSession = vi.fn();
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager,
+        startNewSession,
+        seedPromptCount: vi.fn(),
+        switchDaemonSession,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.handleResume('session-2');
+    });
+
+    expect(switchDaemonSession).toHaveBeenCalledWith('session-2');
+    expect(callOrder).toEqual([
+      'switchDaemonSession',
+      'bg.reset',
+      'config.startNewSession',
+    ]);
+    expect(startNewSession).toHaveBeenCalledWith('session-2');
+  });
+
+  it('leaves local config and background state untouched when switchDaemonSession rejects', async () => {
+    resumeMocks.reset();
+
+    const llmClient = makeSwapSlotClient();
+    const baseConfig = makeSwapSlotConfig(llmClient);
+    const bgReset = vi.fn();
+    const config = {
+      ...baseConfig,
+      getBackgroundTaskRegistry: () => ({
+        hasRunningTasks: vi.fn().mockReturnValue(false),
+        reset: bgReset,
+      }),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+    const switchDaemonSession = vi
+      .fn()
+      .mockRejectedValue(new Error('HTTP 503 daemon busy'));
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const startNewSession = vi.fn();
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager,
+        startNewSession,
+        seedPromptCount: vi.fn(),
+        switchDaemonSession,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.handleResume('session-2');
+    });
+
+    expect(switchDaemonSession).toHaveBeenCalledWith('session-2');
+    expect(bgReset).not.toHaveBeenCalled();
+    expect(config.startNewSession).not.toHaveBeenCalled();
+    expect(startNewSession).not.toHaveBeenCalled();
+    expect(historyManager.clearItems).not.toHaveBeenCalled();
+    expect(historyManager.loadHistory).not.toHaveBeenCalled();
+    expect(llmClient.commitTelemetrySwap).toHaveBeenCalledTimes(1);
+    expect(llmClient.abortTelemetrySwap).not.toHaveBeenCalled();
+    expect(historyManager.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringMatching(/Failed to resume session.*HTTP 503/),
+      }),
+      expect.any(Number),
+    );
+  });
 });

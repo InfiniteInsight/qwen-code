@@ -13,12 +13,13 @@
  * The render is gated on attach: `useDaemonStream` needs `driver.clientId` set
  * at mount, so we hold a placeholder until `createOrAttach` resolves.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import { DaemonClient, DaemonSessionClient } from '@qwen-code/sdk';
 import { AppContainer } from './AppContainer.js';
 import {
   DaemonLossContext,
+  DaemonSessionSwitchContext,
   DaemonStreamContext,
 } from './hooks/daemon/DaemonStreamContext.js';
 import {
@@ -93,6 +94,9 @@ export const DaemonAppContainer = (props: DaemonAppContainerProps) => {
     [client, exitDaemonGone, recheckDelayMs, flushMs],
   );
 
+  const configRef = useRef(appProps.config);
+  configRef.current = appProps.config;
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -104,6 +108,27 @@ export const DaemonAppContainer = (props: DaemonAppContainerProps) => {
         const session = sessionId
           ? await DaemonSessionClient.load(client, sessionId)
           : await DaemonSessionClient.createOrAttach(client, {});
+        if (cancelled) return;
+        const attachedSessionId = session.session?.sessionId;
+        if (
+          attachedSessionId &&
+          configRef.current.getSessionId?.() !== attachedSessionId
+        ) {
+          try {
+            const sessionData = await configRef.current
+              .getSessionService?.()
+              ?.loadSession?.(attachedSessionId)
+              .catch(() => undefined);
+            if (!cancelled) {
+              configRef.current.startNewSession?.(
+                attachedSessionId,
+                sessionData,
+              );
+            }
+          } catch {
+            /* best-effort session id and file-history alignment */
+          }
+        }
         if (!cancelled) setDriver(session);
       } catch (e) {
         if (cancelled) return;
@@ -134,6 +159,23 @@ export const DaemonAppContainer = (props: DaemonAppContainerProps) => {
       cancelled = true;
     };
   }, [client, sessionId, recheckDelayMs]);
+
+  const switchDaemonSession = useCallback(
+    async (nextSessionId: string) => {
+      const nextSession = await DaemonSessionClient.resume(
+        client,
+        nextSessionId,
+      );
+      nextSession.consumeReplaySnapshot?.();
+      setDriver((prev) => {
+        if (prev && prev.session?.sessionId !== nextSession.session?.sessionId) {
+          void prev.detach?.().catch(() => {});
+        }
+        return nextSession;
+      });
+    },
+    [client],
+  );
 
   // Initial attach failed because the daemon is gone: show the one line, give
   // Ink a moment to paint it, then exit.
@@ -171,7 +213,9 @@ export const DaemonAppContainer = (props: DaemonAppContainerProps) => {
   return (
     <DaemonStreamContext.Provider value={driver}>
       <DaemonLossContext.Provider value={loss}>
-        <AppContainer {...appProps} useStream={useDaemonStreamAdapter} />
+        <DaemonSessionSwitchContext.Provider value={switchDaemonSession}>
+          <AppContainer {...appProps} useStream={useDaemonStreamAdapter} />
+        </DaemonSessionSwitchContext.Provider>
       </DaemonLossContext.Provider>
     </DaemonStreamContext.Provider>
   );

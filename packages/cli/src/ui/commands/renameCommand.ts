@@ -6,6 +6,7 @@
 
 import {
   SESSION_TITLE_MAX_LENGTH,
+  sanitizeTitle,
   tryGenerateSessionTitle,
   type SessionTitleFailureReason,
 } from '@qwen-code/qwen-code-core';
@@ -180,20 +181,94 @@ export const renameCommand: SlashCommand = {
       // future regressions don't leak an interval timer).
       let outcome: Awaited<ReturnType<typeof tryGenerateSessionTitle>>;
       try {
-        const userDisplayTexts =
+        let userDisplayTexts =
           config.getChatRecordingService()?.getUserDisplayTextsForTitle?.() ??
           [];
+        if (
+          userDisplayTexts.length === 0 &&
+          Array.isArray(context.ui.history)
+        ) {
+          userDisplayTexts = context.ui.history
+            .filter(
+              (item): item is typeof item & { text: string } =>
+                item.type === 'user' &&
+                typeof item.text === 'string' &&
+                item.text.trim().length > 0,
+            )
+            .map((item) => item.text);
+        }
         const lastDisplayText = userDisplayTexts.at(-1)?.trim();
         const titleDisplayTexts = lastDisplayText?.match(
           /^\/(?:rename|tag)(?:\s+--auto)?$/i,
         )
           ? userDisplayTexts.slice(0, -1)
           : userDisplayTexts;
+        const signal = context.abortSignal ?? new AbortController().signal;
         outcome = await tryGenerateSessionTitle(
           config,
-          context.abortSignal ?? new AbortController().signal,
+          signal,
           titleDisplayTexts,
         );
+        if (
+          !outcome.ok &&
+          (outcome.reason === 'no_client' ||
+            outcome.reason === 'empty_history') &&
+          context.services.daemon?.generateContent
+        ) {
+          const validTexts = titleDisplayTexts.filter(
+            (text): text is string =>
+              typeof text === 'string' && text.trim().length > 0,
+          );
+          if (validTexts.length === 0) {
+            outcome = { ok: false, reason: 'empty_history' };
+          } else {
+            const excerpt = validTexts.slice(-20).join('\n').slice(-1000);
+            const prompt =
+              `Generate a concise, sentence-case title (3-7 words, no trailing punctuation, no quotes or markdown) for this programming session.\n\n` +
+              `Conversation so far:\n${excerpt}\n\n` +
+              `Return ONLY the short title text.`;
+            try {
+              let raw = '';
+              let hadError = false;
+              for await (const ev of context.services.daemon.generateContent(
+                prompt,
+                { signal },
+              )) {
+                if (ev.type === 'delta' && typeof ev.text === 'string') {
+                  raw += ev.text;
+                } else if (ev.type === 'error') {
+                  hadError = true;
+                  break;
+                }
+              }
+              if (signal.aborted) {
+                outcome = { ok: false, reason: 'aborted' };
+              } else if (hadError) {
+                outcome = { ok: false, reason: 'model_error' };
+              } else {
+                let candidate = raw.trim();
+                if (candidate.startsWith('{')) {
+                  try {
+                    const parsed = JSON.parse(candidate) as { title?: unknown };
+                    if (typeof parsed.title === 'string') {
+                      candidate = parsed.title;
+                    }
+                  } catch {
+                    /* fall through to plain sanitizeTitle */
+                  }
+                }
+                const sanitized = sanitizeTitle(candidate);
+                outcome = sanitized
+                  ? { ok: true, title: sanitized, modelUsed: 'daemon' }
+                  : { ok: false, reason: 'empty_result' };
+              }
+            } catch {
+              outcome = signal.aborted
+                ? { ok: false, reason: 'aborted' }
+                : { ok: false, reason: 'model_error' };
+            }
+          }
+        }
       } finally {
         clearInterval(timer);
         context.ui.setPendingItem(null);

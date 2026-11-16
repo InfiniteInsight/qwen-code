@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import {
   readDaemonModels,
   readDaemonModes,
+  readDaemonReasoningEffort,
   resolveDaemonModelArg,
 } from './daemon-session-state.js';
 
@@ -92,5 +93,33 @@ describe('resolveDaemonModelArg', () => {
 
   it('reports an unknown model', () => {
     expect(resolveDaemonModelArg(availableModels, 'nope').kind).toBe('unknown');
+  });
+});
+
+describe('readDaemonReasoningEffort', () => {
+  it('reads currentValue when reasoning_effort is present in configOptions', () => {
+    expect(
+      readDaemonReasoningEffort({
+        configOptions: [
+          { id: 'other_opt', currentValue: 'foo' },
+          { id: 'reasoning_effort', currentValue: 'high' },
+        ],
+      }),
+    ).toBe('high');
+  });
+
+  it('returns undefined across empty, missing, or malformed configOptions', () => {
+    for (const s of [
+      undefined,
+      null,
+      {},
+      { configOptions: 'invalid' },
+      { configOptions: [] },
+      { configOptions: [null, 42, { id: 'other', currentValue: 'low' }] },
+      { configOptions: [{ id: 'reasoning_effort', currentValue: '' }] },
+      { configOptions: [{ id: 'reasoning_effort', currentValue: 123 }] },
+    ]) {
+      expect(readDaemonReasoningEffort(s as never)).toBeUndefined();
+    }
   });
 });

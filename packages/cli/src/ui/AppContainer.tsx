@@ -189,10 +189,15 @@ import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
 import { useLlmStream, type CancelSubmitInfo } from './hooks/use-llm-stream.js';
 import {
+  DaemonSessionSwitchContext,
   DaemonStreamContext,
   type DaemonAwareStreamHook,
 } from './hooks/daemon/DaemonStreamContext.js';
 import { readDaemonModels } from './hooks/daemon/daemon-session-state.js';
+import {
+  applyReasoningEffort,
+  type ReasoningEffort,
+} from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
 import type { TrackedExecutingToolCall } from './hooks/useReactToolScheduler.js';
 import { useVim } from './hooks/vim.js';
 import {
@@ -989,6 +994,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // There the daemon, not this process's Config, decides which model the
   // session runs on, so it wins over `config.getModel()` from the first frame.
   const daemonDriver = useContext(DaemonStreamContext);
+  const switchDaemonSession = useContext(DaemonSessionSwitchContext);
   const [currentModel, setCurrentModel] = useState(
     () =>
       readDaemonModels(daemonDriver?.state).currentModelId ?? config.getModel(),
@@ -1973,6 +1979,7 @@ export const AppContainer = (props: AppContainerProps) => {
     clearPendingState: clearPendingStateFromRef,
     setSessionName,
     remount: refreshStatic,
+    switchDaemonSession: switchDaemonSession ?? undefined,
   });
 
   const { handleBranch } = useBranchCommand({
@@ -1984,6 +1991,7 @@ export const AppContainer = (props: AppContainerProps) => {
     clearPendingState: clearPendingStateFromRef,
     setSessionName,
     remount: refreshStatic,
+    switchDaemonSession: switchDaemonSession ?? undefined,
   });
 
   const {
@@ -1996,6 +2004,7 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     addItem: historyManager.addItem,
     logger,
+    activeSessionId: daemonDriver?.session?.sessionId,
   });
 
   const [isHelpDialogOpen, setHelpDialogOpen] = useState(false);
@@ -2545,6 +2554,8 @@ export const AppContainer = (props: AppContainerProps) => {
     daemonModelId,
     daemonApprovalMode,
     daemonSessionTitle,
+    daemonReasoningEffort,
+    daemonFollowupSuggestion,
     // `useStream` is a stable, unconditional hook call (defaulted prop, fixed
     // per mounted container) - see AppContainerProps.useStream.
   } = useStream(
@@ -2598,6 +2609,23 @@ export const AppContainer = (props: AppContainerProps) => {
     }
     setSessionName(daemonSessionTitle);
   }, [daemonSessionTitle]);
+
+  useEffect(() => {
+    const attachedSessionId = daemonDriver?.session?.sessionId;
+    if (attachedSessionId && sessionStats.sessionId !== attachedSessionId) {
+      startNewSession(attachedSessionId);
+    }
+  }, [daemonDriver, sessionStats.sessionId, startNewSession]);
+
+  useEffect(() => {
+    if (daemonDriver && daemonReasoningEffort) {
+      try {
+        applyReasoningEffort(config, daemonReasoningEffort as ReasoningEffort);
+      } catch {
+        /* ignore unsupported effort values on passive sync */
+      }
+    }
+  }, [config, daemonDriver, daemonReasoningEffort]);
 
   // Now that streamingState is available, keep isIdleRef in sync and
   // flush any deferred update notifications when the model finishes responding.
@@ -2704,6 +2732,23 @@ export const AppContainer = (props: AppContainerProps) => {
     daemon: daemonDriver,
     daemonMode: daemonApprovalMode,
   });
+
+  useEffect(() => {
+    if (
+      daemonDriver &&
+      daemonApprovalMode &&
+      Object.values(ApprovalMode).includes(daemonApprovalMode as ApprovalMode)
+    ) {
+      const nextMode = daemonApprovalMode as ApprovalMode;
+      if (config.getApprovalMode() !== nextMode) {
+        try {
+          config.setApprovalMode(nextMode);
+        } catch {
+          /* ignore untrusted folder mode errors on passive sync */
+        }
+      }
+    }
+  }, [config, daemonDriver, daemonApprovalMode]);
 
   const {
     messageQueue,
@@ -3909,8 +3954,21 @@ export const AppContainer = (props: AppContainerProps) => {
 
   useEffect(() => {
     // Under `--attach-daemon` the local Config has no initialized LLM client;
-    // follow-up suggestions and speculation are daemon-side concerns.
-    if (daemonDriver) return;
+    // follow-up suggestions arrive from the daemon via `daemonFollowupSuggestion`.
+    if (daemonDriver) {
+      if (
+        !followupSuggestionsEnabled ||
+        streamingState === StreamingState.Responding
+      ) {
+        setPromptSuggestion(null);
+      } else if (
+        streamingState === StreamingState.Idle &&
+        daemonFollowupSuggestion !== undefined
+      ) {
+        setPromptSuggestion(daemonFollowupSuggestion);
+      }
+      return;
+    }
 
     // Clear suggestion when feature is disabled at runtime
     if (!followupSuggestionsEnabled) {
@@ -4029,6 +4087,7 @@ export const AppContainer = (props: AppContainerProps) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- guards may change independently
   }, [
     daemonDriver,
+    daemonFollowupSuggestion,
     streamingState,
     followupSuggestionsEnabled,
     shellConfirmationRequest,

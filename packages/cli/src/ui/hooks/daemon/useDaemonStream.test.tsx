@@ -50,8 +50,8 @@ function makeFakeDriver(
     replayDegraded?: boolean;
     hasActivePrompt?: boolean;
     lastEventId?: number;
-    /** The load response's ACP state (`models`, `modes`). */
-    state?: { models?: unknown; modes?: unknown };
+    /** The load response's ACP state (`models`, `modes`, `configOptions`). */
+    state?: { models?: unknown; modes?: unknown; configOptions?: unknown };
     /** Shared ordering log: `subscribe` is pushed when events() starts. */
     log?: string[];
   } = {},
@@ -2126,6 +2126,245 @@ describe('useDaemonStream', () => {
     await act(async () => {
       baseDriver.finishPrompt({ stopReason: 'end_turn' });
       await pMulti;
+    });
+  });
+
+  it('runShellCommand does not duplicate shell output when SSE user_shell_result arrives before shellCommand resolves', async () => {
+    const baseDriver = makeFakeDriver({ clientId: 'me' });
+    const shellCommand = vi.fn().mockImplementation(async (cmd: string) => {
+      baseDriver.push({
+        type: 'user_shell_command',
+        data: { command: cmd },
+        originatorClientId: 'me',
+      });
+      baseDriver.push(
+        su(
+          {
+            sessionUpdate: 'shell_output',
+            output: 'hello from sse\n',
+          },
+          'me',
+        ),
+      );
+      baseDriver.push({
+        type: 'user_shell_result',
+        data: { exitCode: 0, aborted: false },
+        originatorClientId: 'me',
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      return { exitCode: 0, output: 'hello from sse\n', aborted: false };
+    });
+    const driver = Object.assign(baseDriver, { shellCommand });
+    const added: HistoryItemWithoutId[] = [];
+    const addItem: AddHistoryItem = (item) => {
+      added.push(item);
+      return added.length;
+    };
+    const { result } = renderHook(() => useDaemonStream(driver, addItem));
+    await waitFor(() => expect(result.current.initError).toBeNull());
+
+    await act(async () => {
+      await result.current.runShellCommand?.('echo hello');
+    });
+
+    const toolGroupItems = added.filter((item) => item.type === 'tool_group');
+    expect(toolGroupItems).toHaveLength(1);
+  });
+
+  it('permission_request without toolCallId synthesizes a fallback toolCallId and respondToPermission clears stale gates when daemon returns false', async () => {
+    const baseDriver = makeFakeDriver({ clientId: 'me' });
+    const respondToSessionPermission = vi.fn().mockResolvedValue(false);
+    const driver = Object.assign(baseDriver, { respondToSessionPermission });
+    const added: HistoryItemWithoutId[] = [];
+    const addItem: AddHistoryItem = (item) => {
+      added.push(item);
+      return added.length;
+    };
+    const { result } = renderHook(() => useDaemonStream(driver, addItem));
+    await waitFor(() => expect(result.current.initError).toBeNull());
+
+    act(() => {
+      baseDriver.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'req-no-tcid',
+          toolCall: { title: 'Edit file' },
+          options: [{ optionId: 'allow_once', kind: 'allow_once', name: 'Yes' }],
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.current.streamingState).toBe(
+        StreamingState.WaitingForConfirmation,
+      );
+    });
+    expect(result.current.activePermission?.toolCallId).toBe('req-no-tcid');
+    const toolGroup = result.current.pendingHistoryItems.find(
+      (i) => i.type === 'tool_group',
+    );
+    expect(toolGroup).toBeDefined();
+
+    await act(async () => {
+      await result.current.respondToPermission('allow_once');
+    });
+    expect(result.current.activePermission).toBeUndefined();
+    expect(result.current.streamingState).toBe(StreamingState.Responding);
+  });
+
+  it('seeds daemonReasoningEffort from driver.state.configOptions, surfaces daemonFollowupSuggestion, and routes interactive commands (/skills, /extensions, /diff, /doctor, /docs, /update, /insight, /init) locally', async () => {
+    const baseDriver = makeFakeDriver({
+      clientId: 'me',
+      state: {
+        configOptions: [{ id: 'reasoning_effort', currentValue: 'max' }],
+      },
+    });
+    const added: HistoryItemWithoutId[] = [];
+    const addItem: AddHistoryItem = (item) => {
+      added.push(item);
+      return added.length;
+    };
+    const handleSlashCommand = vi.fn().mockResolvedValue({ type: 'handled' });
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <DaemonStreamContext.Provider value={baseDriver}>
+        {children}
+      </DaemonStreamContext.Provider>
+    );
+
+    const { result } = renderHook(
+      () =>
+        (
+          useDaemonStreamAdapter as (
+            ...args: unknown[]
+          ) => ReturnType<typeof useDaemonStreamAdapter>
+        )(
+          {} as never,
+          [],
+          addItem,
+          {} as never,
+          true,
+          {} as never,
+          vi.fn(),
+          handleSlashCommand,
+        ),
+      { wrapper },
+    );
+
+    expect(result.current.daemonReasoningEffort).toBe('max');
+
+    act(() => {
+      baseDriver.push({
+        type: 'followup_suggestion',
+        data: { sessionId: 's1', suggestion: 'Check git diff' },
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.current.daemonFollowupSuggestion).toBe('Check git diff');
+    });
+
+    for (const cmd of [
+      '/skills',
+      '/extensions',
+      '/diff',
+      '/doctor',
+      '/docs',
+      '/update',
+      '/insight',
+      '/init',
+      '/continue sess-2',
+    ]) {
+      await act(async () => {
+        await result.current.submitQuery(cmd);
+      });
+      expect(handleSlashCommand).toHaveBeenCalledWith(
+        cmd,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+      );
+    }
+    expect(baseDriver.stats().prompts).toHaveLength(0);
+  });
+
+  it('resets projection state when swapping to a new driver without a replaySnapshot', async () => {
+    const firstDriver = makeFakeDriver({
+      clientId: 'client-1',
+      lastEventId: 10,
+      state: {
+        models: { currentModelId: 'old-model' },
+        modes: { currentModeId: 'yolo' },
+        configOptions: [{ id: 'reasoning_effort', currentValue: 'high' }],
+      },
+    });
+    const added: HistoryItemWithoutId[] = [];
+    const addItem: AddHistoryItem = (item) => {
+      added.push(item);
+      return added.length;
+    };
+
+    const { result, rerender } = renderHook(
+      ({ drv }) => useDaemonStream(drv, addItem),
+      { initialProps: { drv: firstDriver as DaemonSessionDriver } },
+    );
+    await waitFor(() => expect(result.current.initError).toBeNull());
+
+    act(() => {
+      firstDriver.push(
+        su({
+          sessionUpdate: 'session_info_update',
+          title: 'Old Session Title',
+        }),
+      );
+      firstDriver.push({
+        type: 'followup_suggestion',
+        data: { sessionId: 's-old', suggestion: 'Old suggestion' },
+      });
+      firstDriver.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'req-stale',
+          toolCall: { toolCallId: 'tc-stale', title: 'Write file' },
+          options: [{ optionId: 'allow_once', kind: 'allow_once', name: 'Yes' }],
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.current.daemonModelId).toBe('old-model');
+      expect(result.current.daemonApprovalMode).toBe('yolo');
+      expect(result.current.daemonReasoningEffort).toBe('high');
+      expect(result.current.daemonSessionTitle).toBe('Old Session Title');
+      expect(result.current.daemonFollowupSuggestion).toBe('Old suggestion');
+      expect(result.current.activePermission?.requestId).toBe('req-stale');
+    });
+
+    const nextDriverBase = makeFakeDriver({
+      clientId: 'client-2',
+      lastEventId: 42,
+      state: {
+        models: { currentModelId: 'new-model' },
+        modes: { currentModeId: 'plan' },
+        configOptions: [{ id: 'reasoning_effort', currentValue: 'low' }],
+      },
+    });
+    const nextDriver: DaemonSessionDriver = Object.assign(nextDriverBase, {
+      consumeReplaySnapshot: () => undefined,
+    });
+    expect(nextDriver.consumeReplaySnapshot?.()).toBeUndefined();
+    expect(nextDriver.replaySnapshot).toBeUndefined();
+
+    rerender({ drv: nextDriver });
+
+    await waitFor(() => {
+      expect(result.current.daemonModelId).toBe('new-model');
+      expect(result.current.daemonApprovalMode).toBe('plan');
+      expect(result.current.daemonReasoningEffort).toBe('low');
+      expect(result.current.daemonSessionTitle).toBeUndefined();
+      expect(result.current.daemonFollowupSuggestion).toBeUndefined();
+      expect(result.current.activePermission).toBeUndefined();
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
     });
   });
 });

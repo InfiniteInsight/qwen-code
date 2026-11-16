@@ -156,4 +156,88 @@ describe('planCommand', () => {
       content: 'Not in plan mode. Use "/plan" to enter plan mode first.',
     });
   });
+
+  it('delegates to daemon.setApprovalMode and ignores local untrusted-folder throws when daemon succeeds', async () => {
+    if (!planCommand.action) {
+      throw new Error('The plan command must have an action.');
+    }
+
+    const daemonSetApprovalMode = vi.fn().mockResolvedValue(undefined);
+    mockContext.services.daemon = {
+      setApprovalMode: daemonSetApprovalMode,
+    };
+    (mockContext.services.config?.setApprovalMode as Mock).mockImplementation(
+      () => {
+        throw new Error('Cannot enable plan mode in an untrusted folder.');
+      },
+    );
+
+    const enterResult = await planCommand.action(mockContext, '');
+    expect(daemonSetApprovalMode).toHaveBeenCalledWith(ApprovalMode.PLAN, {
+      planMode: true,
+    });
+    expect(enterResult).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Enabled plan mode. The agent will analyze and plan without executing tools.',
+    });
+
+    (mockContext.services.config?.getApprovalMode as Mock).mockReturnValue(
+      ApprovalMode.PLAN,
+    );
+    (mockContext.services.config?.getPrePlanMode as Mock).mockReturnValue(
+      ApprovalMode.AUTO_EDIT,
+    );
+
+    const exitResult = await planCommand.action(mockContext, 'exit');
+    expect(daemonSetApprovalMode).toHaveBeenCalledWith(
+      ApprovalMode.AUTO_EDIT,
+      {
+        planMode: false,
+      },
+    );
+    expect(exitResult).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Exited plan mode. Previous approval mode restored.',
+    });
+  });
+
+  it('still surfaces local config.setApprovalMode errors when daemon is not attached', async () => {
+    if (!planCommand.action) {
+      throw new Error('The plan command must have an action.');
+    }
+
+    (mockContext.services.config?.setApprovalMode as Mock).mockImplementation(
+      () => {
+        throw new Error('Untrusted folder restriction');
+      },
+    );
+
+    const result = await planCommand.action(mockContext, '');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'Untrusted folder restriction',
+    });
+  });
+
+  it('surfaces daemon.setApprovalMode rejection without updating local config', async () => {
+    if (!planCommand.action) {
+      throw new Error('The plan command must have an action.');
+    }
+
+    mockContext.services.daemon = {
+      setApprovalMode: vi.fn().mockRejectedValue(new Error('Daemon rejected')),
+    };
+
+    const result = await planCommand.action(mockContext, '');
+    expect(mockContext.services.config?.setApprovalMode).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'Daemon rejected',
+    });
+  });
 });

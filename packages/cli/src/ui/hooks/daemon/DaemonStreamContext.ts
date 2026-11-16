@@ -27,6 +27,14 @@ export const DaemonStreamContext = createContext<DaemonSessionDriver | null>(
 export const DaemonLossContext = createContext<DaemonLossHandling | null>(null);
 
 /**
+ * Callback provided by `DaemonAppContainer` to rebind the attached daemon
+ * session when `/resume` or `/branch` switches conversations in-place.
+ */
+export const DaemonSessionSwitchContext = createContext<
+  ((sessionId: string) => Promise<void>) | null
+>(null);
+
+/**
  * The stream hook `AppContainer` is driven by: `useLlmStream` in process, or the
  * daemon adapter in an attached tab. The daemon variant also reports the
  * session's model and approval mode as the daemon sees them; the in-process hook
@@ -38,4 +46,6 @@ export type DaemonAwareStreamHook = (
   daemonModelId?: string;
   daemonApprovalMode?: string;
   daemonSessionTitle?: string;
+  daemonReasoningEffort?: string;
+  daemonFollowupSuggestion?: string | null;
 };

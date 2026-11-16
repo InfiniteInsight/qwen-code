@@ -1061,7 +1061,7 @@ export async function main() {
     markAcpStartup('configConstructionStart');
     const config = await loadCliConfig(
       settings.merged,
-      argv.acp || argv.experimentalAcp
+      argv.acp || argv.experimentalAcp || argv.attachDaemon
         ? { ...argv, chatRecording: false }
         : argv,
       process.cwd(),

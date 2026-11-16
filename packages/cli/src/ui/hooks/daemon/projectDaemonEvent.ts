@@ -141,6 +141,10 @@ export interface DaemonProjectionState {
   approvalMode?: string;
   /** The session's display title (`session_info_update.title` or `session_metadata_updated.displayName`). */
   sessionTitle?: string;
+  /** The session's active reasoning effort (`config_options_update` or load state). */
+  reasoningEffort?: string;
+  /** Ghost-text follow-up suggestion broadcast by the daemon (`followup_suggestion`). */
+  followupSuggestion?: string | null;
   /** In-flight user shell command (`user_shell_command`), if any. */
   pendingShellCommand?: string;
   /** Accumulated stdout/stderr for an in-flight user shell command (`shell_output`). */
@@ -719,6 +723,7 @@ function projectSessionUpdate(
         state: {
           ...flushed.state,
           streamingState: StreamingState.Responding,
+          followupSuggestion: null,
         },
         committed,
       };
@@ -922,9 +927,60 @@ function projectSessionUpdate(
       };
     }
 
+    case 'current_mode_update': {
+      const currentModeId =
+        typeof update['currentModeId'] === 'string'
+          ? update['currentModeId'].trim()
+          : '';
+      if (!currentModeId || state.approvalMode === currentModeId) {
+        return { state, committed: [] };
+      }
+      return {
+        state: {
+          ...state,
+          approvalMode: currentModeId,
+        },
+        committed: [],
+      };
+    }
+
+    case 'config_options_update': {
+      const opts = update['configOptions'];
+      if (!Array.isArray(opts)) {
+        return { state, committed: [] };
+      }
+      let nextEffort: string | undefined;
+      for (const raw of opts) {
+        const entry = asRecord(raw);
+        if (
+          entry['id'] === 'reasoning_effort' &&
+          typeof entry['currentValue'] === 'string' &&
+          entry['currentValue'].trim().length > 0
+        ) {
+          nextEffort = entry['currentValue'].trim();
+          break;
+        }
+      }
+      if (!nextEffort || state.reasoningEffort === nextEffort) {
+        return { state, committed: [] };
+      }
+      return {
+        state: {
+          ...state,
+          reasoningEffort: nextEffort,
+        },
+        committed: [],
+      };
+    }
+
+    case 'tool_output':
     case 'shell_output': {
       const chunk =
-        typeof update['output'] === 'string' ? update['output'] : '';
+        typeof update['output'] === 'string'
+          ? update['output']
+          : typeof update['chunk'] === 'string'
+            ? update['chunk']
+            : text;
       if (!chunk) {
         return { state, committed: [] };
       }
@@ -1127,7 +1183,11 @@ function projectFrame(
       const requestId = String(data['requestId'] ?? '');
       if (!requestId) return { state, committed: [] };
       const toolCall = asRecord(data['toolCall']);
-      const toolCallId = toolCallIdOf(data['toolCall']);
+      const toolCallId = toolCallIdOf(data['toolCall']) || requestId;
+      const effectiveToolCall =
+        toolCallIdOf(data['toolCall'])
+          ? toolCall
+          : { ...toolCall, toolCallId };
       const title =
         typeof toolCall['title'] === 'string'
           ? (toolCall['title'] as string)
@@ -1141,14 +1201,11 @@ function projectFrame(
       // gated tool would never render. A run_shell_command DOES send a prior
       // `tool_call`; there `upsertTool` just refreshes the existing entry.
       const flushed = flushBeforeToolActivity(state);
-      let tools = flushed.state.tools;
-      if (toolCallId) {
-        tools = setToolStatus(
-          upsertTool(tools, toolCall),
-          toolCallId,
-          ToolCallStatus.Confirming,
-        );
-      }
+      const tools = setToolStatus(
+        upsertTool(flushed.state.tools, effectiveToolCall),
+        toolCallId,
+        ToolCallStatus.Confirming,
+      );
       return {
         state: {
           ...flushed.state,
@@ -1244,6 +1301,59 @@ function projectFrame(
       return { state: { ...state, modelId }, committed: [] };
     }
 
+    case 'model_switch_failed': {
+      const requested =
+        typeof data['requestedModelId'] === 'string' &&
+        data['requestedModelId'].trim().length > 0
+          ? data['requestedModelId'].trim()
+          : '';
+      const errText =
+        typeof data['error'] === 'string' && data['error'].trim().length > 0
+          ? data['error'].trim()
+          : 'unknown error';
+      const label = requested
+        ? `Model switch to ${requested} failed: ${errText}`
+        : `Model switch failed: ${errText}`;
+      return {
+        state,
+        committed: [{ type: 'error', text: label }],
+      };
+    }
+
+    case 'session_recording_degraded': {
+      const errText =
+        typeof data['error'] === 'string' && data['error'].trim().length > 0
+          ? data['error'].trim()
+          : 'Chat recording is degraded; new turns may not be saved to disk.';
+      return {
+        state,
+        committed: [{ type: 'warning', text: errText }],
+      };
+    }
+
+    case 'followup_suggestion': {
+      const suggestion =
+        typeof data['suggestion'] === 'string' ? data['suggestion'].trim() : '';
+      const nextSuggestion = suggestion.length > 0 ? suggestion : null;
+      if (state.followupSuggestion === nextSuggestion) {
+        return { state, committed: [] };
+      }
+      return {
+        state: {
+          ...state,
+          followupSuggestion: nextSuggestion,
+        },
+        committed: [],
+      };
+    }
+
+    case 'shell_output':
+      return projectSessionUpdate(
+        state,
+        { update: { sessionUpdate: 'shell_output', ...data } },
+        frame.originatorClientId,
+      );
+
     case 'approval_mode_changed': {
       const next = data['next'];
       if (typeof next !== 'string' || next.length === 0) {
@@ -1296,6 +1406,7 @@ function projectFrame(
         state: {
           ...flushed.state,
           streamingState: StreamingState.Responding,
+          followupSuggestion: null,
           pendingShellCommand: command,
           pendingShellOutput: '',
           tools: [shellTool],
@@ -1402,6 +1513,7 @@ function projectFrame(
         state: {
           ...flushed.state,
           streamingState: StreamingState.Responding,
+          followupSuggestion: null,
         },
         committed: [...flushed.committed, { type: 'user', text }],
       };
@@ -1416,6 +1528,7 @@ function projectFrame(
           pendingThought: '',
           tools: [],
           pendingPermission: undefined,
+          followupSuggestion: null,
           pendingShellCommand: undefined,
           pendingShellOutput: undefined,
         },
@@ -1434,6 +1547,7 @@ function projectFrame(
             tools: [],
             pendingPermission: undefined,
             lastEventId: undefined,
+            followupSuggestion: null,
             pendingShellCommand: undefined,
             pendingShellOutput: undefined,
           },

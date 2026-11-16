@@ -20,6 +20,7 @@
 import { useContext, useEffect, useRef } from 'react';
 import { StreamingState } from '../../types.js';
 import { isSlashCommand } from '../../utils/commandUtils.js';
+import { hasBlockingBackgroundWork } from '../../utils/backgroundWorkUtils.js';
 import { useDaemonStream, type DaemonPromptBlock } from './useDaemonStream.js';
 import { useDaemonSubagentSync } from './use-daemon-subagent-sync.js';
 import {
@@ -95,6 +96,15 @@ const LOCAL_DAEMON_TUI_SLASH_COMMANDS = new Set([
   'tools',
   'rollback',
   'tag',
+  'continue',
+  'skills',
+  'extensions',
+  'diff',
+  'doctor',
+  'docs',
+  'update',
+  'insight',
+  'init',
 ]);
 
 /** Flatten a `submitQuery` argument (string | Part | Part[]) to plain text. */
@@ -214,6 +224,10 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
     addItem,
     loss ?? undefined,
     onSubagentFrame,
+    () =>
+      (typeof config?.getSessionId === 'function'
+        ? config.getSessionId()
+        : undefined) || driver.session?.sessionId,
   );
   const streamingStateRef = useRef(ds.streamingState);
   streamingStateRef.current = ds.streamingState;
@@ -301,6 +315,14 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
             body ? body.split(/\s+/u)[0] : trimmed[0]
           )?.toLowerCase();
           if (firstToken && LOCAL_DAEMON_TUI_SLASH_COMMANDS.has(firstToken)) {
+            const isSessionClear =
+              firstToken === 'clear' ||
+              firstToken === 'reset' ||
+              firstToken === 'new';
+            const blockedByBackgroundWork =
+              isSessionClear &&
+              typeof config?.getBackgroundTaskRegistry === 'function' &&
+              hasBlockingBackgroundWork(config);
             const slashResult = await handleSlashCommand(
               trimmed,
               undefined,
@@ -309,10 +331,9 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
               promptId,
             );
             if (
-              (!slashResult || slashResult.type === 'handled') &&
-              (firstToken === 'clear' ||
-                firstToken === 'reset' ||
-                firstToken === 'new')
+              isSessionClear &&
+              !blockedByBackgroundWork &&
+              (!slashResult || slashResult.type === 'handled')
             ) {
               await ds.clearRemoteSession();
               return;
@@ -373,5 +394,7 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
     daemonModelId: ds.daemonModelId,
     daemonApprovalMode: ds.daemonApprovalMode,
     daemonSessionTitle: ds.daemonSessionTitle,
+    daemonReasoningEffort: ds.daemonReasoningEffort,
+    daemonFollowupSuggestion: ds.daemonFollowupSuggestion,
   };
 };
