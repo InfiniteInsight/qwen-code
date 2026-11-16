@@ -2774,3 +2774,27 @@ describe('public/index.html regression checks (#469, #470, #471)', () => {
     expect(html).not.toContain('sessionStorage.removeItem(WINDOW_KEY);');
   });
 });
+
+describe('refused #135 session control families (lsp, shell, cd, branch)', () => {
+  it('refuses GET /session/:id/lsp and POST /session/:id/{shell,cd,branch} even for owner tokens (#135)', async () => {
+    const { url, store } = await boot();
+    const { token } = await store.issue(['owner'], 'owner-135');
+    const sid = '11111111-2222-3333-4444-555555555555';
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    };
+
+    const lspRes = await fetch(`${url}/session/${sid}/lsp`, { headers });
+    expect(lspRes.status).toBe(404);
+
+    for (const sub of ['shell', 'cd', 'branch'] as const) {
+      const res = await fetch(`${url}/session/${sid}/${sub}`, {
+        method: 'POST',
+        headers,
+        body: '{}',
+      });
+      expect(res.status).toBe(404);
+    }
+  });
+});
