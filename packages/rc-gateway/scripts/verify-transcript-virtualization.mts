@@ -363,6 +363,7 @@ const VT_CSS = `
     white-space: pre-wrap; word-break: break-word; line-height: 1.4;
     font-size: 0.95rem; }
   #vt .role { font-size: 0.7rem; text-transform: uppercase; margin-bottom: 2px; }
+  #vt .stamp { text-transform: none; letter-spacing: 0; font-weight: 400; opacity: 0.75; }
   #vt .user { align-self: flex-end; }
   #vt .asst, #vt .thought, #vt .tool, #vt .processing, #vt .bubble-fork {
     align-self: flex-start; }
@@ -2784,26 +2785,44 @@ class Frames {
       meta,
     );
   }
-  thought(text: string): this {
-    return this.upd({
-      sessionUpdate: 'agent_thought_chunk',
-      content: { text },
-    });
+  thought(text: string, meta?: Record<string, unknown>): this {
+    return this.upd(
+      {
+        sessionUpdate: 'agent_thought_chunk',
+        content: { text },
+      },
+      meta,
+    );
   }
-  toolCall(id: string, title: string, status: string): this {
-    return this.upd({
-      sessionUpdate: 'tool_call',
-      toolCallId: id,
-      title,
-      status,
-    });
+  toolCall(
+    id: string,
+    title: string,
+    status: string,
+    meta?: Record<string, unknown>,
+  ): this {
+    return this.upd(
+      {
+        sessionUpdate: 'tool_call',
+        toolCallId: id,
+        title,
+        status,
+      },
+      meta,
+    );
   }
-  toolUpdate(id: string, status: string): this {
-    return this.upd({
-      sessionUpdate: 'tool_call_update',
-      toolCallId: id,
-      status,
-    });
+  toolUpdate(
+    id: string,
+    status: string,
+    meta?: Record<string, unknown>,
+  ): this {
+    return this.upd(
+      {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: id,
+        status,
+      },
+      meta,
+    );
   }
   done(): this {
     return this.ev('turn_complete');
@@ -34996,6 +35015,654 @@ PAGE_SCENARIOS.push({
     },
   });
 }
+
+// ---- #268: server timestamps on thinking blocks and tool calls ---------------
+
+const P268_THOUGHT_AT = Date.UTC(2026, 10, 15, 16, 26, 0);
+const P268_THOUGHT_LATE = Date.UTC(2026, 10, 15, 16, 28, 0);
+const P268_TOOL_START = Date.UTC(2026, 10, 15, 16, 31, 0);
+const P268_TOOL_END = Date.UTC(2026, 10, 15, 16, 34, 0);
+const P268_ASST_AT = Date.UTC(2026, 10, 15, 16, 35, 0);
+const P268_USER_AT = Date.UTC(2026, 10, 15, 16, 25, 0);
+
+const P268_TRANSCRIPT_TEXT_JS = String.raw`(() => {
+  const out = [];
+  const root = document.getElementById('transcript');
+  if (!root || root.getClientRects().length === 0) return out;
+  for (const e of [root, ...root.querySelectorAll('*')]) {
+    const tag = e.tagName.toLowerCase();
+    if (tag === 'option' || tag === 'script' || tag === 'style') continue;
+    const own = Array.from(e.childNodes).some((x) => x.nodeType === 3 && (x.textContent || '').trim() !== '');
+    if (!own || e.getClientRects().length === 0) continue;
+    const cs = getComputedStyle(e);
+    if (cs.visibility === 'hidden') continue;
+    const chain = [];
+    for (let up = e; up; up = up.parentElement) {
+      const s = getComputedStyle(up);
+      chain.push([s.backgroundColor, s.opacity]);
+    }
+    const cls = typeof e.className === 'string' && e.className ? '.' + e.className.split(' ')[0] : '';
+    out.push({
+      kind: tag + (e.id ? '#' + e.id : '') + cls,
+      color: cs.color,
+      size: parseFloat(cs.fontSize),
+      disabled: !!e.closest(':disabled'),
+      chain,
+    });
+  }
+  return out;
+})()`;
+
+async function readP268TranscriptText(
+  page: Page,
+): Promise<
+  Array<{
+    kind: string;
+    color: string;
+    size: number;
+    disabled: boolean;
+    chain: [string, string][];
+  }>
+> {
+  return page.evaluate(P268_TRANSCRIPT_TEXT_JS) as Promise<
+    Array<{
+      kind: string;
+      color: string;
+      size: number;
+      disabled: boolean;
+      chain: [string, string][];
+    }>
+  >;
+}
+
+PAGE_SCENARIOS.push({
+  name: 'P587 live agent_thought_chunk renders its opening timestamp on the thinking role line and keeps it on the folded and expanded header',
+  before: async (page) => {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Emulation.setTimezoneOverride', {
+      timezoneId: 'Asia/Kolkata',
+    });
+  },
+  frames: () => {
+    const f = new Frames();
+    f.thought('Weighing layout tradeoffs. ', {
+      serverTimestamp: P268_THOUGHT_AT,
+    });
+    return f.list;
+  },
+  run: async ({ page, viewer }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 1, 15_000);
+    await settlePage(page);
+
+    const liveRole = await page.evaluate(() => {
+      const r = document.querySelector('#transcript .bubble.thought .role');
+      const sp = r ? r.querySelector('.stamp') : null;
+      return {
+        roleText: r ? (r.textContent ?? '') : null,
+        stamp: sp ? (sp.textContent ?? '') : null,
+      };
+    });
+    expect(
+      fold(liveRole.stamp) === wantStamp(P268_THOUGHT_AT),
+      `live thought stamp reads ${JSON.stringify(liveRole.stamp)}, expected ${JSON.stringify(wantStamp(P268_THOUGHT_AT))}`,
+    );
+    expect(
+      fold(liveRole.roleText) === `thinking${wantStamp(P268_THOUGHT_AT)}`,
+      `live thought role reads ${JSON.stringify(liveRole.roleText)}`,
+    );
+
+    // Check legibility of the live thought role + stamp on #transcript ground.
+    for (const row of await readP268TranscriptText(page)) {
+      pgShellCheck(row, 'P587 live thought 390x844');
+    }
+
+    // A later thought chunk does not overwrite the opening timestamp.
+    await page.evaluate(
+      (late) =>
+        renderFrame({
+          id: 2,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_thought_chunk',
+              content: { text: 'Still reasoning.' },
+            },
+          },
+          _meta: { serverTimestamp: late },
+        }),
+      P268_THOUGHT_LATE,
+    );
+    await settlePage(page);
+    const afterChunk = await page.evaluate(() => {
+      const sp = document.querySelector(
+        '#transcript .bubble.thought .role .stamp',
+      );
+      return sp ? (sp.textContent ?? '') : null;
+    });
+    expect(
+      fold(afterChunk) === wantStamp(P268_THOUGHT_AT),
+      `later chunk moved live thought stamp to ${JSON.stringify(afterChunk)}`,
+    );
+
+    // Next non-thought frame folds the thought into .thought-head with its opening stamp.
+    await page.evaluate(
+      (asstAt) => {
+        renderFrame({
+          id: 3,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { text: 'Ready.' },
+            },
+          },
+          _meta: { serverTimestamp: asstAt },
+        });
+        renderFrame({ id: 4, type: 'turn_complete', data: {} });
+      },
+      P268_ASST_AT,
+    );
+    await settlePage(page);
+
+    const folded = await page.evaluate(() => {
+      const h = document.querySelector(
+        '#transcript .bubble.thought .thought-head',
+      );
+      const sp = h ? h.querySelector('.stamp') : null;
+      return {
+        head: h ? (h.textContent ?? '') : '',
+        stamp: sp ? (sp.textContent ?? '') : null,
+      };
+    });
+    expect(
+      fold(folded.stamp) === wantStamp(P268_THOUGHT_AT),
+      `folded thought stamp reads ${JSON.stringify(folded.stamp)}`,
+    );
+    expect(
+      /^∴ Thought for \S+ \u00b7 .+ ▸$/.test(fold(folded.head) ?? ''),
+      `folded thought head reads ${JSON.stringify(folded.head)}`,
+    );
+
+    await page.click('#transcript .bubble.thought .thought-head');
+    await settlePage(page);
+    const expanded = await page.evaluate(() => {
+      const h = document.querySelector(
+        '#transcript .bubble.thought .thought-head',
+      );
+      const sp = h ? h.querySelector('.stamp') : null;
+      return {
+        head: h ? (h.textContent ?? '') : '',
+        stamp: sp ? (sp.textContent ?? '') : null,
+      };
+    });
+    expect(
+      fold(expanded.stamp) === wantStamp(P268_THOUGHT_AT) &&
+        (fold(expanded.head) ?? '').endsWith(' ▾'),
+      `expanded thought head reads ${JSON.stringify(expanded.head)}`,
+    );
+
+    let worst = 99;
+    for (const row of await readP268TranscriptText(page)) {
+      worst = Math.min(worst, pgShellCheck(row, 'P587 settled thought 390x844'));
+    }
+
+    return `live thought role stamped ${eastern(P268_THOUGHT_AT)}; kept across chunk + fold + expand; worst contrast ${worst.toFixed(2)}:1`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P588 live tool_call keeps its start timestamp across later tool_call_update frames and wraps cleanly at 390x844',
+  before: async (page) => {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Emulation.setTimezoneOverride', {
+      timezoneId: 'Asia/Kolkata',
+    });
+  },
+  frames: () => {
+    const f = new Frames();
+    f.upd(
+      {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tc-268-live',
+        title: 'Read packages/rc-gateway/public/transcript-view.js',
+        status: 'in_progress',
+        rawInput: { path: 'packages/rc-gateway/public/transcript-view.js' },
+      },
+      { serverTimestamp: P268_TOOL_START },
+    );
+    return f.list;
+  },
+  run: async ({ page, viewer }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 1, 15_000);
+    await settlePage(page);
+
+    const initial = await page.evaluate(() => {
+      const h = document.querySelector('#transcript .bubble.tool .tool-head');
+      const sp = h ? h.querySelector('.stamp') : null;
+      return {
+        head: h ? (h.textContent ?? '') : '',
+        stamp: sp ? (sp.textContent ?? '') : null,
+      };
+    });
+    expect(
+      fold(initial.stamp) === wantStamp(P268_TOOL_START),
+      `in_progress tool stamp reads ${JSON.stringify(initial.stamp)}`,
+    );
+    expect(
+      initial.head.includes('[in_progress]'),
+      `in_progress tool head reads ${JSON.stringify(initial.head)}`,
+    );
+
+    // Terminal update arrives 3 minutes later: status updates, start stamp stays.
+    await page.evaluate(
+      (endAt) => {
+        renderFrame({
+          id: 2,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'tc-268-live',
+              status: 'completed',
+              rawOutput: 'line 1\nline 2\nline 3\nline 4',
+            },
+          },
+          _meta: { serverTimestamp: endAt },
+        });
+        renderFrame({ id: 3, type: 'turn_complete', data: {} });
+      },
+      P268_TOOL_END,
+    );
+    await settlePage(page);
+
+    const settled = await page.evaluate(() => {
+      const scroller = document.getElementById('transcript')!;
+      const h = scroller.querySelector<HTMLElement>('.bubble.tool .tool-head')!;
+      const sp = h.querySelector('.stamp');
+      return {
+        head: h.textContent ?? '',
+        stamp: sp ? (sp.textContent ?? '') : null,
+        topBefore: Math.round(h.getBoundingClientRect().top),
+        docOverflow: document.documentElement.scrollWidth - window.innerWidth,
+        txOverflow: scroller.scrollWidth - scroller.clientWidth,
+      };
+    });
+    expect(
+      fold(settled.stamp) === wantStamp(P268_TOOL_START),
+      `completed tool stamp reads ${JSON.stringify(settled.stamp)}, expected start ${JSON.stringify(wantStamp(P268_TOOL_START))}`,
+    );
+    expect(
+      fold(settled.head) ===
+        `🔧 Read packages/rc-gateway/public/transcript-view.js  [completed]${wantStamp(P268_TOOL_START)} ▸`,
+      `completed tool head reads ${JSON.stringify(settled.head)}`,
+    );
+    expect(
+      settled.docOverflow <= 0 && settled.txOverflow <= 0,
+      `horizontal overflow at 390px: doc=${settled.docOverflow}, transcript=${settled.txOverflow}`,
+    );
+
+    // Expand and collapse: keepHeld keeps .tool-head anchored even when wrapped.
+    await page.click('#transcript .bubble.tool .tool-head');
+    await settlePage(page);
+    const expanded = await page.evaluate(() => {
+      const h = document.querySelector<HTMLElement>(
+        '#transcript .bubble.tool .tool-head',
+      )!;
+      const d = document.querySelector<HTMLElement>(
+        '#transcript .bubble.tool .tool-detail',
+      );
+      return {
+        head: h.textContent ?? '',
+        topAfter: Math.round(h.getBoundingClientRect().top),
+        detailHidden: d ? d.hidden : true,
+      };
+    });
+    expect(
+      !expanded.detailHidden && (fold(expanded.head) ?? '').endsWith(' ▾'),
+      `expanded tool head reads ${JSON.stringify(expanded.head)}`,
+    );
+    expect(
+      Math.abs(expanded.topAfter - settled.topBefore) <= 1,
+      `expanding moved .tool-head from ${settled.topBefore} to ${expanded.topAfter}`,
+    );
+
+    let worst = 99;
+    for (const row of await readP268TranscriptText(page)) {
+      worst = Math.min(worst, pgShellCheck(row, 'P588 tool 390x844'));
+    }
+
+    return `tool kept start stamp ${eastern(P268_TOOL_START)} over ${eastern(P268_TOOL_END)}; 0px overflow at 390x844; head held at ${settled.topBefore}px; worst contrast ${worst.toFixed(2)}:1`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P589 paged history stamps stored thought and tool rows and adopts the older start timestamp when a tool call straddles pages',
+  frames: () => replayFrames(6, 1),
+  run: async ({ page, viewer }) => {
+    const T_OLD_USER = Date.UTC(2026, 10, 15, 14, 0, 0);
+    const T_OLD_CALL = Date.UTC(2026, 10, 15, 14, 1, 0);
+    const T_NEW_RESULT = Date.UTC(2026, 10, 15, 14, 4, 0);
+    const T_NEW_THOUGHT = Date.UTC(2026, 10, 15, 14, 5, 0);
+    const T_NEW_ASST = Date.UTC(2026, 10, 15, 14, 6, 0);
+
+    await page.route(
+      (u) => u.pathname.endsWith(`/session/${viewer.sessionId}/transcript`),
+      (route) => {
+        const u = new URL(route.request().url());
+        const cursor = u.searchParams.get('cursor');
+        if (!cursor) {
+          return route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              v: 1,
+              events: [
+                storedEvent(
+                  20,
+                  'tool_call_update',
+                  {
+                    toolCallId: 'tc-split-268',
+                    status: 'completed',
+                    rawOutput: 'split output',
+                  },
+                  T_NEW_RESULT,
+                ),
+                storedEvent(
+                  21,
+                  'agent_thought_chunk',
+                  { content: { text: 'stored page thought' } },
+                  T_NEW_THOUGHT,
+                ),
+                storedEvent(
+                  22,
+                  'agent_message_chunk',
+                  { content: { text: 'stored page answer' } },
+                  T_NEW_ASST,
+                ),
+              ],
+              nextCursor: 'cur-older-268',
+              hasMore: true,
+            }),
+          });
+        }
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            v: 1,
+            events: [
+              storedEvent(
+                18,
+                'user_message_chunk',
+                { content: { text: 'stored page prompt' } },
+                T_OLD_USER,
+              ),
+              storedEvent(
+                19,
+                'tool_call',
+                {
+                  toolCallId: 'tc-split-268',
+                  title: 'Read split.ts',
+                  status: 'in_progress',
+                  rawInput: { path: 'split.ts' },
+                },
+                T_OLD_CALL,
+              ),
+            ],
+            nextCursor: null,
+            hasMore: false,
+          }),
+        });
+      },
+    );
+
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 6 * 6, 30_000);
+    await settlePage(page);
+
+    // Scroll to the top so #load-earlier is on screen, then load the newer stored page.
+    await page.evaluate(() => {
+      document.getElementById('transcript')!.scrollTop = 0;
+    });
+    await settlePage(page);
+    const baseCount = await page.evaluate(() => transcriptModel.items.length);
+    await page.click('#load-earlier');
+    await page.waitForFunction(
+      (n) => transcriptModel.items.length > n,
+      baseCount,
+      { timeout: 10_000 },
+    );
+    await page.evaluate(() => {
+      document.getElementById('transcript')!.scrollTop = 0;
+    });
+    await settlePage(page);
+
+    const afterFirstPage = await page.evaluate(() => {
+      const splitTools = transcriptModel.items.filter(
+        (i) => i.kind === 'tool' && i.toolCallId === 'tc-split-268',
+      );
+      const thought = transcriptModel.items[1];
+      const toolRow = splitTools[0] ? __pg.row(splitTools[0].id) : null;
+      const thoughtRow = thought ? __pg.row(thought.id) : null;
+      return {
+        splitCount: splitTools.length,
+        toolStamp:
+          toolRow?.querySelector('.tool-head .stamp')?.textContent ?? null,
+        thoughtStamp:
+          thoughtRow?.querySelector('.thought-head .stamp')?.textContent ??
+          null,
+      };
+    });
+    expect(
+      afterFirstPage.splitCount === 1 &&
+        fold(afterFirstPage.toolStamp) === wantStamp(T_NEW_RESULT),
+      `first page tool state: ${JSON.stringify(afterFirstPage)}`,
+    );
+    expect(
+      fold(afterFirstPage.thoughtStamp) === wantStamp(T_NEW_THOUGHT),
+      `first page thought stamp reads ${JSON.stringify(afterFirstPage.thoughtStamp)}`,
+    );
+
+    // Load the older stored page: tc-split-268 adopts title + older start timestamp without duplicating.
+    const midCount = await page.evaluate(() => transcriptModel.items.length);
+    await page.click('#load-earlier');
+    await page.waitForFunction(
+      (n) => transcriptModel.items.length > n,
+      midCount,
+      { timeout: 10_000 },
+    );
+    await page.evaluate(() => {
+      document.getElementById('transcript')!.scrollTop = 0;
+    });
+    await settlePage(page);
+
+    const afterSecondPage = await page.evaluate(() => {
+      const splitTools = transcriptModel.items.filter(
+        (i) => i.kind === 'tool' && i.toolCallId === 'tc-split-268',
+      );
+      const toolRow = splitTools[0] ? __pg.row(splitTools[0].id) : null;
+      return {
+        splitCount: splitTools.length,
+        head: toolRow?.querySelector('.tool-head')?.textContent ?? null,
+        stamp: toolRow?.querySelector('.tool-head .stamp')?.textContent ?? null,
+      };
+    });
+    expect(
+      afterSecondPage.splitCount === 1,
+      `split tool duplicated (${afterSecondPage.splitCount} rows)`,
+    );
+    expect(
+      fold(afterSecondPage.stamp) === wantStamp(T_OLD_CALL),
+      `merged tool stamp reads ${JSON.stringify(afterSecondPage.stamp)}, expected older call time ${JSON.stringify(wantStamp(T_OLD_CALL))}`,
+    );
+    expect(
+      fold(afterSecondPage.head) ===
+        `🔧 Read split.ts  [completed]${wantStamp(T_OLD_CALL)} ▸`,
+      `merged tool head reads ${JSON.stringify(afterSecondPage.head)}`,
+    );
+
+    return `stored thought stamped ${eastern(T_NEW_THOUGHT)}; split tool merged into 1 row and adopted start stamp ${eastern(T_OLD_CALL)} over ${eastern(T_NEW_RESULT)}`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P590 changing #stamp-zone in More > Display immediately restamps mounted user, assistant, thought, and tool rows',
+  before: async (page) => {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Emulation.setTimezoneOverride', {
+      timezoneId: 'Asia/Kolkata',
+    });
+  },
+  frames: () => {
+    const f = new Frames();
+    f.thought('Checking zones. ', { serverTimestamp: P268_THOUGHT_AT });
+    f.upd(
+      {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tc-zone-268',
+        title: 'Check zone',
+        status: 'completed',
+        rawOutput: 'ok',
+      },
+      { serverTimestamp: P268_TOOL_START },
+    );
+    f.asst('All rows ready.', { serverTimestamp: P268_ASST_AT });
+    f.done();
+    return f.list;
+  },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 4, 15_000);
+    await page.evaluate((t) => addUser('zone prompt', t), P268_USER_AT);
+    await settlePage(page);
+
+    const readStamps = () =>
+      page.evaluate(() => ({
+        user:
+          document.querySelector('#transcript .bubble.user .role .stamp')
+            ?.textContent ?? null,
+        thought:
+          document.querySelector(
+            '#transcript .bubble.thought .thought-head .stamp',
+          )?.textContent ?? null,
+        tool:
+          document.querySelector('#transcript .bubble.tool .tool-head .stamp')
+            ?.textContent ?? null,
+        asst:
+          document.querySelector('#transcript .bubble.asst .role .stamp')
+            ?.textContent ?? null,
+      }));
+
+    const before = await readStamps();
+    expect(
+      fold(before.user) === wantStamp(P268_USER_AT) &&
+        fold(before.thought) === wantStamp(P268_THOUGHT_AT) &&
+        fold(before.tool) === wantStamp(P268_TOOL_START) &&
+        fold(before.asst) === wantStamp(P268_ASST_AT),
+      `initial Eastern stamps: ${JSON.stringify(before)}`,
+    );
+
+    // Open More > Display (panel-zone), select Asia/Tokyo, and return to chat.
+    await openPanel(page, 'zone');
+    await page.selectOption('#stamp-zone', 'Asia/Tokyo');
+    await openPanel(page, 'chat');
+    await settlePage(page);
+
+    const deadline = Date.now() + 10_000;
+    let after = await readStamps();
+    while (
+      fold(after.tool) !== wantStampIn(P268_TOOL_START, 'Asia/Tokyo') &&
+      Date.now() < deadline
+    ) {
+      await page.waitForTimeout(100);
+      after = await readStamps();
+    }
+    expect(
+      fold(after.user) === wantStampIn(P268_USER_AT, 'Asia/Tokyo') &&
+        fold(after.thought) === wantStampIn(P268_THOUGHT_AT, 'Asia/Tokyo') &&
+        fold(after.tool) === wantStampIn(P268_TOOL_START, 'Asia/Tokyo') &&
+        fold(after.asst) === wantStampIn(P268_ASST_AT, 'Asia/Tokyo'),
+      `restamped Tokyo stamps: ${JSON.stringify(after)}`,
+    );
+
+    return `user, thought, tool, and assistant rows all repainted in place from America/New_York to Asia/Tokyo`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P591 find-in-conversation never matches or highlights .stamp text inside thought or tool headers',
+  frames: () => {
+    const f = new Frames();
+    f.thought('Notes on Nov rollout', { serverTimestamp: P268_THOUGHT_AT });
+    f.upd(
+      {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tc-find-268',
+        title: 'Inspect changelog',
+        status: 'completed',
+        rawOutput: 'Nov release verified',
+      },
+      { serverTimestamp: P268_TOOL_START },
+    );
+    f.asst('All checks green.', { serverTimestamp: P268_ASST_AT });
+    f.done();
+    return f.list;
+  },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 4, 15_000);
+    await settlePage(page, 300);
+
+    await f138OpenFromMore(page);
+    // Open both the thought and the tool so their bodies are searchable too.
+    await page.click('#transcript .thought-head');
+    await page.click('#transcript .tool-head');
+    await settlePage(page, 300);
+
+    // Searching for clock digits that appear only in .stamp ("11:26" / "11:31") finds nothing.
+    await page.fill('#find-q', '11:26');
+    await page.waitForFunction(
+      `document.getElementById('find-count').textContent === 'No match'`,
+      null,
+      { timeout: 5_000 },
+    );
+    const noClock = await f138Read(page);
+    expect(
+      noClock.n === 0 && noClock.marks.length === 0 && noClock.others === 0,
+      `clock search matched: ${JSON.stringify(noClock)}`,
+    );
+
+    // Searching "Nov" matches the expanded thought body and expanded tool detail (2 rows,
+    // starting at 2 of 2 when the reader is at the end), NOT the assistant row's stamp,
+    // and paints zero highlight ranges inside any .stamp.
+    const novState = await f138Search(page, 'Nov', '2 of 2');
+    expect(
+      novState.n === 2 && novState.marks.length === 1 && novState.others === 1,
+      `Nov search state: ${JSON.stringify(novState)}`,
+    );
+    const stampRanges = await page.evaluate(() => {
+      const act = CSS.highlights.get('rc-find-active');
+      const all = CSS.highlights.get('rc-find');
+      const ranges = [
+        ...(act ? Array.from(act) : []),
+        ...(all ? Array.from(all) : []),
+      ] as Range[];
+      return ranges.filter((r) =>
+        Boolean(r.startContainer.parentElement?.closest('.stamp')),
+      ).length;
+    });
+    expect(
+      stampRanges === 0,
+      `${stampRanges} highlight range(s) landed inside .stamp`,
+    );
+
+    return `clock digits ("11:26") found No match; "Nov" matched only expanded thought body and tool detail (2 rows, 0 ranges inside .stamp)`;
+  },
+});
 
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));

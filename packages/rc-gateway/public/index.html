@@ -6597,10 +6597,16 @@
             border-left: 2px solid #3a3f47;
           }
           /* Folded thought: one-line clickable header + hidden full text. */
+          #transcript .thought .role {
+            color: var(--g1-ink);
+          }
           #transcript .thought .thought-head {
             cursor: pointer;
             user-select: none;
             opacity: 0.75;
+          }
+          #transcript .thought .thought-head .stamp {
+            opacity: 0.9;
           }
           #transcript .thought .thought-head:hover {
             opacity: 1;
@@ -9438,8 +9444,8 @@
         transcriptModel.addImage(mimeType, data);
         scrollTranscript();
       }
-      function appendThought(text) {
-        transcriptModel.appendThought(text);
+      function appendThought(text, sentAt) {
+        transcriptModel.appendThought(text, sentAt);
         scrollTranscript();
       }
       // A thought block ends when any non-thought frame arrives (assistant
@@ -9477,8 +9483,8 @@
       // previous?.name). The parent agent tool reaching a terminal status
       // settles the nested subagent indicator (⏳ → ✔/✖ with total elapsed
       // time).
-      function renderTool(u) {
-        transcriptModel.upsertTool(u);
+      function renderTool(u, sentAt) {
+        transcriptModel.upsertTool(u, sentAt);
         scrollTranscript();
       }
       // The daemon re-emits the whole list every time it changes, so this upserts the
@@ -15415,7 +15421,7 @@
           return;
         }
         if (su === 'agent_thought_chunk' && text) {
-          return appendThought(text);
+          return appendThought(text, sentAt);
         }
         if (su === 'tool_call' || su === 'tool_call_update') {
           // #71: a running tool row is the better indicator while it lasts, and
@@ -15425,7 +15431,7 @@
           if (su === 'tool_call' || toolStatus) {
             noteToolFrame(u.toolCallId, toolStatus);
           }
-          return renderTool(u);
+          return renderTool(u, sentAt);
         }
         if (su === 'plan') return renderPlan(u.entries);
       }

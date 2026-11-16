@@ -39,10 +39,17 @@
     'thought-live': 'thinking',
   };
 
-  // Only the two message kinds carry a stamp: the tool, thought and system rows
-  // are viewer-constructed, so a time on them would be this browser's clock
-  // rather than the record's.
-  var STAMPED = { user: true, asst: true };
+  // Message, thought, and tool rows render the server frame timestamp when
+  // present (#80, #268); rows without item.time omit .stamp rather than
+  // reading this browser's clock.
+  var STAMPED = { user: true, asst: true, thought: true };
+  var STAMPED_SHAPES = {
+    user: true,
+    asst: true,
+    thought: true,
+    'thought-live': true,
+    tool: true,
+  };
   // Eastern by default, and the IANA name rather than 'EST': the abbreviation is
   // a fixed offset and would sit an hour out for the half the year EDT is in.
   var DEFAULT_STAMP_ZONE = 'America/New_York';
@@ -75,14 +82,25 @@
     var fmt = stampFormatter(zone);
     return fmt ? fmt.format(new Date(t)) : '';
   }
+  function syncRoleStamp(role, item, zone) {
+    if (!role) return;
+    var existing = role.querySelector('.stamp');
+    var t = item && STAMPED[item.kind] ? stampText(item, zone) : '';
+    if (t) {
+      if (!existing) {
+        existing = el('span', 'stamp');
+        role.appendChild(existing);
+      }
+      setText(existing, ' \u00b7 ' + t);
+    } else if (existing) {
+      existing.remove();
+    }
+  }
   // The stamp rides the role line instead of getting a line of its own: a second
   // line per row would move every height the virtualizer has already cached.
   function roleLine(shape, item, zone) {
     var r = el('div', 'role', TEXT_ROLES[shape]);
-    if (item && STAMPED[item.kind]) {
-      var t = stampText(item, zone);
-      if (t) r.appendChild(el('span', 'stamp', ' \u00b7 ' + t));
-    }
+    syncRoleStamp(r, item, zone);
     return r;
   }
 
@@ -392,7 +410,8 @@
     function buildText(m) {
       var item = m.item;
       var b = el('div', 'bubble ' + item.kind);
-      b.appendChild(roleLine(m.shape, item, stampZone));
+      m.role = roleLine(m.shape, item, stampZone);
+      b.appendChild(m.role);
       var body = el('span');
       m.body = textRef(item.text);
       m.bodyBox = body;
@@ -429,6 +448,7 @@
       return b;
     }
     function patchUser(m) {
+      syncRoleStamp(m.role, m.item, stampZone);
       syncTextNode(m.body, m.item.text);
       syncParts(m);
       var note = m.item.notSent ? 'not sent: ' + m.item.notSent : '';
@@ -623,6 +643,11 @@
       var item = m.item;
       var b = el('div', 'bubble thought');
       m.head = el('span', 'thought-head');
+      m.headLead = document.createTextNode('');
+      m.stamp = null;
+      m.headMark = document.createTextNode('');
+      m.head.appendChild(m.headLead);
+      m.head.appendChild(m.headMark);
       m.thoughtBody = el('span', 'thought-body', item.text);
       // Like the old head.onclick: the header stays where it is and the
       // body opens (or closes) below it; this never scrolls to the bottom.
@@ -645,10 +670,21 @@
       var item = m.item;
       var hidden = !item.expanded;
       if (m.thoughtBody.hidden !== hidden) m.thoughtBody.hidden = hidden;
-      setText(
-        m.head,
-        '∴ Thought for ' + item.durLabel + (hidden ? ' ▸' : ' ▾'),
-      );
+      var lead = '∴ Thought for ' + item.durLabel;
+      if (m.headLead.data !== lead) m.headLead.data = lead;
+      var t = stampText(item, stampZone);
+      if (t) {
+        if (!m.stamp) {
+          m.stamp = el('span', 'stamp');
+          m.head.insertBefore(m.stamp, m.headMark);
+        }
+        setText(m.stamp, ' \u00b7 ' + t);
+      } else if (m.stamp) {
+        m.stamp.remove();
+        m.stamp = null;
+      }
+      var mark = hidden ? ' ▸' : ' ▾';
+      if (m.headMark.data !== mark) m.headMark.data = mark;
       setText(m.thoughtBody, item.text);
     }
 
@@ -682,6 +718,7 @@
       });
       b.appendChild(m.toolBody);
       m.st = null;
+      m.stamp = null;
       m.sub = null;
       patchTool(m, now);
       return b;
@@ -759,12 +796,23 @@
       if (item.status) {
         if (!m.st) {
           m.st = el('span', 'st');
-          m.toolBody.insertBefore(m.st, m.mark);
+          m.toolBody.insertBefore(m.st, m.stamp || m.mark);
         }
         setText(m.st, '  [' + item.status + ']');
       } else if (m.st) {
         m.st.remove();
         m.st = null;
+      }
+      var t = stampText(item, stampZone);
+      if (t) {
+        if (!m.stamp) {
+          m.stamp = el('span', 'stamp');
+          m.toolBody.insertBefore(m.stamp, m.mark);
+        }
+        setText(m.stamp, ' \u00b7 ' + t);
+      } else if (m.stamp) {
+        m.stamp.remove();
+        m.stamp = null;
       }
       var open = !!item.expanded && toolHasDetail(item);
       setText(m.mark, toolHasDetail(item) ? (open ? ' ▾' : ' ▸') : '');
@@ -1070,6 +1118,7 @@
           // patchSystem and restyle the row as a system line.
           return;
         case 'thought-live':
+          syncRoleStamp(m.role, m.item, stampZone);
           return syncTextNode(m.body, m.item.text);
         case 'thought':
           return patchThought(m);
@@ -1674,12 +1723,12 @@
       var walker = document.createTreeWalker(root, 4); // SHOW_TEXT
       for (var node = walker.nextNode(); node; node = walker.nextNode()) {
         var p = node.parentNode;
-        // The role line and its time, the turn actions and the controls are
-        // not the conversation's words; collapsed bodies are not drawn.
+        // The role line, header stamps, turn actions and controls are not the
+        // conversation's words; collapsed bodies are not drawn.
         if (
           p &&
           p.closest &&
-          p.closest('.role, .turn-acts, button, [hidden], .not-sent')
+          p.closest('.role, .stamp, .turn-acts, button, [hidden], .not-sent')
         )
           continue;
         var data = node.data;
@@ -1806,7 +1855,7 @@
       if (restamp) {
         restamp = false;
         mounted.forEach(function (m) {
-          if (m.shape !== 'user' && m.shape !== 'asst') return;
+          if (!STAMPED_SHAPES[m.shape]) return;
           build(m, now);
           written.push(m);
         });
