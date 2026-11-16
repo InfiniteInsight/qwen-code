@@ -1126,6 +1126,7 @@ interface FakeBridgeOpts {
   ) => Promise<{ changed: boolean; status?: string; taskId?: string }>;
   clearSessionGoalImpl?: (
     sessionId: string,
+    context?: BridgeClientRequestContext,
   ) => Promise<{ cleared: boolean; condition?: string }>;
   controlSessionGoalImpl?: (
     sessionId: string,
@@ -1465,6 +1466,7 @@ interface FakeBridge extends AcpSessionBridge {
     input?: ServeWorkflowActionInput;
   }>;
   clearSessionGoalCalls: string[];
+  clearSessionGoalContexts: Array<BridgeClientRequestContext | undefined>;
   controlSessionGoalCalls: Array<{
     sessionId: string;
     request: GoalControlRequest;
@@ -1481,6 +1483,7 @@ interface FakeBridge extends AcpSessionBridge {
   setConfigOptionCalls: Array<{
     sessionId: string;
     req: Parameters<AcpSessionBridge['setSessionConfigOption']>[1];
+    context?: BridgeClientRequestContext;
   }>;
   setLanguageCalls: Array<{
     sessionId: string;
@@ -1683,6 +1686,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const controlSessionWorkflowTaskCalls: FakeBridge['controlSessionWorkflowTaskCalls'] =
     [];
   const clearSessionGoalCalls: string[] = [];
+  const clearSessionGoalContexts: Array<
+    BridgeClientRequestContext | undefined
+  > = [];
   const controlSessionGoalCalls: FakeBridge['controlSessionGoalCalls'] = [];
   const continueSessionCalls: string[] = [];
   const continueSessionContexts: Array<BridgeClientRequestContext | undefined> =
@@ -2382,6 +2388,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     cancelSessionTaskCalls,
     controlSessionWorkflowTaskCalls,
     clearSessionGoalCalls,
+    clearSessionGoalContexts,
     controlSessionGoalCalls,
     continueSessionCalls,
     continueSessionContexts,
@@ -2764,9 +2771,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         input,
       );
     },
-    async clearSessionGoal(sessionId) {
+    async clearSessionGoal(sessionId, context) {
       clearSessionGoalCalls.push(sessionId);
-      return clearSessionGoalImpl(sessionId);
+      clearSessionGoalContexts.push(context);
+      return clearSessionGoalImpl(sessionId, context);
     },
     async controlSessionGoal(sessionId, request, context) {
       controlSessionGoalCalls.push({
@@ -2792,9 +2800,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
       return setModelImpl(sessionId, req, context);
     },
-    async setSessionConfigOption(sessionId, req) {
-      setConfigOptionCalls.push({ sessionId, req });
-      return setConfigOptionImpl(sessionId, req);
+    async setSessionConfigOption(sessionId, req, context) {
+      setConfigOptionCalls.push({
+        sessionId,
+        req,
+        ...(context ? { context } : {}),
+      });
+      return setConfigOptionImpl(sessionId, req, context);
     },
     async setSessionLanguage(sessionId, params, context) {
       setLanguageCalls.push({
@@ -12308,6 +12320,50 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ cleared: true, condition: 'ship it' });
       expect(bridge.clearSessionGoalCalls).toEqual(['s-1']);
+    });
+
+    it('forwards X-Qwen-Client-Id on POST /session/:id/goal/clear and rejects invalid client ids', async () => {
+      const bridge = fakeBridge({
+        clearSessionGoalImpl: async (sessionId, context) => {
+          if (context?.clientId === 'rogue') {
+            throw new InvalidClientIdError(sessionId, 'rogue');
+          }
+          return { cleared: true };
+        },
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const ok = await request(app)
+        .post('/session/s-1/goal/clear')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1');
+      expect(ok.status).toBe(200);
+      expect(bridge.clearSessionGoalContexts).toEqual([
+        { clientId: 'client-1' },
+      ]);
+
+      const rogue = await request(app)
+        .post('/session/s-1/goal/clear')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'rogue');
+      expect(rogue.status).toBe(400);
+      expect(rogue.body.code).toBe('invalid_client_id');
+
+      const malformed = await request(app)
+        .post('/session/s-1/goal/clear')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'bad id with spaces');
+      expect(malformed.status).toBe(400);
+      expect(malformed.body.code).toBe('invalid_client_id');
+      expect(bridge.clearSessionGoalCalls).toEqual(['s-1', 's-1']);
     });
 
     it('reads and controls the canonical session Goal', async () => {
@@ -27050,6 +27106,63 @@ describe('createServeApp', () => {
           },
         },
       ]);
+    });
+
+    it('forwards X-Qwen-Client-Id on POST /session/:id/config-option and rejects invalid client ids', async () => {
+      const configOptions = [{ id: 'reasoning_effort' }];
+      const bridge = fakeBridge({
+        setConfigOptionImpl: async (sessionId, _req, context) => {
+          if (context?.clientId === 'rogue') {
+            throw new InvalidClientIdError(sessionId, 'rogue');
+          }
+          return { configOptions };
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const ok = await request(app)
+        .post('/session/session-A/config-option')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({
+          configId: 'reasoning_effort',
+          value: 'medium',
+        });
+      expect(ok.status).toBe(200);
+      expect(bridge.setConfigOptionCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          req: {
+            sessionId: 'session-A',
+            configId: 'reasoning_effort',
+            value: 'medium',
+          },
+          context: { clientId: 'client-1' },
+        },
+      ]);
+
+      const rogue = await request(app)
+        .post('/session/session-A/config-option')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'rogue')
+        .send({
+          configId: 'reasoning_effort',
+          value: 'medium',
+        });
+      expect(rogue.status).toBe(400);
+      expect(rogue.body.code).toBe('invalid_client_id');
+
+      const malformed = await request(app)
+        .post('/session/session-A/config-option')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'bad id with spaces')
+        .send({
+          configId: 'reasoning_effort',
+          value: 'medium',
+        });
+      expect(malformed.status).toBe(400);
+      expect(malformed.body.code).toBe('invalid_client_id');
+      expect(bridge.setConfigOptionCalls).toHaveLength(2);
     });
   });
 

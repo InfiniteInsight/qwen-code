@@ -2694,6 +2694,7 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   /** Clear an active goal in a live session without cancelling the running prompt. */
   clearSessionGoal(
     sessionId: string,
+    context?: BridgeClientRequestContext,
   ): Promise<{ cleared: boolean; condition?: string }>;
 
   /** Atomically apply a typed Goal lifecycle control in a live session. */
@@ -2782,6 +2783,7 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   setSessionConfigOption(
     sessionId: string,
     req: SetSessionConfigOptionRequest,
+    context?: BridgeClientRequestContext,
   ): Promise<SetSessionConfigOptionResponse>;
 
   /**

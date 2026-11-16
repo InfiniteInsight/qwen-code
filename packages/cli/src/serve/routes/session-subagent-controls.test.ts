@@ -500,7 +500,10 @@ describe('POST /session/:id/subagents/:subagentRef/pause (#267)', () => {
         status: 'running',
       });
       const subagents = makeSubagents();
-      const app = makeApp(makeRuntime({ pauseSessionTask }), subagents.sessions);
+      const app = makeApp(
+        makeRuntime({ pauseSessionTask }),
+        subagents.sessions,
+      );
 
       const res = await request(app)
         .post(`/session/${ROOT}/subagents/call-1/pause`)
@@ -554,5 +557,53 @@ describe('POST /session/:id/subagents/:subagentRef/pause (#267)', () => {
       code: 'unsupported',
       reason: 'This daemon cannot pause subagents.',
     });
+  });
+});
+
+describe('POST /session/:id/subagents/:subagentRef/cancel', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('falls back to subagentRef as taskId when virtualSubagentSessions.resolve returns undefined', async () => {
+    const cancelSessionTask = vi.fn().mockResolvedValue({ cancelled: true });
+    const subagents = makeSubagents(false);
+    const app = makeApp(makeRuntime({ cancelSessionTask }), subagents.sessions);
+
+    const res = await request(app)
+      .post(`/session/${ROOT}/subagents/raw-task-42/cancel`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ cancelled: true });
+    expect(cancelSessionTask).toHaveBeenCalledWith(
+      ROOT,
+      'raw-task-42',
+      'agent',
+    );
+    expect(subagents.updateTargetStatus).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 when neither virtualSubagentSessions.resolve nor cancelSessionTask finds the subagent', async () => {
+    const cancelSessionTask = vi.fn().mockResolvedValue({ cancelled: false });
+    const subagents = makeSubagents(false);
+    const app = makeApp(makeRuntime({ cancelSessionTask }), subagents.sessions);
+
+    const res = await request(app)
+      .post(`/session/${ROOT}/subagents/missing-task/cancel`)
+      .send({});
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({
+      error: 'Subagent session not found',
+      code: 'session_not_found',
+      sessionId: ROOT,
+      subagentRef: 'missing-task',
+    });
+    expect(cancelSessionTask).toHaveBeenCalledWith(
+      ROOT,
+      'missing-task',
+      'agent',
+    );
   });
 });

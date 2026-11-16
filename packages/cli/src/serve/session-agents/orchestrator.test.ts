@@ -463,6 +463,52 @@ describe('SessionAgentOrchestrator', () => {
     ).toThrow(/No pending permission/);
   });
 
+  it('settles pending awaitPermission when permission_resolved arrives externally', async () => {
+    const { orchestrator, turns } = harness();
+    const { runs } = await orchestrator.mention(SESSION, {
+      text: '@alice ls',
+      clientMessageId: 'm1',
+    });
+    const runId = runs[0]!.runId;
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    const turn = turns[0]!;
+    const makePrompt = (requestId: string): SessionAgentPermissionPrompt => ({
+      requestId,
+      title: `Run ${requestId}`,
+      toolName: 'execute',
+      options: [
+        { optionId: 'yes', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'no', name: 'Reject', kind: 'reject_once' },
+      ],
+    });
+
+    const p1 = makePrompt('p1');
+    turn.input.onEvent({ type: 'permission_request', prompt: p1 });
+    const pendingP1 = turn.input.awaitPermission(p1);
+    expect((await orchestrator.snapshot(SESSION))[0]).toMatchObject({
+      status: 'awaiting_approval',
+      permission: { requestId: 'p1' },
+    });
+
+    // External resolution arrives before orchestrator.resolvePermission is called.
+    turn.input.onEvent({ type: 'permission_resolved', requestId: 'p1' });
+    await expect(pendingP1).rejects.toThrow('permission resolved');
+
+    const [frameAfterExternal] = await orchestrator.snapshot(SESSION);
+    expect(frameAfterExternal).toMatchObject({ status: 'running' });
+    expect(frameAfterExternal).not.toHaveProperty('permission');
+    expect(() =>
+      orchestrator.resolvePermission(SESSION, runId, 'p1', 'yes'),
+    ).toThrow(/No pending permission/);
+
+    // Subsequent permission requests on the same run still work cleanly.
+    const p2 = makePrompt('p2');
+    turn.input.onEvent({ type: 'permission_request', prompt: p2 });
+    const pendingP2 = turn.input.awaitPermission(p2);
+    orchestrator.resolvePermission(SESSION, runId, 'p2', 'yes');
+    await expect(pendingP2).resolves.toBe('yes');
+  });
+
   it('ignores what a stopped run still reports and refuses its late permission request', async () => {
     const held: {
       turn?: AgentAdapterTurnInput;

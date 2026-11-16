@@ -982,8 +982,21 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
     if (cutSegIdx === undefined && targetTurnIndex !== undefined) {
       if (targetTurnIndex < this.evictedUserTurns) {
+        if (targetTurnIndex === 0) {
+          this.resetReplayWindow();
+          this.resetJournal();
+          this.slots = [];
+          this.toolSlotIndex.clear();
+          this.clearTextSlotIndex();
+          this.activeRecordId = undefined;
+          this.summaryRecordId = undefined;
+          return;
+        }
         cutSegIdx = this.replaySegmentStart;
         cutEventIdx = 0;
+        this.evictedUserTurns = targetTurnIndex;
+        this.evictedInUserChunkRun = false;
+        this.truncatedTurns = Math.min(this.truncatedTurns, targetTurnIndex);
       } else {
         let userTurnIndex = this.evictedUserTurns;
         let inUserChunkRun = this.evictedInUserChunkRun;

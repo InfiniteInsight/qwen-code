@@ -2433,13 +2433,15 @@ export class SessionAgentOrchestrator {
         live.run.status = 'awaiting_approval';
         void this.persist(state).catch(() => {});
         break;
-      case 'permission_resolved':
+      case 'permission_resolved': {
         if (frame.permission?.requestId === event.requestId) {
           delete frame.permission;
           live.run.status = 'running';
           void this.persist(state).catch(() => {});
         }
+        const pendingPermission = live.pendingPermissions.get(event.requestId);
         live.pendingPermissions.delete(event.requestId);
+        pendingPermission?.reject(new Error('permission resolved'));
         live.voterContexts.delete(event.requestId);
         if (live.remote) {
           live.remote.decisions = live.remote.decisions.filter(
@@ -2447,6 +2449,7 @@ export class SessionAgentOrchestrator {
           );
         }
         break;
+      }
       case 'usage':
         live.totalTokens = event.totalTokens;
         frame.totalTokens = event.totalTokens;

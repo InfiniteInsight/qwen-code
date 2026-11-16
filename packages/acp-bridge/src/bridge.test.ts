@@ -28454,6 +28454,43 @@ describe('createAcpSessionBridge', () => {
           { clientId: 'client-not-issued' },
         ),
       ).rejects.toBeInstanceOf(InvalidClientIdError);
+      await expect(
+        bridge.clearSessionGoal(session.sessionId, {
+          clientId: 'client-not-issued',
+        }),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
+      await expect(
+        bridge.setSessionConfigOption(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            configId: 'reasoning_effort',
+            value: 'medium',
+          },
+          { clientId: 'client-not-issued' },
+        ),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
+      const otherSession = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      expect(otherSession.sessionId).not.toBe(session.sessionId);
+      await expect(
+        bridge.clearSessionGoal(session.sessionId, {
+          clientId: otherSession.clientId,
+        }),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
+      await expect(
+        bridge.setSessionConfigOption(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            configId: 'reasoning_effort',
+            value: 'medium',
+          },
+          { clientId: otherSession.clientId },
+        ),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
       await bridge.shutdown();
     });
 
