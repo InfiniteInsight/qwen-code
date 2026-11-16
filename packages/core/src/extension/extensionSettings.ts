@@ -7,8 +7,8 @@
 import * as fs from 'node:fs/promises';
 import * as fsSync from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import * as dotenv from 'dotenv';
 import * as path from 'node:path';
+import { parseDotenv } from '../utils/envVarResolver.js';
 import { ExtensionStorage } from './storage.js';
 import type { ExtensionConfig } from './extensionManager.js';
 import prompts from 'prompts';
@@ -390,7 +390,7 @@ export async function getScopedEnvContents(
   let customEnv: Record<string, string> = {};
   if (fsSync.existsSync(envFilePath)) {
     const envFile = fsSync.readFileSync(envFilePath, 'utf-8');
-    customEnv = dotenv.parse(envFile);
+    customEnv = parseDotenv(envFile);
   }
 
   if (extensionConfig.settings) {
@@ -513,7 +513,7 @@ export async function updateSetting(
     envContent = await fs.readFile(envFilePath, 'utf-8');
   }
 
-  const parsedEnv = dotenv.parse(envContent);
+  const parsedEnv = parseDotenv(envContent);
   parsedEnv[settingToUpdate.envVar] = newValue;
 
   // We only want to write back the variables that are not sensitive.

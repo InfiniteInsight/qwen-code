@@ -23,6 +23,11 @@ import {
 } from './shared-env-keys.js';
 import { RELAUNCH_SUPERVISED_ENV } from '../utils/env-provenance.js';
 import type { Settings } from './settingsSchema.js';
+import { loadSettings } from './settings.js';
+import {
+  loadServeFastPathEnvironment,
+  loadServeFastPathSettings,
+} from '../serve/fast-path-settings.js';
 import { TrustLevel, resetTrustedFoldersForTesting } from './trustedFolders.js';
 import {
   AGENT_EXECUTION_BACKEND_ENV,
@@ -2025,5 +2030,55 @@ describe('hasLoadedEnvironmentValues', () => {
 
     expect(process.env[key]).toBe(value);
     expect(hasLoadedEnvironmentValues()).toBe(true);
+  });
+});
+
+describe('adversarial 1 MiB workspace .env and settings (#264)', () => {
+  const ONE_MIB = 1024 * 1024;
+
+  it('loads a 1 MiB adversarial workspace .env in well under a second on both CLI and serve fast-path', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    const payload = '\n'.repeat(ONE_MIB - 32) + 'RUNTIME_DOTENV=fast\n';
+    fs.writeFileSync(path.join(workspace, '.env'), payload);
+
+    const cliStarted = performance.now();
+    loadEnvironment(testSettings({}), workspace);
+    expect(performance.now() - cliStarted).toBeLessThan(1000);
+    expect(process.env['RUNTIME_DOTENV']).toBe('fast');
+
+    delete process.env['RUNTIME_DOTENV'];
+    const fastStarted = performance.now();
+    loadServeFastPathEnvironment(
+      { security: { folderTrust: { enabled: false } } },
+      workspace,
+    );
+    expect(performance.now() - fastStarted).toBeLessThan(1000);
+    expect(process.env['RUNTIME_DOTENV']).toBe('fast');
+  });
+
+  it('loads a 1 MiB workspace settings.json value of unclosed ${ in well under a second on both CLI and serve fast-path', () => {
+    const workspace = makeWorkspace();
+    const qwenDir = path.join(workspace, SETTINGS_DIRECTORY_NAME);
+    fs.mkdirSync(qwenDir, { recursive: true });
+    const run = '${'.repeat(Math.floor(ONE_MIB / 2));
+    fs.writeFileSync(
+      path.join(qwenDir, 'settings.json'),
+      JSON.stringify({
+        $version: 2,
+        tools: { callCommand: run },
+        env: { SAMPLE_UNCLOSED_REF: run },
+      }),
+    );
+
+    const cliStarted = performance.now();
+    const loaded = loadSettings(workspace);
+    expect(performance.now() - cliStarted).toBeLessThan(1000);
+    expect(loaded.merged.tools?.callCommand?.length).toBe(run.length);
+
+    const fastStarted = performance.now();
+    const fastLoaded = loadServeFastPathSettings(workspace);
+    expect(performance.now() - fastStarted).toBeLessThan(1000);
+    expect(fastLoaded.env?.['SAMPLE_UNCLOSED_REF']?.length).toBe(run.length);
   });
 });

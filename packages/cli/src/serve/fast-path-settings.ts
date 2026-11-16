@@ -11,7 +11,6 @@ import {
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import * as dotenv from 'dotenv';
 import stripJsonComments from 'strip-json-comments';
 import { V1_INDICATOR_KEYS } from '../config/migration/versions/v1-to-v2-shared.js';
 import {
@@ -37,7 +36,10 @@ import {
 import { publishPendingCompileCache } from '../config/compile-cache.js';
 import { captureEnvironmentBeforeLoad } from '../config/environment-snapshot.js';
 import type { Settings } from '../config/settingsSchema.js';
-import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
+import {
+  parseDotenv,
+  resolveEnvVarsInObject,
+} from '@qwen-code/qwen-code-core/envVarResolver';
 
 type ServeFastPathPolicy = Pick<
   NonNullable<Settings['policy']>,
@@ -113,7 +115,7 @@ export function preResolveServeFastPathHomeEnvOverrides(): void {
 function readHomeEnvIntoFastPath(file: string): void {
   if (!fs.existsSync(file)) return;
   try {
-    const parsed = dotenv.parse(fs.readFileSync(file, 'utf8'));
+    const parsed = parseDotenv(fs.readFileSync(file, 'utf8'));
     for (const key of HOME_ENV_BOOTSTRAP_KEYS) {
       if (parsed[key] && !Object.hasOwn(process.env, key)) {
         process.env[key] = parsed[key];
@@ -142,7 +144,7 @@ function getHomeEnvFallbackVarsFastPath(): Record<string, string> {
   for (const candidate of candidates) {
     if (!fs.existsSync(candidate)) continue;
     try {
-      const parsed = dotenv.parse(fs.readFileSync(candidate, 'utf8'));
+      const parsed = parseDotenv(fs.readFileSync(candidate, 'utf8'));
       for (const key in parsed) {
         if (Object.hasOwn(parsed, key) && !Object.hasOwn(process.env, key)) {
           result[key] ??= parsed[key]!;
@@ -261,7 +263,7 @@ function setUpCloudShellEnvironmentFromFilesFastPath(
 ): void {
   for (const envFilePath of envFilePaths) {
     if (!fs.existsSync(envFilePath)) continue;
-    const parsedEnv = dotenv.parse(fs.readFileSync(envFilePath));
+    const parsedEnv = parseDotenv(fs.readFileSync(envFilePath));
     if (parsedEnv['GOOGLE_CLOUD_PROJECT']) {
       process.env['GOOGLE_CLOUD_PROJECT'] = parsedEnv['GOOGLE_CLOUD_PROJECT'];
       return;
@@ -297,7 +299,7 @@ export function loadServeFastPathEnvironment(
 
   for (const envFilePath of envFilePaths) {
     try {
-      const parsedEnv = dotenv.parse(fs.readFileSync(envFilePath, 'utf8'));
+      const parsedEnv = parseDotenv(fs.readFileSync(envFilePath, 'utf8'));
       const excludedVars =
         settings.advanced?.excludedEnvVars ?? DEFAULT_EXCLUDED_ENV_VARS;
       const normalizedEnvFilePath = path.normalize(envFilePath);
