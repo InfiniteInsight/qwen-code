@@ -37297,6 +37297,116 @@ PAGE_SCENARIOS.push({
   },
 });
 
+// #115: incomplete turn stopReason (max_tokens / max_turn_requests) and
+// prompt_timeout stream_error surface concrete reasons, 1-tap >=44px Continue,
+// and lastStop in Diagnostics > Stream.
+PAGE_SCENARIOS.push({
+  name: 'P606 max_tokens turn_complete and prompt_timeout stream_error surface concrete reasons, a >=44px Continue nudge, and lastStop in Diagnostics > Stream',
+  holdOpenMs: 20_000,
+  stub: {
+    promptBroadcastsEvents: true,
+    promptReplyText: 'rest of the reply',
+  },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 1, 15_000);
+
+    // 1. Simulate a turn ending on max_tokens.
+    await page.evaluate(() => {
+      renderFrame({
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Half of the answer ' },
+          },
+        },
+      });
+      renderFrame({
+        type: 'turn_complete',
+        data: { stopReason: 'max_tokens' },
+      });
+    });
+
+    const nudge = page.locator('#continue-nudge');
+    expect(
+      !(await nudge.evaluate((el) => (el as HTMLElement).hidden)),
+      'expected #continue-nudge to show on max_tokens',
+    );
+    const nudgeText =
+      (await page.locator('#continue-nudge-text').textContent()) ?? '';
+    expect(
+      nudgeText.includes('max_tokens'),
+      `expected max_tokens reason in #continue-nudge-text, got ${JSON.stringify(nudgeText)}`,
+    );
+    const contBtn = page.locator('#continue-nudge-btn');
+    const contBox = await contBtn.boundingBox();
+    expect(
+      Boolean(contBox && contBox.height >= 44 && contBox.width >= 44),
+      `expected #continue-nudge-btn >= 44x44px, got ${JSON.stringify(contBox)}`,
+    );
+
+    const readoutMax =
+      (await page.locator('#stream-state-readout').textContent()) ?? '';
+    expect(
+      readoutMax.includes('lastStop: max_tokens'),
+      `expected lastStop: max_tokens in #stream-state-readout, got ${JSON.stringify(readoutMax)}`,
+    );
+
+    // 2. Tap Continue -> sends "continue", completes with end_turn, hides nudge.
+    await contBtn.click();
+    await page.waitForFunction(
+      () => {
+        const allText = transcriptModel.items.map((i) => i.text ?? '').join('\n');
+        return allText.includes('rest of the reply');
+      },
+      null,
+      { timeout: 10_000 },
+    );
+    expect(
+      await nudge.evaluate((el) => (el as HTMLElement).hidden),
+      'expected #continue-nudge to hide after end_turn completion',
+    );
+    const readoutEnd =
+      (await page.locator('#stream-state-readout').textContent()) ?? '';
+    expect(
+      readoutEnd.includes('lastStop: end_turn'),
+      `expected lastStop: end_turn after continuation, got ${JSON.stringify(readoutEnd)}`,
+    );
+
+    // 3. Simulate prompt_timeout stream_error (silence window) -> concrete message + nudge.
+    await page.evaluate(() => {
+      renderFrame({
+        type: 'stream_error',
+        data: {
+          code: 'prompt_timeout',
+          timeoutMs: 2_700_000,
+          reason: 'silence',
+        },
+      });
+    });
+    const sysText = await page.evaluate(() =>
+      transcriptModel.items.map((i) => i.text ?? '').join('\n'),
+    );
+    expect(
+      sysText.includes('error: turn timed out after 2700s of silence') &&
+        !sysText.includes('error: stream_error'),
+      `expected concrete prompt_timeout message, got ${JSON.stringify(sysText)}`,
+    );
+    expect(
+      !(await nudge.evaluate((el) => (el as HTMLElement).hidden)),
+      'expected #continue-nudge to show on prompt_timeout',
+    );
+    await page.click('#continue-nudge-dismiss');
+    expect(
+      await nudge.evaluate((el) => (el as HTMLElement).hidden),
+      'expected Dismiss to hide #continue-nudge',
+    );
+
+    return `max_tokens showed "${nudgeText}" + ${Math.round(contBox!.height)}px Continue, sent "continue" -> end_turn, and prompt_timeout rendered concrete silence timeout`;
+  },
+});
+
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));
   const results: Result[] = [];

@@ -300,7 +300,10 @@ describe('prompt route', () => {
       timeoutMs: 60,
     });
     expect(emitted).toEqual([
-      { type: 'stream_error', data: { code: 'prompt_timeout', timeoutMs: 60 } },
+      {
+        type: 'stream_error',
+        data: { code: 'prompt_timeout', timeoutMs: 60, reason: 'silence' },
+      },
     ]);
     const fired = audit.calls.filter((e) => e.action === 'prompt_timed_out');
     expect(fired).toHaveLength(1);
