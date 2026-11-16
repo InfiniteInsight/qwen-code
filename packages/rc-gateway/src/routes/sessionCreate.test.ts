@@ -14,8 +14,15 @@ import { join } from 'node:path';
 import { DaemonClient } from '@qwen-code/sdk';
 import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
 import { createSessionCreateRoute } from './sessionCreate.js';
-import { WorkspacePoolFullError, type SessionDaemon } from '../daemonPool.js';
-import type { AuditEntry, AuditRecorder } from '../auditLog.js';
+import {
+  DaemonPool,
+  WorkspacePoolFullError,
+  type SessionDaemon,
+} from '../daemonPool.js';
+import { AuditLog, type AuditEntry, type AuditRecorder } from '../auditLog.js';
+import { createGatewayApp } from '../server.js';
+import { TokenStore } from '../tokenStore.js';
+import { PairingService } from '../pairing.js';
 
 let gateway: Server | undefined;
 let stub: StubDaemon | undefined;
@@ -236,5 +243,86 @@ describe('POST /session (create)', () => {
     expect(res.status).toBe(502);
     const body = (await res.json()) as { code: string };
     expect(body.code).toBe('daemon_unavailable');
+  });
+
+  it('persists a hash-chained workspace_pool_full audit row and journal line on real pool refusal (#220)', async () => {
+    const runtimeDir = makeTmpDir('qwen-pool-full-audit-');
+    const wsOccupied = makeTmpDir('qwen-pool-full-occ-');
+    const wsBlocked = makeTmpDir('qwen-pool-full-blk-');
+    stub = await startStubDaemon();
+    const journalLines: string[] = [];
+    const pool = new DaemonPool({
+      defaultDaemon: new DaemonClient({ baseUrl: stub.baseUrl }),
+      defaultWorkspaceCwd: makeTmpDir('qwen-pool-full-def-'),
+      maxDaemons: 1,
+      idleReapMs: 15 * 60_000,
+      log: (line) => journalLines.push(line),
+      spawn: async (cwd) => ({
+        client: new DaemonClient({ baseUrl: stub!.baseUrl }),
+        stop: async () => {},
+        workspaceCwd: cwd,
+      }),
+    });
+    const store = await TokenStore.open(join(runtimeDir, 'tokens.json'));
+    const { token } = await store.issue(['write'], 'phone');
+    const gw = createGatewayApp({
+      daemon: pool,
+      store,
+      pairing: new PairingService(),
+      auditPath: join(runtimeDir, 'audit.log'),
+    });
+    gateway = await new Promise((resolve) => {
+      const s = gw.app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    const { port } = gateway.address() as AddressInfo;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    const okRes = await fetch(`${baseUrl}/session`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ cwd: wsOccupied, scope: 'thread' }),
+    });
+    expect(okRes.status).toBe(200);
+
+    const fullRes = await fetch(`${baseUrl}/session`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ cwd: wsBlocked, scope: 'thread' }),
+    });
+    expect(fullRes.status).toBe(503);
+
+    expect(journalLines).toHaveLength(1);
+    expect(journalLines[0]).toContain(wsBlocked);
+    expect(journalLines[0]).toContain(wsOccupied);
+
+    const rows = await gw.audit.query({ action: 'workspace_pool_full' });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      action: 'workspace_pool_full',
+      outcome: 'failed',
+      target: wsBlocked,
+      detail: {
+        requestedWorkspaceCwd: wsBlocked,
+        maxDaemons: 1,
+        idleReapMs: 900_000,
+        slots: [
+          expect.objectContaining({
+            workspaceCwd: wsOccupied,
+            idle: false,
+            state: 'busy',
+            sessionCount: 1,
+          }),
+        ],
+      },
+    });
+    const chain = await AuditLog.verifyChain(runtimeDir);
+    expect(chain.ok).toBe(true);
+    await pool.stopAll();
   });
 });

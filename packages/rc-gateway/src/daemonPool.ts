@@ -1064,6 +1064,12 @@ export interface DaemonPoolOptions {
     sessions: string[],
     exit: DaemonExitInfo & { atMs: number },
   ) => void;
+  /**
+   * Journal sink for pool-level operational warnings such as
+   * `workspace_pool_full` (#220). Defaults to `console.warn` (which systemd
+   * writes to the `qwen-rc-gateway` journal).
+   */
+  log?: (line: string) => void;
 }
 
 interface Entry {
@@ -1352,6 +1358,7 @@ export class DaemonPool implements SessionDaemon {
   /** `opts.respawnDefaultDaemon`, defaulted (#203). */
   private readonly respawnDefault: boolean;
   private readonly deathProbeDelayMs: number;
+  private readonly log: (line: string) => void;
   /**
    * Daemons a transport error took, by key, still to be stopped once a
    * replacement serves that key (#203; see `stopSuperseded`). The error was
@@ -1373,9 +1380,17 @@ export class DaemonPool implements SessionDaemon {
   >();
 
   /** Wire the audit recorder in (add-mid-turn-recovery: `daemon_died`
-   * rows). Called by cli.ts after the gateway app is constructed. */
+   * rows; #220: `workspace_pool_full` rows). Called by cli.ts after the
+   * gateway app is constructed. */
   setAudit(recorder: AuditRecorder): void {
     this.audit = recorder;
+  }
+
+  /** Wire the gateway app's audit recorder unless a caller already supplied one (#220). */
+  setAuditIfUnset(recorder: AuditRecorder): void {
+    if (!this.audit) {
+      this.audit = recorder;
+    }
   }
 
   /** Wire the recovery-state backing (add-mid-turn-recovery). Called by the
@@ -1401,6 +1416,12 @@ export class DaemonPool implements SessionDaemon {
     this.respawnDefault = opts.respawnDefaultDaemon ?? true;
     this.deathProbeDelayMs =
       opts.deathProbeDelayMs ?? DEFAULT_DEATH_PROBE_DELAY_MS;
+    this.log =
+      opts.log ??
+      ((line: string) => {
+        // eslint-disable-next-line no-console
+        console.warn(line);
+      });
     this.defaultWorkspaceCwd = this.normalizeCwd(opts.defaultWorkspaceCwd);
     this.bootEntry = this.newEntry({
       client: opts.defaultDaemon,
@@ -1696,10 +1717,38 @@ export class DaemonPool implements SessionDaemon {
       }
     }
     if (!lruKey || !lruEntry) {
+      const slots = this.snapshotOccupiedSlots();
+      const event = {
+        event: 'workspace_pool_full',
+        requestedWorkspaceCwd: requestedWorkspaceCwd ?? null,
+        maxDaemons: this.maxDaemons,
+        idleReapMs: this.idleReapMs,
+        slots,
+      };
+      try {
+        this.log(`qwen-rc: workspace_pool_full ${JSON.stringify(event)}`);
+      } catch {
+        // Journal emission must never mask WorkspacePoolFullError.
+      }
+      this.audit
+        ?.record({
+          action: 'workspace_pool_full',
+          outcome: 'failed',
+          ...(requestedWorkspaceCwd !== undefined
+            ? { target: requestedWorkspaceCwd }
+            : {}),
+          detail: {
+            requestedWorkspaceCwd: requestedWorkspaceCwd ?? null,
+            maxDaemons: this.maxDaemons,
+            idleReapMs: this.idleReapMs,
+            slots,
+          },
+        })
+        .catch(() => {});
       throw new WorkspacePoolFullError(this.maxDaemons, {
         requestedWorkspaceCwd,
         idleReapMs: this.idleReapMs,
-        slots: this.snapshotOccupiedSlots(),
+        slots,
       });
     }
     this.discardEntry(lruKey, lruEntry);

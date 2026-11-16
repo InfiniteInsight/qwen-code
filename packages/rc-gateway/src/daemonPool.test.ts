@@ -1037,11 +1037,15 @@ describe('DaemonPool death detection', () => {
     // The freed slot lets a new workspace spawn.
     const b = await h.pool.getOrSpawn('/proj/b');
     expect((b as unknown as { tag: string }).tag).toBe('/proj/b');
-    // The death hook received the affected session; the audit row is there.
+    // The death hook received the affected session; both the pool-full refusal
+    // (#220) and the daemon death audit rows are recorded in order.
     expect(h.deaths).toHaveLength(1);
     expect(h.deaths[0].key).toBe('/proj/a');
     expect(h.deaths[0].sessions).toEqual([s.sessionId]);
-    expect(h.auditRows).toHaveLength(1);
+    expect(h.auditRows.map((r) => r.action)).toEqual([
+      'workspace_pool_full',
+      'daemon_died',
+    ]);
   });
 
   it('is idempotent under a double trigger (exit + duplicate exit): one hook, one audit row', async () => {
@@ -3121,8 +3125,10 @@ describe('DaemonPool reconciles with sessions the daemon reaped (#154)', () => {
     );
   });
 
-  it('includes occupied slot details, idle state, and idleReapMs in WorkspacePoolFullError (#219)', async () => {
+  it('includes occupied slot details, idle state, and idleReapMs in WorkspacePoolFullError and emits journal + audit records (#219, #220)', async () => {
     let t = 1_000;
+    const journalLines: string[] = [];
+    const auditEntries: Array<Record<string, unknown>> = [];
     let releaseSpawnB!: () => void;
     const gateB = new Promise<void>((resolve) => {
       releaseSpawnB = resolve;
@@ -3133,6 +3139,7 @@ describe('DaemonPool reconciles with sessions the daemon reaped (#154)', () => {
       maxDaemons: 2,
       idleReapMs: 15 * 60_000,
       now: () => t,
+      log: (line) => journalLines.push(line),
       spawn: async (cwd) => {
         if (cwd === '/proj/spawning-b') {
           await gateB;
@@ -3142,6 +3149,11 @@ describe('DaemonPool reconciles with sessions the daemon reaped (#154)', () => {
           stop: async () => {},
           workspaceCwd: cwd,
         };
+      },
+    });
+    pool.setAudit({
+      record: async (entry) => {
+        auditEntries.push(entry as unknown as Record<string, unknown>);
       },
     });
 
@@ -3182,6 +3194,35 @@ describe('DaemonPool reconciles with sessions the daemon reaped (#154)', () => {
     expect(full.message).toContain('/proj/busy-a (busy: 1 session, last used 2 min ago)');
     expect(full.message).toContain('/proj/spawning-b (spawning)');
     expect(full.nextStep).toContain('idleReapMs: 900000 ms / 15 min');
+
+    // #220: structured journal line emitted with requested workspace, occupants, and cap.
+    expect(journalLines).toHaveLength(1);
+    expect(journalLines[0]).toMatch(/^qwen-rc: workspace_pool_full \{/);
+    const journalPayload = JSON.parse(
+      journalLines[0]!.slice('qwen-rc: workspace_pool_full '.length),
+    ) as Record<string, unknown>;
+    expect(journalPayload).toEqual({
+      event: 'workspace_pool_full',
+      requestedWorkspaceCwd: '/proj/blocked-c',
+      maxDaemons: 2,
+      idleReapMs: 900_000,
+      slots: full.slots,
+    });
+
+    // #220: audit chain entry recorded with requested workspace, occupants, and cap.
+    expect(auditEntries).toEqual([
+      {
+        action: 'workspace_pool_full',
+        outcome: 'failed',
+        target: '/proj/blocked-c',
+        detail: {
+          requestedWorkspaceCwd: '/proj/blocked-c',
+          maxDaemons: 2,
+          idleReapMs: 900_000,
+          slots: full.slots,
+        },
+      },
+    ]);
 
     releaseSpawnB();
     await pendingB;
