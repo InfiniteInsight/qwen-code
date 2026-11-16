@@ -1149,6 +1149,20 @@ describe('autoReopenEligible', () => {
   });
 
   it('prevents duplicate terminal windows when sweep() and POST /reopen race on the same tabId (#505)', async () => {
+    const withGateTimeout = <T>(p: Promise<T>, label: string): Promise<T> =>
+      Promise.race([
+        p,
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`Timed out waiting for ${label}`)),
+            5000,
+          ),
+        ),
+      ]);
+    let markEndpointEntered: (() => void) | undefined;
+    const endpointEntered = new Promise<void>((resolve) => {
+      markEndpointEntered = resolve;
+    });
     let releaseEndpoint: (() => void) | undefined;
     const endpointGate = new Promise<void>((resolve) => {
       releaseEndpoint = resolve;
@@ -1156,7 +1170,8 @@ describe('autoReopenEligible', () => {
     const g = await boot({
       autoReopen: true,
       endpointFor: async () => {
-        await endpointGate;
+        markEndpointEntered!();
+        await withGateTimeout(endpointGate, 'endpointGate');
         return {
           ok: true,
           endpoint: {
@@ -1170,11 +1185,11 @@ describe('autoReopenEligible', () => {
     const { crashed } = await seed(g);
     await g.poll();
 
-    // Start manual POST /reopen and hold it at endpointFor
+    // Start manual POST /reopen and deterministically wait until it enters endpointFor
     const manualPromise = send(g.url, `/rc/host/tabs/${crashed.tabId}/reopen`, {
       token: g.owner,
     });
-    await new Promise((r) => setTimeout(r, 20));
+    await withGateTimeout(endpointEntered, 'endpointEntered');
 
     // A second concurrent POST /reopen for the same tabId is refused 409 reopen_in_progress
     const duplicateManual = await send(
@@ -1197,6 +1212,20 @@ describe('autoReopenEligible', () => {
   });
 
   it('refuses auto-reopen with 409 tab_not_reopenable when the tab is dismissed concurrently during endpointFor', async () => {
+    const withGateTimeout = <T>(p: Promise<T>, label: string): Promise<T> =>
+      Promise.race([
+        p,
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`Timed out waiting for ${label}`)),
+            5000,
+          ),
+        ),
+      ]);
+    let markEndpointEntered: (() => void) | undefined;
+    const endpointEntered = new Promise<void>((resolve) => {
+      markEndpointEntered = resolve;
+    });
     let releaseEndpoint: (() => void) | undefined;
     const endpointGate = new Promise<void>((resolve) => {
       releaseEndpoint = resolve;
@@ -1204,16 +1233,17 @@ describe('autoReopenEligible', () => {
     const g = await boot({
       autoReopen: true,
       endpointFor: async (_s, cwd) => {
-        await endpointGate;
+        markEndpointEntered!();
+        await withGateTimeout(endpointGate, 'endpointGate');
         return ENDPOINT(cwd);
       },
     });
     const { crashed } = await seed(g);
     await g.poll();
 
-    // Start sweep() and hold it inside endpointFor
+    // Start sweep() and deterministically wait until it enters endpointFor
     const sweepPromise = g.sweep!();
-    await new Promise((r) => setTimeout(r, 20));
+    await withGateTimeout(endpointEntered, 'endpointEntered');
 
     // User dismisses the crashed tab while endpointFor is still starting the daemon
     const dismissRes = await send(
@@ -1336,6 +1366,66 @@ describe('autoReopenEligible', () => {
       status: 503,
       code: 'workspace_pool_full',
     });
+  });
+
+  it('coalesces concurrent sweep() calls without overlapping passes or dropping mid-sweep crashes (#262)', async () => {
+    let activeEndpoints = 0;
+    let maxActiveEndpoints = 0;
+    let markFirstEntered: (() => void) | undefined;
+    const firstEntered = new Promise<void>((resolve) => {
+      markFirstEntered = resolve;
+    });
+    let releaseFirst: (() => void) | undefined;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let seenCalls = 0;
+    const g = await boot({
+      autoReopen: true,
+      endpointFor: async (_s, cwd) => {
+        seenCalls++;
+        activeEndpoints++;
+        maxActiveEndpoints = Math.max(maxActiveEndpoints, activeEndpoints);
+        try {
+          if (seenCalls === 1) {
+            markFirstEntered!();
+            await firstGate;
+          }
+          return ENDPOINT(cwd);
+        } finally {
+          activeEndpoints--;
+        }
+      },
+    });
+    g.probe.fd0.set(91, '/dev/pts/1');
+    g.probe.fd0.set(92, '/dev/pts/2');
+    const t1 = await g.registry.start({ sessionId: S1, cwd: '/srv/w', pid: 91 });
+    const t2 = await g.registry.start({ sessionId: S2, cwd: '/srv/w', pid: 92 });
+    await g.registry.end(t1.tabId, 137);
+    await g.poll();
+
+    // Pass 1 starts and blocks inside endpointFor on t1
+    const pass1 = g.sweep!();
+    await firstEntered;
+
+    // t2 crashes after Pass 1 already snapshotted registry.list(); two callers
+    // invoke sweep() while Pass 1 is still running and must share one follow-up pass.
+    await g.registry.end(t2.tabId, 137);
+    const queuedA = g.sweep!();
+    const queuedB = g.sweep!();
+    let settledEarly = false;
+    void queuedA.then(() => {
+      settledEarly = true;
+    });
+    await Promise.resolve();
+    expect(settledEarly).toBe(false);
+
+    releaseFirst!();
+    await Promise.all([pass1, queuedA, queuedB]);
+
+    expect(maxActiveEndpoints).toBe(1);
+    const all = await g.requests.readAll();
+    expect(all.map((r) => r.sessionId).sort()).toEqual([S1, S2].sort());
   });
 });
 

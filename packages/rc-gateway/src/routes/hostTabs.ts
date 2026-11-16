@@ -649,12 +649,11 @@ export function createHostTabRoutes(deps: HostTabRoutesDeps): HostTabRoutes {
   // Nothing is tried while the launcher is not live: the pass returns before
   // reading a single record, so a launcher that is away costs no audit rows.
   const tried = new Set<string>();
-  let sweeping = false;
-  const sweep = async (): Promise<void> => {
-    if (!deps.autoReopen || !deps.requests || sweeping) return;
-    sweeping = true;
+  let activeSweep: Promise<void> | null = null;
+  let queuedSweep: { promise: Promise<void>; run: () => void } | null = null;
+  const runSweep = async (): Promise<void> => {
     try {
-      const l = await deps.requests.launcherLiveness(staleMs);
+      const l = await deps.requests!.launcherLiveness(staleMs);
       if (l.state !== 'live') return;
       const now = (deps.now ?? registry.now)();
       for (const t of await registry.list()) {
@@ -680,9 +679,35 @@ export function createHostTabRoutes(deps: HostTabRoutesDeps): HostTabRoutes {
       }
     } catch {
       // The next pass tries again; a sweep never takes the gateway down.
-    } finally {
-      sweeping = false;
     }
+  };
+  const startSweepPass = (): Promise<void> => {
+    const pass = runSweep().finally(() => {
+      if (queuedSweep) {
+        const next = queuedSweep;
+        queuedSweep = null;
+        next.run();
+      } else {
+        activeSweep = null;
+      }
+    });
+    activeSweep = pass;
+    return pass;
+  };
+  const sweep = (): Promise<void> => {
+    if (!deps.autoReopen || !deps.requests) return Promise.resolve();
+    if (!activeSweep) return startSweepPass();
+    if (!queuedSweep) {
+      let run!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        run = resolve;
+      });
+      queuedSweep = {
+        run,
+        promise: gate.then(() => startSweepPass()),
+      };
+    }
+    return queuedSweep.promise;
   };
 
   return {

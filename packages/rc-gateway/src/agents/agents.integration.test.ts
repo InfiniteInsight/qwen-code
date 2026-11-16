@@ -28,7 +28,7 @@ afterEach(async () => {
     server.closeAllConnections();
     await new Promise<void>((r) => server!.close(() => r()));
   }
-  if (stub) await stub.crash();
+  if (stub) await stub.close();
   server = undefined;
   stub = undefined;
 });
