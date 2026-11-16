@@ -10,7 +10,11 @@ import { isSessionLevelGone } from '../daemonHttpError.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
 import { WRITE, hasScope } from '../scopes.js';
-import { DEFAULT_PROMPT_TIMEOUT_MS } from './promptTimeout.js';
+import {
+  DEFAULT_PROMPT_SILENCE_MS,
+  DEFAULT_PROMPT_TIMEOUT_MS,
+  createTurnDeadline,
+} from './promptTimeout.js';
 import { type PromptQueue, QueueTimeoutError } from './promptQueue.js';
 
 /**
@@ -109,6 +113,7 @@ export function createSessionCommandInvokeRoute(
   promptTimeoutMs = DEFAULT_PROMPT_TIMEOUT_MS,
   queue?: PromptQueue,
   queueWaitMs = 120_000,
+  promptSilenceMs = DEFAULT_PROMPT_SILENCE_MS,
 ): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;
@@ -232,12 +237,10 @@ export function createSessionCommandInvokeRoute(
       });
     };
 
-    const timerAbort = new AbortController();
-    let abortSource = '';
-    const timer = setTimeout(() => {
-      if (abortSource === '') abortSource = 'timer';
-      timerAbort.abort();
-    }, promptTimeoutMs);
+    const deadline = createTurnDeadline({
+      ceilingMs: promptTimeoutMs,
+      silenceMs: promptSilenceMs,
+    });
     let departed!: () => void;
     const clientGone = new Promise<'gone'>((resolve) => {
       departed = () => resolve('gone');
@@ -254,7 +257,10 @@ export function createSessionCommandInvokeRoute(
       daemon.prompt(
         sessionId,
         { prompt: [{ type: 'text', text }] },
-        timerAbort.signal,
+        deadline.signal,
+        undefined,
+        () => deadline.onFrame(),
+        () => deadline.armSilence(),
       ),
     );
     // The timer and queue slot outlive the handler after a disconnect, so both
@@ -263,11 +269,11 @@ export function createSessionCommandInvokeRoute(
     // unhandled.
     void prompting.then(
       () => {
-        clearTimeout(timer);
+        deadline.clear();
         release?.();
       },
       () => {
-        clearTimeout(timer);
+        deadline.clear();
         release?.();
       },
     );
@@ -281,7 +287,7 @@ export function createSessionCommandInvokeRoute(
             recordCompleted(lateResult.stopReason);
           },
           () => {
-            if (abortSource === 'timer') {
+            if (deadline.fired !== null) {
               recordTimedOut();
             }
           },
@@ -290,14 +296,16 @@ export function createSessionCommandInvokeRoute(
       }
       result = winner;
     } catch (err) {
-      if (abortSource === 'timer') {
+      if (deadline.fired !== null) {
         // The command WAS invoked, then this route cancelled its turn. No
         // stopReason, because there isn't one.
         recordTimedOut();
         if (!res.closed && !res.writableEnded) {
-          res
-            .status(504)
-            .json({ error: 'prompt_timeout', code: 'prompt_timeout' });
+          res.status(504).json({
+            error: 'prompt_timeout',
+            code: 'prompt_timeout',
+            timeoutMs: deadline.fired.timeoutMs,
+          });
         }
         return;
       }

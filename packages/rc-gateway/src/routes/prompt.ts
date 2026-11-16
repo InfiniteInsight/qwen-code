@@ -14,7 +14,11 @@ import {
 } from '../daemonHttpError.js';
 import { PromptQueue, QueueTimeoutError } from './promptQueue.js';
 import type { PromptEventBroadcaster } from './promptEventBroadcaster.js';
-import { DEFAULT_PROMPT_TIMEOUT_MS } from './promptTimeout.js';
+import {
+  DEFAULT_PROMPT_SILENCE_MS,
+  DEFAULT_PROMPT_TIMEOUT_MS,
+  createTurnDeadline,
+} from './promptTimeout.js';
 import { createTurnProgressMeter } from './turnProgress.js';
 
 /**
@@ -55,6 +59,12 @@ export interface PromptRouteOptions {
    * `DEFAULT_PROMPT_TIMEOUT_MS` ceiling, see routes/promptTimeout.ts). */
   promptTimeoutMs?: number;
   /**
+   * ms quiet-period silence window on the 202 subscription path before the turn
+   * is cancelled (`0` disables, default: `DEFAULT_PROMPT_SILENCE_MS`, #244).
+   * Only ever shortens `promptTimeoutMs` and never arms on a 200 turn.
+   */
+  promptSilenceMs?: number;
+  /**
    * Broadcaster for gateway-injected SSE events (e.g. `stream_error` on prompt
    * timeout). When omitted, timeout cancellation still happens but no synthetic
    * event is emitted to SSE subscribers.
@@ -86,6 +96,7 @@ export function createPromptRoute(
 ): RequestHandler {
   const queueWaitMs = opts.queueWaitMs ?? 120_000;
   const promptTimeoutMs = opts.promptTimeoutMs ?? DEFAULT_PROMPT_TIMEOUT_MS;
+  const promptSilenceMs = opts.promptSilenceMs ?? DEFAULT_PROMPT_SILENCE_MS;
   const broadcaster = opts.promptEventBroadcaster;
   const queue = opts.queue ?? sharedQueue;
 
@@ -136,18 +147,16 @@ export function createPromptRoute(
       // above, #38): the route keeps awaiting daemon.prompt() after the
       // response closes, and the queue slot below is held until the turn
       // actually completes, so a backgrounded mobile client's turn survives.
-      const timeoutAbort = new AbortController();
-      const promptTimer = setTimeout(() => {
-        timeoutAbort.abort();
-      }, promptTimeoutMs);
+      const deadline = createTurnDeadline({
+        ceilingMs: promptTimeoutMs,
+        silenceMs: promptSilenceMs,
+      });
 
-      // add-turn-progress-signal 1.2: record how quiet this turn was. The
-      // observer fires once per frame the prompt's own wait already pulls off
-      // its subscription, so this adds no second subscriber and no wire event,
-      // and the callback carries only a frame count and a duration, never
-      // content. It measures and decides nothing: the absolute ceiling below
-      // stays the only bound until Phase 2 has a recorded distribution to size a
-      // quiet-period window from.
+      // add-turn-progress-signal 1.2 + #244: record how quiet this turn was,
+      // and feed the 202 quiet-period silence window off the same parsed
+      // frames. The observer fires once per frame the prompt's own wait already
+      // pulls off its subscription, so this adds no second subscriber and no
+      // wire event, and carries no prompt content.
       const progress = createTurnProgressMeter();
       let result;
       let timedOut = false;
@@ -155,12 +164,16 @@ export function createPromptRoute(
         result = await daemon.prompt(
           sessionId,
           { prompt: blocks },
-          timeoutAbort.signal,
+          deadline.signal,
           undefined,
-          () => progress.observe(),
+          () => {
+            progress.observe();
+            deadline.onFrame();
+          },
+          () => deadline.armSilence(),
         );
       } catch (err) {
-        if (timeoutAbort.signal.aborted) {
+        if (deadline.signal.aborted) {
           timedOut = true;
         } else if (
           err instanceof UnknownSessionError ||
@@ -184,33 +197,37 @@ export function createPromptRoute(
             // #211: a write or owner caller also gets the daemon's answer.
             res.status(502).json(daemonUnavailableBody(req, err));
           }
-          // #40: the turn ended in failure — a backgrounded client should
+          // #40: the turn ended in failure - a backgrounded client should
           // still hear about it (fires even when the client is gone).
           opts.onTurnEnd?.(sessionId, { ok: false, reason: 'error' });
           return;
         }
       } finally {
-        clearTimeout(promptTimer);
+        deadline.clear();
       }
 
       if (timedOut) {
-        // #237: record the firing durably. The broadcast below reaches only
-        // live SSE subscribers and is dropped on the floor with them, so until
-        // now a gateway that cancelled turns every day left no trace that any
-        // turn had ever been cancelled - the count that decides whether this
-        // bound is set right could not be taken off the running system.
+        const firedTimeoutMs = deadline.fired?.timeoutMs ?? promptTimeoutMs;
+        const firedReason = deadline.fired?.reason ?? 'ceiling';
+        // #237 + #244: record the firing durably with the bound that fired and
+        // whether the silence window or the absolute ceiling ended the turn.
         void audit?.record({
           action: 'prompt_timed_out',
           actorTokenId: req.rcClient?.id,
           subActor: req.rcClient?.subActor,
           target: sessionId,
-          detail: { timeoutMs: promptTimeoutMs, blocks: blocks.length },
+          detail: {
+            timeoutMs: firedTimeoutMs,
+            reason: firedReason,
+            blocks: blocks.length,
+            ...progress.summary(),
+          },
         });
         // Broadcast a synthetic stream_error to all SSE subscribers so they
         // know the turn was cancelled by the gateway.
         broadcaster?.emit(sessionId, {
           type: 'stream_error',
-          data: { code: 'prompt_timeout', timeoutMs: promptTimeoutMs },
+          data: { code: 'prompt_timeout', timeoutMs: firedTimeoutMs },
         });
         // #40: the turn ended in failure (gateway timeout).
         opts.onTurnEnd?.(sessionId, { ok: false, reason: 'timeout' });
@@ -218,7 +235,7 @@ export function createPromptRoute(
           res.status(504).json({
             error: 'prompt_timeout',
             code: 'prompt_timeout',
-            timeoutMs: promptTimeoutMs,
+            timeoutMs: firedTimeoutMs,
           });
         }
         return;

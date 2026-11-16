@@ -375,6 +375,13 @@ export interface StubDaemonOptions {
    * observe that the upstream subscription was aborted.
    */
   holdOpenMs?: number;
+  /**
+   * While `holdOpenMs` keeps `/session/:id/events` open, emit one synthetic
+   * `session_update` SSE frame every `liveFrameIntervalMs` (#244). Lets a
+   * test drive a chattering 202 turn that continuously resets a quiet-period
+   * silence window until the absolute ceiling ends it.
+   */
+  liveFrameIntervalMs?: number;
   /** Status for POST /session/:id/permission/:requestId (default 200 = accepted). */
   permissionStatus?: number;
   /** Status for POST /session/:id/prompt (default 200). */
@@ -1852,14 +1859,33 @@ export async function startStubDaemon(
     }
     if (opts.holdOpenMs) {
       let ended = false;
+      let nextLiveId = allFrames.length + 1;
+      const ticker =
+        opts.liveFrameIntervalMs && opts.liveFrameIntervalMs > 0
+          ? setInterval(() => {
+              if (ended) return;
+              const id = nextLiveId++;
+              res.write(`id: ${id}\n`);
+              res.write(
+                `data: ${JSON.stringify({
+                  v: 1,
+                  id,
+                  type: 'session_update',
+                  data: { tick: id },
+                })}\n\n`,
+              );
+            }, opts.liveFrameIntervalMs)
+          : undefined;
       const timer = setTimeout(() => {
         ended = true;
+        if (ticker) clearInterval(ticker);
         res.end();
       }, opts.holdOpenMs);
       req.on('close', () => {
         if (!ended) {
           state.eventsAbortedByClient = true;
           clearTimeout(timer);
+          if (ticker) clearInterval(ticker);
         }
       });
       return;

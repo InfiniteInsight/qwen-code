@@ -33,6 +33,7 @@ afterEach(async () => {
 interface MountOpts {
   queueWaitMs?: number;
   promptTimeoutMs?: number;
+  promptSilenceMs?: number;
   promptEventBroadcaster?: PromptEventBroadcaster;
   queue?: PromptQueue;
   onTurnEnd?: (
@@ -270,8 +271,96 @@ describe('prompt route', () => {
     expect(fired).toHaveLength(1);
     expect(fired[0]).toMatchObject({
       target: 'sess-1',
-      detail: { timeoutMs: 50 },
+      detail: { timeoutMs: 50, reason: 'ceiling' },
     });
+  });
+
+  it('aborts a quiet 202 turn on promptSilenceMs before promptTimeoutMs and cancels on the daemon (#244)', async () => {
+    stub = await startStubDaemon({
+      promptAccepts: true,
+      frames: [],
+      holdOpenMs: 5_000,
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const broadcaster = new PromptEventBroadcaster();
+    const emitted: Array<{ type: string; data: unknown }> = [];
+    broadcaster.register('sess-1', (ev) => emitted.push(ev));
+
+    const url = await mount(daemon, audit, {
+      promptTimeoutMs: 2_000,
+      promptSilenceMs: 60,
+      promptEventBroadcaster: broadcaster,
+      queue: new PromptQueue(),
+    });
+    const res = await postPrompt(url, { prompt: 'quiet-202' });
+    expect(res.status).toBe(504);
+    expect(await res.json()).toMatchObject({
+      code: 'prompt_timeout',
+      timeoutMs: 60,
+    });
+    expect(emitted).toEqual([
+      { type: 'stream_error', data: { code: 'prompt_timeout', timeoutMs: 60 } },
+    ]);
+    const fired = audit.calls.filter((e) => e.action === 'prompt_timed_out');
+    expect(fired).toHaveLength(1);
+    expect(fired[0]).toMatchObject({
+      target: 'sess-1',
+      detail: { timeoutMs: 60, reason: 'silence', blocks: 1 },
+    });
+    const until = Date.now() + 1_000;
+    while (stub.cancelCount === 0 && Date.now() < until) {
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    expect(stub.cancelCount).toBe(1);
+    expect(stub.lastCancelledSessionId).toBe('sess-1');
+  });
+
+  it('does NOT arm promptSilenceMs on the synchronous 200 path with no subscription (#244)', async () => {
+    stub = await startStubDaemon({ promptStatus: 200, promptDelayMs: 180 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const url = await mount(daemon, audit, {
+      promptTimeoutMs: 2_000,
+      promptSilenceMs: 50,
+      queue: new PromptQueue(),
+    });
+    const res = await postPrompt(url, { prompt: 'blocking-200' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ stopReason: 'end_turn' });
+    expect(audit.calls.map((e) => e.action)).toEqual(['prompt_sent']);
+  });
+
+  it('keeps resetting promptSilenceMs while frames arrive and enforces promptTimeoutMs as the backstop (#244)', async () => {
+    stub = await startStubDaemon({
+      promptAccepts: true,
+      frames: [],
+      holdOpenMs: 5_000,
+      liveFrameIntervalMs: 30,
+    });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const url = await mount(daemon, audit, {
+      promptTimeoutMs: 220,
+      promptSilenceMs: 100,
+      queue: new PromptQueue(),
+    });
+    const res = await postPrompt(url, { prompt: 'chattering-202' });
+    expect(res.status).toBe(504);
+    expect(await res.json()).toMatchObject({
+      code: 'prompt_timeout',
+      timeoutMs: 220,
+    });
+    const fired = audit.calls.filter((e) => e.action === 'prompt_timed_out');
+    expect(fired).toHaveLength(1);
+    expect(fired[0]!.detail).toMatchObject({
+      timeoutMs: 220,
+      reason: 'ceiling',
+      blocks: 1,
+    });
+    expect(
+      (fired[0]!.detail as { frames?: number }).frames ?? 0,
+    ).toBeGreaterThanOrEqual(2);
   });
 
   it('records no firing for a turn that finishes inside the ceiling (#237)', async () => {

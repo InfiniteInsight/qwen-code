@@ -5451,6 +5451,14 @@ export type PromptContentBlock = PromptTextContent | Record<string, unknown>;
  */
 export type TurnFrameObserver = (frameType: string) => void;
 
+/**
+ * Called once when {@link DaemonClient.prompt} enters the 202 subscription wait
+ * (before the first frame arrives), and never on the blocking 200 path. Lets a
+ * quiet-period silence window arm conditionally on the path that actually
+ * yields frames (#244). A throw inside it is swallowed.
+ */
+export type TurnSubscribedObserver = () => void;
+
 /** Returned from `POST /session/:id/prompt`. */
 export interface PromptResult {
   stopReason: string;

@@ -545,6 +545,7 @@ export interface GatewayDeps {
    */
   queueWaitMs?: number;
   promptTimeoutMs?: number;
+  promptSilenceMs?: number;
   corsConfigOrigins?: readonly string[];
   /**
    * The gateway's own UI origin, used as the unconditional CORS admission
@@ -1501,6 +1502,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     createPromptRoute(deps.daemon, audit, deps.onPromptAccepted, {
       queueWaitMs: deps.queueWaitMs,
       promptTimeoutMs: deps.promptTimeoutMs,
+      promptSilenceMs: deps.promptSilenceMs,
       promptEventBroadcaster,
       queue: promptQueue,
       // Turn-end push (#40): fire the notifier after the turn's terminal
@@ -2152,6 +2154,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       deps.promptTimeoutMs,
       promptQueue,
       deps.queueWaitMs,
+      deps.promptSilenceMs,
     ),
   );
   // POST /session/:id/supported-commands/:name — write-scope; runs one of the
@@ -2173,6 +2176,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       deps.promptTimeoutMs,
       promptQueue,
       deps.queueWaitMs,
+      deps.promptSilenceMs,
     ),
   );
   app.get(

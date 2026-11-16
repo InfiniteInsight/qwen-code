@@ -151,7 +151,9 @@ import {
 import { LAUNCHER_STALE_MS } from './routes/terminals.js';
 import { HOST_TAB_SWEEP_MS } from './routes/hostTabs.js';
 import {
+  DEFAULT_PROMPT_SILENCE_SEC,
   DEFAULT_PROMPT_TIMEOUT_SEC,
+  promptSilenceMsFromSec,
   promptTimeoutMsFromSec,
 } from './routes/promptTimeout.js';
 import {
@@ -420,6 +422,15 @@ export interface ServeOptions {
   /** Which of the two above supplied it, so boot can say where the bound came
    * from instead of making an operator guess. Unset means the default. */
   promptTimeoutSecFrom?: '--prompt-timeout-sec' | 'QWEN_RC_PROMPT_TIMEOUT_SEC';
+  /**
+   * `--prompt-silence-sec <n>` (env `QWEN_RC_PROMPT_SILENCE_SEC`): quiet-period
+   * silence window in seconds on the 202 subscription path (#244). Default
+   * 2700 (45 minutes), sized above the 34.17-minute empirical maximum gap
+   * across 126 recorded live turns. `0` disables the silence window and leaves
+   * `--prompt-timeout-sec` as the sole bound.
+   */
+  promptSilenceSec?: number;
+  promptSilenceSecFrom?: '--prompt-silence-sec' | 'QWEN_RC_PROMPT_SILENCE_SEC';
   /**
    * `--qwen-bin <path>` (env `QWEN_RC_QWEN_BIN`): the one executable every
    * daemon is spawned as (the boot daemon and the pool's). A path is checked at
@@ -778,7 +789,11 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     console.log(
       `qwen-rc serve: per-turn ceiling ${
         opts.promptTimeoutSec ?? DEFAULT_PROMPT_TIMEOUT_SEC
-      }s (${opts.promptTimeoutSecFrom ?? 'default'})`,
+      }s (${opts.promptTimeoutSecFrom ?? 'default'}); silence window ${
+        opts.promptSilenceSec === 0
+          ? 'off'
+          : `${opts.promptSilenceSec ?? DEFAULT_PROMPT_SILENCE_SEC}s`
+      } (${opts.promptSilenceSecFrom ?? 'default'})`,
     );
     // Which `qwen` every daemon runs, settled and logged before anything is
     // spawned. The terminals run the fork's build through QWEN_RC_TERMINAL_QWEN
@@ -1324,6 +1339,9 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       // which is what three independent 600_000 literals used to mean.
       ...(opts.promptTimeoutSec !== undefined
         ? { promptTimeoutMs: promptTimeoutMsFromSec(opts.promptTimeoutSec) }
+        : {}),
+      ...(opts.promptSilenceSec !== undefined
+        ? { promptSilenceMs: promptSilenceMsFromSec(opts.promptSilenceSec) }
         : {}),
       ...(sessionWalDir !== undefined ? { walDir: sessionWalDir } : {}),
       apnsStore,
@@ -2495,6 +2513,7 @@ export function parseServeFlags(argv: string[]): ServeOptions {
   const maxAttachmentFlag = flag('max-attachment-bytes');
   const maxDaemonsFlag = flag('max-daemons');
   const promptTimeoutFlag = flag('prompt-timeout-sec');
+  const promptSilenceFlag = flag('prompt-silence-sec');
   const walDirFlag = flag('wal-dir');
   if (walDirFlag !== undefined && walDirFlag.trim() === '') {
     throw new Error('--wal-dir: expected a directory path, got ""');
@@ -2547,6 +2566,19 @@ export function parseServeFlags(argv: string[]): ServeOptions {
         : process.env.QWEN_RC_PROMPT_TIMEOUT_SEC
           ? 'QWEN_RC_PROMPT_TIMEOUT_SEC'
           : undefined,
+    promptSilenceSec: parseNonNegativeIntFlag(
+      promptSilenceFlag !== undefined
+        ? '--prompt-silence-sec'
+        : 'QWEN_RC_PROMPT_SILENCE_SEC',
+      promptSilenceFlag ?? process.env.QWEN_RC_PROMPT_SILENCE_SEC,
+    ),
+    promptSilenceSecFrom:
+      promptSilenceFlag !== undefined
+        ? '--prompt-silence-sec'
+        : process.env.QWEN_RC_PROMPT_SILENCE_SEC !== undefined &&
+            process.env.QWEN_RC_PROMPT_SILENCE_SEC !== ''
+          ? 'QWEN_RC_PROMPT_SILENCE_SEC'
+          : undefined,
     qwenBin:
       qwenBinRaw === undefined || (!qwenBinFromFlag && qwenBinRaw === '')
         ? undefined
@@ -2596,6 +2628,22 @@ function parsePositiveIntFlag(
   const n = /^[0-9]+$/.test(raw) ? Number(raw) : NaN;
   if (!Number.isSafeInteger(n) || n < 1) {
     throw new Error(`${name}: expected a positive whole number, got "${raw}"`);
+  }
+  return n;
+}
+
+function parseNonNegativeIntFlag(
+  name: string,
+  raw: string | undefined,
+): number | undefined {
+  if (raw === undefined || (raw === '' && !name.startsWith('--'))) {
+    return undefined;
+  }
+  const n = /^[0-9]+$/.test(raw) ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(n) || n < 0) {
+    throw new Error(
+      `${name}: expected a non-negative whole number, got "${raw}"`,
+    );
   }
   return n;
 }

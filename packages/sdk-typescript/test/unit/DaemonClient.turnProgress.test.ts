@@ -256,4 +256,45 @@ describe('DaemonClient.prompt turn-frame observer', () => {
     expect(seen).toEqual([]);
     expect(calls.filter((c) => c.url.endsWith('/events'))).toHaveLength(0);
   });
+
+  it('notifies onTurnSubscribed once on the 202 path before frames, and never on 200 (#244)', async () => {
+    const { fetch: fetch202 } = recordingFetch(daemonReply);
+    const client202 = new DaemonClient({ baseUrl: 'http://daemon', fetch: fetch202 });
+    const trace202: string[] = [];
+    const r202 = await client202.prompt(
+      's-1',
+      { prompt: [{ type: 'text', text: 'hi' }] },
+      undefined,
+      undefined,
+      (frameType) => trace202.push(`frame:${frameType}`),
+      () => trace202.push('subscribed'),
+    );
+    expect(r202).toEqual({ stopReason: 'end_turn' });
+    expect(trace202).toEqual([
+      'subscribed',
+      'frame:session_update',
+      'frame:session_update',
+      'frame:turn_complete',
+    ]);
+
+    const { fetch: fetch200 } = recordingFetch((req) =>
+      req.url.endsWith('/session/s-1/prompt')
+        ? jsonResponse(200, { stopReason: 'end_turn' })
+        : jsonResponse(500, { error: `unexpected ${req.url}` }),
+    );
+    const client200 = new DaemonClient({ baseUrl: 'http://daemon', fetch: fetch200 });
+    let subscribed200 = 0;
+    const r200 = await client200.prompt(
+      's-1',
+      { prompt: [{ type: 'text', text: 'hi' }] },
+      undefined,
+      undefined,
+      undefined,
+      () => {
+        subscribed200 += 1;
+      },
+    );
+    expect(r200).toEqual({ stopReason: 'end_turn' });
+    expect(subscribed200).toBe(0);
+  });
 });

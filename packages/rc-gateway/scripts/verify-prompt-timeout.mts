@@ -44,8 +44,11 @@ import { PairingService } from '../src/pairing.js';
 import { createGatewayApp } from '../src/server.js';
 import { parseServeFlags } from '../src/cli.js';
 import {
+  DEFAULT_PROMPT_SILENCE_MS,
+  DEFAULT_PROMPT_SILENCE_SEC,
   DEFAULT_PROMPT_TIMEOUT_MS,
   DEFAULT_PROMPT_TIMEOUT_SEC,
+  promptSilenceMsFromSec,
   promptTimeoutMsFromSec,
 } from '../src/routes/promptTimeout.js';
 
@@ -99,6 +102,8 @@ async function bootGateway(
   promptDelayMs: number,
   promptAccepts = false,
   stubFrames: StubDaemonOptions['frames'] = [],
+  promptSilenceMs?: number,
+  liveFrameIntervalMs?: number,
 ): Promise<Gateway> {
   const dir = mkdtempSync(join(tmpdir(), 'rc-timeout-'));
   const auditDir = join(dir, 'audit');
@@ -107,6 +112,7 @@ async function bootGateway(
     holdOpenMs: 60_000,
     promptDelayMs,
     promptAccepts,
+    ...(liveFrameIntervalMs !== undefined ? { liveFrameIntervalMs } : {}),
   };
   const stub = await startStubDaemon(stubOpts);
   const store = await TokenStore.open(join(dir, 'tokens.json'));
@@ -117,6 +123,7 @@ async function bootGateway(
     pairing: new PairingService(),
     auditPath: join(auditDir, 'audit.log'),
     ...(promptTimeoutMs !== undefined ? { promptTimeoutMs } : {}),
+    ...(promptSilenceMs !== undefined ? { promptSilenceMs } : {}),
   });
   const server: Server = await new Promise((resolve) => {
     const s = (app as Express).listen(0, '127.0.0.1', () => resolve(s));
@@ -253,20 +260,33 @@ async function postPrompt(
 function ceilingFromCli(
   argv: string[],
   env: Record<string, string | undefined>,
-): { sec: number | undefined; ms: number } {
-  const saved = process.env['QWEN_RC_PROMPT_TIMEOUT_SEC'];
-  const want = env['QWEN_RC_PROMPT_TIMEOUT_SEC'];
-  if (want === undefined) delete process.env['QWEN_RC_PROMPT_TIMEOUT_SEC'];
-  else process.env['QWEN_RC_PROMPT_TIMEOUT_SEC'] = want;
+): {
+  sec: number | undefined;
+  ms: number;
+  silenceSec: number | undefined;
+  silenceMs: number;
+} {
+  const savedTimeout = process.env['QWEN_RC_PROMPT_TIMEOUT_SEC'];
+  const savedSilence = process.env['QWEN_RC_PROMPT_SILENCE_SEC'];
+  const wantTimeout = env['QWEN_RC_PROMPT_TIMEOUT_SEC'];
+  const wantSilence = env['QWEN_RC_PROMPT_SILENCE_SEC'];
+  if (wantTimeout === undefined) delete process.env['QWEN_RC_PROMPT_TIMEOUT_SEC'];
+  else process.env['QWEN_RC_PROMPT_TIMEOUT_SEC'] = wantTimeout;
+  if (wantSilence === undefined) delete process.env['QWEN_RC_PROMPT_SILENCE_SEC'];
+  else process.env['QWEN_RC_PROMPT_SILENCE_SEC'] = wantSilence;
   try {
     const parsed = parseServeFlags(['serve', ...argv]);
     return {
       sec: parsed.promptTimeoutSec,
       ms: promptTimeoutMsFromSec(parsed.promptTimeoutSec),
+      silenceSec: parsed.promptSilenceSec,
+      silenceMs: promptSilenceMsFromSec(parsed.promptSilenceSec),
     };
   } finally {
-    if (saved === undefined) delete process.env['QWEN_RC_PROMPT_TIMEOUT_SEC'];
-    else process.env['QWEN_RC_PROMPT_TIMEOUT_SEC'] = saved;
+    if (savedTimeout === undefined) delete process.env['QWEN_RC_PROMPT_TIMEOUT_SEC'];
+    else process.env['QWEN_RC_PROMPT_TIMEOUT_SEC'] = savedTimeout;
+    if (savedSilence === undefined) delete process.env['QWEN_RC_PROMPT_SILENCE_SEC'];
+    else process.env['QWEN_RC_PROMPT_SILENCE_SEC'] = savedSilence;
   }
 }
 
@@ -294,9 +314,17 @@ async function driveTurn(
   env: Record<string, string | undefined>,
   stubHoldMs: number,
   promptAccepts = false,
+  liveFrameIntervalMs?: number,
 ): Promise<Turn> {
-  const { sec, ms } = ceilingFromCli(argv, env);
-  const gw = await bootGateway(ms, stubHoldMs, promptAccepts);
+  const { sec, ms, silenceSec, silenceMs } = ceilingFromCli(argv, env);
+  const gw = await bootGateway(
+    ms,
+    stubHoldMs,
+    promptAccepts,
+    [],
+    silenceSec !== undefined ? silenceMs : undefined,
+    liveFrameIntervalMs,
+  );
   const sessionId = SESSION_ID;
   // Attach before the turn: the broadcast has no replay, so a subscriber that
   // shows up afterwards proves nothing about what the firing sent.
@@ -442,10 +470,23 @@ async function p5(): Promise<string> {
     'unset does not fall back to the shared constant',
   );
   expect(DEFAULT_PROMPT_TIMEOUT_MS === 7_200_000, 'default is not 2 hours');
-  const unset = ceilingFromCli([], { QWEN_RC_PROMPT_TIMEOUT_SEC: undefined });
   expect(
-    unset.sec === undefined && unset.ms === 7_200_000,
-    `no flag, no env gave ${unset.ms}ms`,
+    DEFAULT_PROMPT_SILENCE_SEC === 2_700 &&
+      DEFAULT_PROMPT_SILENCE_MS === 2_700_000 &&
+      promptSilenceMsFromSec(undefined) === DEFAULT_PROMPT_SILENCE_MS &&
+      promptSilenceMsFromSec(0) === 0,
+    `silence defaults wrong (${DEFAULT_PROMPT_SILENCE_SEC}s/${DEFAULT_PROMPT_SILENCE_MS}ms)`,
+  );
+  const unset = ceilingFromCli([], {
+    QWEN_RC_PROMPT_TIMEOUT_SEC: undefined,
+    QWEN_RC_PROMPT_SILENCE_SEC: undefined,
+  });
+  expect(
+    unset.sec === undefined &&
+      unset.ms === 7_200_000 &&
+      unset.silenceSec === undefined &&
+      unset.silenceMs === 2_700_000,
+    `no flag, no env gave ceiling=${unset.ms}ms silence=${unset.silenceMs}ms`,
   );
   const routesDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
   const routes = [
@@ -580,6 +621,118 @@ async function p7(): Promise<string> {
   return 'unwatched 202 turn files frames + maxGapMs; the 200 turn files neither';
 }
 
+/**
+ * P8: the quiet-period silence window (#244). On the 202 path, a silent turn
+ * is ended at `--prompt-silence-sec` well before `--prompt-timeout-sec`, with
+ * the window as `timeoutMs`, `detail.reason === 'silence'`, and one daemon
+ * cancel. On the 200 blocking path (no subscription, no progress signal), the
+ * silence window does NOT arm and a turn slower than `--prompt-silence-sec`
+ * still completes inside `--prompt-timeout-sec`.
+ */
+async function p8(): Promise<string> {
+  const quiet202 = await driveTurn(
+    ['--prompt-silence-sec', '1', '--prompt-timeout-sec', '10'],
+    {
+      QWEN_RC_PROMPT_TIMEOUT_SEC: undefined,
+      QWEN_RC_PROMPT_SILENCE_SEC: undefined,
+    },
+    0,
+    true,
+  );
+  expect(quiet202.status === 504, `202 status was ${quiet202.status}, want 504`);
+  expect(
+    quiet202.body['timeoutMs'] === 1_000,
+    `202 body timeoutMs was ${String(quiet202.body['timeoutMs'])}, want 1000`,
+  );
+  const frameData = (quiet202.frame?.['data'] ?? {}) as Record<string, unknown>;
+  expect(
+    quiet202.frame !== undefined && frameData['timeoutMs'] === 1_000,
+    `202 subscriber frame was ${quiet202.frame ? JSON.stringify(frameData) : 'absent'}`,
+  );
+  expect(
+    quiet202.firings.length === 1,
+    `202 firings was ${quiet202.firings.length}, want 1`,
+  );
+  const firedDetail = detailOf(quiet202.firings[0] ?? {});
+  expect(
+    firedDetail['timeoutMs'] === 1_000 && firedDetail['reason'] === 'silence',
+    `202 firing detail was ${JSON.stringify(firedDetail)}`,
+  );
+  expect(
+    quiet202.cancels === 1 && quiet202.cancelledSession === SESSION_ID,
+    `202 cancels=${quiet202.cancels} session=${String(quiet202.cancelledSession)}`,
+  );
+
+  const blocking200 = await driveTurn(
+    ['--prompt-silence-sec', '1', '--prompt-timeout-sec', '5'],
+    {
+      QWEN_RC_PROMPT_TIMEOUT_SEC: undefined,
+      QWEN_RC_PROMPT_SILENCE_SEC: undefined,
+    },
+    1_400,
+    false,
+  );
+  expect(
+    blocking200.status === 200,
+    `200 status was ${blocking200.status}, want 200`,
+  );
+  expect(
+    blocking200.firings.length === 0,
+    `200 firings was ${blocking200.firings.length}, want 0`,
+  );
+  return 'quiet 202 ends at 1000ms (silence + 1 cancel); 1400ms 200 turn finishes 200';
+}
+
+/**
+ * P9: a chattering 202 turn resets the silence window until the absolute
+ * ceiling ends it, and `QWEN_RC_PROMPT_SILENCE_SEC=0` disables shortening (#244).
+ */
+async function p9(): Promise<string> {
+  const chattering = await driveTurn(
+    ['--prompt-silence-sec', '1', '--prompt-timeout-sec', '2'],
+    {
+      QWEN_RC_PROMPT_TIMEOUT_SEC: undefined,
+      QWEN_RC_PROMPT_SILENCE_SEC: undefined,
+    },
+    0,
+    true,
+    250,
+  );
+  expect(
+    chattering.status === 504 && chattering.body['timeoutMs'] === 2_000,
+    `chattering status=${chattering.status} timeoutMs=${String(chattering.body['timeoutMs'])}`,
+  );
+  expect(chattering.firings.length === 1, 'want 1 firing on chattering turn');
+  const chatDetail = detailOf(chattering.firings[0] ?? {});
+  expect(
+    chatDetail['timeoutMs'] === 2_000 &&
+      chatDetail['reason'] === 'ceiling' &&
+      typeof chatDetail['frames'] === 'number' &&
+      (chatDetail['frames'] as number) >= 4,
+    `chattering detail was ${JSON.stringify(chatDetail)}`,
+  );
+  expect(
+    chattering.cancels === 1,
+    `chattering cancels=${chattering.cancels}, want 1`,
+  );
+
+  const disabled = await driveTurn(
+    ['--prompt-timeout-sec', '1'],
+    {
+      QWEN_RC_PROMPT_TIMEOUT_SEC: undefined,
+      QWEN_RC_PROMPT_SILENCE_SEC: '0',
+    },
+    0,
+    true,
+  );
+  expect(
+    disabled.status === 504 &&
+      detailOf(disabled.firings[0] ?? {})['reason'] === 'ceiling',
+    'QWEN_RC_PROMPT_SILENCE_SEC=0 did not leave ceiling in charge',
+  );
+  return 'chattering 202 hits 2000ms ceiling backstop (+1 cancel); 0 disables silence';
+}
+
 const SCENARIOS: Array<{ name: string; run: () => Promise<string> }> = [
   { name: 'P1', run: p1 },
   { name: 'P2', run: p2 },
@@ -588,6 +741,8 @@ const SCENARIOS: Array<{ name: string; run: () => Promise<string> }> = [
   { name: 'P5', run: p5 },
   { name: 'P6', run: p6 },
   { name: 'P7', run: p7 },
+  { name: 'P8', run: p8 },
+  { name: 'P9', run: p9 },
 ];
 
 const only = process.env['ONLY']
