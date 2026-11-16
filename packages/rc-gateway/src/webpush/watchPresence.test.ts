@@ -31,7 +31,7 @@ describe('WatchPresence', () => {
     const wp = new WatchPresence();
     wp.join('s1');
     wp.leave('s1');
-    wp.leave('s1'); // extra leave (double-disconnect) — must be a no-op
+    wp.leave('s1'); // extra leave (double-disconnect) - must be a no-op
     expect(wp.isWatched('s1')).toBe(false);
     wp.join('s2');
     expect(wp.isWatched('s2')).toBe(true);

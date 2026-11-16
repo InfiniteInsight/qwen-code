@@ -9,7 +9,7 @@ import type { DigestSummary } from './digest.js';
 
 /**
  * Metadata-only push payload. Deliberately carries NO tool args, file paths,
- * or prompt text — only enough to render a notification and deep-link back to
+ * or prompt text - only enough to render a notification and deep-link back to
  * the session. `url` carries no token; `summary` is capped at 140 chars.
  */
 export interface PushPayload {
@@ -104,7 +104,7 @@ export function buildPayload(
   const data = (event.data ?? {}) as Record<string, unknown>;
 
   // Agent lifecycle events (add-agent-observability). Metadata only: the
-  // agent's TASK TEXT never reaches a push payload — only type + status.
+  // agent's TASK TEXT never reaches a push payload - only type + status.
   const agentKind = AGENT_EVENT_KINDS[event.type];
   if (agentKind !== undefined) {
     const agentType =
@@ -142,7 +142,7 @@ export function buildPayload(
   }
 
   // Review lifecycle events (add-remote-review). Metadata only: no findings,
-  // no report content, and — unlike agent/workflow — NO target descriptor
+  // no report content, and - unlike agent/workflow - NO target descriptor
   // beyond a PR number (a `path` target is a filesystem path and, per the
   // PushPayload contract above, must never reach a push payload).
   const reviewKind = REVIEW_EVENT_KINDS[event.type];
@@ -234,7 +234,7 @@ export function buildPayload(
 
   // Turn endings (#40): the prompt route owns the turn lifecycle, so it emits
   // prompt_completed / prompt_failed when the daemon turn reaches a terminal
-  // point (success / timeout / daemon error). Metadata only — a stop reason
+  // point (success / timeout / daemon error). Metadata only - a stop reason
   // at most; reply text never reaches the payload.
   if (event.type === 'prompt_completed') {
     return {
@@ -270,7 +270,7 @@ export function buildPayload(
       const str = (v: unknown): string | undefined =>
         typeof v === 'string' && v.length > 0 ? v : undefined;
       // Real ACP permission frames carry only { toolCallId, title, kind,
-      // rawInput } — there is no `toolCall.name`, and no top-level
+      // rawInput } - there is no `toolCall.name`, and no top-level
       // `data.toolName`. Reading those was the same wire-mismatch that silently
       // broke the policy engine: the fields never exist, so the humanized
       // `title` was always what actually rendered. Use it directly.

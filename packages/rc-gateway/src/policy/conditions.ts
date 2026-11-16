@@ -8,7 +8,7 @@
  * Pure time-condition helpers for the policy evaluator. No I/O; all functions
  * read only their arguments (the clock is injected as `now`). A condition that
  * cannot be parsed returns `null` (timeOfDay) / `null` (expiresAt) so the
- * evaluator can classify it as `unevaluable` and apply the safety downgrade —
+ * evaluator can classify it as `unevaluable` and apply the safety downgrade -
  * we never auto-decide on a constraint we could not evaluate.
  */
 
@@ -20,7 +20,7 @@ export interface ParsedTimeOfDay {
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 
-/** Convert a validated "HH:MM" string to minutes-of-day (0–1439). */
+/** Convert a validated "HH:MM" string to minutes-of-day (0-1439). */
 function hhmmToMinutes(s: string): number {
   const h = Number(s.slice(0, 2));
   const m = Number(s.slice(3, 5));
@@ -75,7 +75,7 @@ export function parseTimeOfDay(raw: unknown): ParsedTimeOfDay | null {
 /**
  * True when `now`, projected into `p.timezone`, falls inside the window
  * (inclusive of both `from` and `to`). The window wraps midnight when
- * `fromMin > toMin` (e.g. 23:00–07:00 = the night window). Projection via
+ * `fromMin > toMin` (e.g. 23:00-07:00 = the night window). Projection via
  * `Intl.DateTimeFormat` handles DST correctly. The zone is already validated by
  * {@link parseTimeOfDay}, so the try/catch here is defensive only; on the
  * (unreachable) throw we conservatively return false.
@@ -92,7 +92,7 @@ export function isWithinTimeOfDay(p: ParsedTimeOfDay, now: Date): boolean {
     }).formatToParts(now);
     const hourPart = parts.find((x) => x.type === 'hour')?.value ?? '0';
     const minutePart = parts.find((x) => x.type === 'minute')?.value ?? '0';
-    // Some environments emit "24" for midnight under hour12:false — normalize.
+    // Some environments emit "24" for midnight under hour12:false - normalize.
     h = hourPart === '24' ? 0 : Number(hourPart);
     min = Number(minutePart);
   } catch {

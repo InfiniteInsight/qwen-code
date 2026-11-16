@@ -33,7 +33,7 @@ interface SseFrame {
   data: unknown;
 }
 
-/** Poll `cond` every 10ms until true or the deadline — the only async
+/** Poll `cond` every 10ms until true or the deadline - the only async
  * synchronization primitive this test uses (audit rows are fire-and-forget,
  * so they can only be observed by polling). */
 function waitFor(cond: () => boolean, timeoutMs = 10_000): Promise<void> {
@@ -132,7 +132,7 @@ describe('mid-turn recovery integration', () => {
 
   beforeEach(async () => {
     runtimeBase = await mkdtemp(join(tmpdir(), 'rc-recovery-integ-'));
-    // The create route stats `cwd` — it must be a REAL directory.
+    // The create route stats `cwd` - it must be a REAL directory.
     workspaceCwd = join(runtimeBase, 'ws');
     await mkdir(workspaceCwd);
     walDir = join(runtimeBase, 'wal-root');
@@ -258,7 +258,7 @@ describe('mid-turn recovery integration', () => {
 
     // 3. Fire a prompt (NOT awaited): the gateway holds the per-session
     //    queue slot for its whole flight, and the (crash-bound) stub
-    //    holds it for 5s — the turn is in flight at the moment of death.
+    //    holds it for 5s - the turn is in flight at the moment of death.
     const promptPromise = fetch(`${baseUrl}/session/${SID}/prompt`, {
       method: 'POST',
       headers: { ...auth, 'Content-Type': 'application/json' },
@@ -267,8 +267,8 @@ describe('mid-turn recovery integration', () => {
     await waitFor(() => stubs[0]!.lastPromptBody !== undefined);
 
     // 4. Hard crash: closeAllConnections() destroys the SSE + prompt
-    //    sockets, then the synthetic exit fires SYNCHRONOUSLY — before the
-    //    prompt route's socket error can release the queue slot — so the
+    //    sockets, then the synthetic exit fires SYNCHRONOUSLY - before the
+    //    prompt route's socket error can release the queue slot - so the
     //    saga's inFlight snapshot deterministically sees the turn in
     //    flight.
     const crashP = stubs[0]!.crash();
@@ -384,7 +384,7 @@ describe('mid-turn recovery integration', () => {
 
     // 9. Reconnect with Last-Event-ID 0: the WAL replays 1-4 UNrenumbered,
     //    then the respawned daemon's raw frames 1,2 re-anchor onto the
-    //    shared WAL and stream as 5,6 — the observer sees 1..6 with no
+    //    shared WAL and stream as 5,6 - the observer sees 1..6 with no
     //    gaps or duplicates.
     const ac = new AbortController();
     const reconnectFrames: SseFrame[] = [];

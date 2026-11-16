@@ -15,7 +15,7 @@ import {
   tracksReactions,
 } from './render.js';
 
-describe('matrix render — sub-actor identity', () => {
+describe('matrix render - sub-actor identity', () => {
   it('carries the fully-qualified MXID verbatim (never stripped)', () => {
     expect(subActorOf('@alice:home.example.com')).toBe(
       'matrix:@alice:home.example.com',
@@ -27,7 +27,7 @@ describe('matrix render — sub-actor identity', () => {
   });
 });
 
-describe('matrix render — reaction key → vote', () => {
+describe('matrix render - reaction key → vote', () => {
   it('maps plain 👍/👎 to approve/deny', () => {
     expect(voteForReaction('\u{1F44D}')).toBe('approve');
     expect(voteForReaction('\u{1F44E}')).toBe('deny');
@@ -60,7 +60,7 @@ describe('matrix render — reaction key → vote', () => {
   });
 });
 
-describe('matrix render — permission_request (inline)', () => {
+describe('matrix render - permission_request (inline)', () => {
   it('renders argsSummaryShort + the reaction instruction', () => {
     const msg = renderPermissionRequest(
       {
@@ -90,7 +90,7 @@ describe('matrix render — permission_request (inline)', () => {
   });
 });
 
-describe('matrix render — permission_request (deeplink)', () => {
+describe('matrix render - permission_request (deeplink)', () => {
   it('renders a web-client URL, OMITS the reaction prompt and argsSummaryFull', () => {
     const full = 'SECRET-FULL-' + 'z'.repeat(800);
     const msg = renderPermissionRequest(
@@ -119,7 +119,7 @@ describe('matrix render — permission_request (deeplink)', () => {
   });
 });
 
-describe('matrix render — resolve edit (m.replace)', () => {
+describe('matrix render - resolve edit (m.replace)', () => {
   it('builds a NEW event with m.new_content + an m.replace relation', () => {
     const edit = renderResolveEdit(
       '⚠️ Tool call: Edit auth.ts',

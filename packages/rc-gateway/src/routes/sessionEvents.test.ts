@@ -37,7 +37,7 @@ import {
 } from '../walEpoch.js';
 import { WatchPresence } from '../webpush/watchPresence.js';
 
-// Valid session-id shapes (isValidSessionId: 32-36 hex/dash chars) — these
+// Valid session-id shapes (isValidSessionId: 32-36 hex/dash chars) - these
 // fixtures previously used arbitrary strings like 'sess-1', which the route's
 // new session-id validation now rejects before any WAL/daemon access.
 // Distinct per test group to avoid walRegistry singleton collisions.
@@ -75,7 +75,7 @@ async function mountGateway(
       undefined,
       walDir,
       undefined,
-      undefined, // watchPresence (7th param since #40 — no presence in these tests)
+      undefined, // watchPresence (7th param since #40 - no presence in these tests)
       idleAttachMs,
       recoveryAttachMs,
     ),
@@ -166,7 +166,7 @@ describe('session-events proxy', () => {
     const frames = await readFrames(res);
     const tick = frames.find((f) => f.data.includes('usage_tick'));
     expect(tick).toBeDefined();
-    expect(tick!.id).toBeUndefined(); // synthetic — must not advance the cursor
+    expect(tick!.id).toBeUndefined(); // synthetic - must not advance the cursor
     expect(tick!.data).toContain('"costMicrocentsSesTotal":15');
   });
 
@@ -318,7 +318,7 @@ describe('session-events proxy', () => {
 
   it('maps a daemon 404 to session_not_found, not the retryable 502', async () => {
     // #59: a gone session surfaced as 502, which the watcher treats as
-    // recoverable — so clients re-subscribed to a dead id indefinitely
+    // recoverable - so clients re-subscribed to a dead id indefinitely
     // (9.4k 404s/hour on the live gateway after a restart).
     stub = await startStubDaemon({ eventsStatus: 404 });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
@@ -330,7 +330,7 @@ describe('session-events proxy', () => {
 
   it('maps UnknownSessionError (pool has no record of the id) to 404 too', async () => {
     // The pool rejects before any daemon call, and its error text is
-    // "Unknown session: <id>" — no 404 status and no "not found" substring,
+    // "Unknown session: <id>" - no 404 status and no "not found" substring,
     // so only the class check catches it.
     const gone = {
       subscribeEvents: () => ({
@@ -357,7 +357,7 @@ describe('session-events proxy', () => {
 
   it('sends headers + client_joined promptly for a reachable-but-idle session', async () => {
     // Regression: a freshly-created session (e.g. via "New conversation") emits
-    // no frame — the daemon holds the stream open with only `retry:`. The
+    // no frame - the daemon holds the stream open with only `retry:`. The
     // watcher must NOT hang at "connecting"; headers arrive after the idle
     // grace, so the composer opens. (Old code gated 200 on the first frame and
     // hung until the daemon stream ended.)
@@ -488,7 +488,7 @@ describe('session-events presence frames', () => {
     expect(first).toBeDefined();
     const parsed = JSON.parse(first!.data);
     expect(parsed.type).toBe('client_joined');
-    expect(first!.id).toBeUndefined(); // synthetic — no id
+    expect(first!.id).toBeUndefined(); // synthetic - no id
     expect(typeof parsed.data.attachedAt).toBe('string');
   });
 
@@ -675,7 +675,7 @@ describe('session-events id validation', () => {
   // Defense-in-depth (latent hardening, not a live exploit): the prod mount
   // always passes walDir: undefined today, so this path is currently
   // unreachable, but getWal/SessionWal join req.params.id straight into a
-  // file path with no isValidSessionId() check — the same guard every
+  // file path with no isValidSessionId() check - the same guard every
   // sibling session route (fork.ts, rewind.ts, lineage.ts, idleToggle.ts)
   // applies. Wiring walDir in a future deploy would otherwise reopen a path
   // traversal at that join.
@@ -692,7 +692,7 @@ describe('session-events id validation', () => {
     expect(res.status).toBe(404);
     const body = (await res.json()) as { code: string };
     expect(body.code).toBe('session_not_found');
-    // The daemon was never reached — rejected before any subscribeEvents call.
+    // The daemon was never reached - rejected before any subscribeEvents call.
     expect(stub.lastEventIdHeader).toBeUndefined();
   });
 
@@ -710,7 +710,7 @@ describe('session-events id validation', () => {
 describe('session-events recovery-pending attach (add-mid-turn-recovery §3)', () => {
   // The fakes attach a `recoveryState` probe to a real DaemonClient (Object
   //.assign keeps the prototype methods the route delegates to). Without the
-  // probe the route must behave exactly as before — covered by every test
+  // probe the route must behave exactly as before - covered by every test
   // above (plain DaemonClient, no recoveryState).
 
   it('holds a recovering session until the saga settles, then attaches normally', async () => {
@@ -744,7 +744,7 @@ describe('session-events recovery-pending attach (add-mid-turn-recovery §3)', (
   });
 
   it('502s daemon_unavailable when the recovery hold times out', async () => {
-    // The stub is fully healthy — if the hold ever lapsed into a live attach
+    // The stub is fully healthy - if the hold ever lapsed into a live attach
     // this would 200. It must not.
     stub = await startStubDaemon({ frames: [], holdOpenMs: 5000 });
     const client = new DaemonClient({ baseUrl: stub.baseUrl });
@@ -866,7 +866,7 @@ describe('session-events id continuity / epoch renumbering (add-mid-turn-recover
     expect(res1.status).toBe(200);
     await readFrames(res1); // WAL now holds ids 1,2.
 
-    // A recovery marker lands out-of-band through the shared WAL instance —
+    // A recovery marker lands out-of-band through the shared WAL instance -
     // the same one the relay anchors to (Phase 3.2's reportOutcome seam).
     const shared = getSharedWal(walDir, sessionId);
     shared.append({

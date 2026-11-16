@@ -13,7 +13,7 @@
  * Like {@link SearchIndex}, this is a NATIVE `better-sqlite3` consumer; the daemon
  * loads it dynamically so a missing native build disables cost tracking rather
  * than breaking the gateway (mirrors the search-index isolation). A NULL
- * `cost_microcents` records an unpriced (rate-table-miss) row — visibly unpriced.
+ * `cost_microcents` records an unpriced (rate-table-miss) row - visibly unpriced.
  *
  * Costs are stored as INTEGER microcents (1 cent = 1 000 000 microcents) to avoid
  * floating-point accumulation errors and allow exact integer arithmetic at write
@@ -112,7 +112,7 @@ const GROUP_COLUMN: Record<GroupBy, string> = {
  * `cost_microcents INTEGER` (see the header note: integers avoid float drift
  * when summing millions of rows). `CREATE TABLE IF NOT EXISTS` does nothing to
  * a table that already exists, so every gateway whose DB predates the rename
- * kept the old column — and every `/rc/usage` request failed outright with
+ * kept the old column - and every `/rc/usage` request failed outright with
  * `SqliteError: no such column: cost_microcents`. The cost surface was dead on
  * exactly the long-lived installs that had usage worth reading.
  *

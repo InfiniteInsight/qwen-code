@@ -21,7 +21,7 @@ const VALID_KINDS = ['user', 'assistant', 'tool', 'all'] as const;
  * prebuilt FTS5 index, or `null` when ranking is UNAVAILABLE (native dep absent,
  * no workspace, or an empty/never-built index) so the route transparently falls
  * back to the live scan. Injected (never statically imported here) so the route
- * module — and the gateway's static graph — never pulls in the native
+ * module - and the gateway's static graph - never pulls in the native
  * better-sqlite3; the provider does the lazy dynamic import itself.
  */
 export type RankedSearch = (
@@ -40,10 +40,10 @@ export type RankedSearch = (
 const SEARCH_TIMEOUT_MS = 2000;
 
 /**
- * GET /rc/search — full-text search over the workspace's on-disk JSONL session
+ * GET /rc/search - full-text search over the workspace's on-disk JSONL session
  * transcripts. Mounted under requireScope(SESSION_READ); the per-caller
  * authorization is in-handler (cycle 76):
- *   - a session-locked SHARE token searches ONLY its locked session — sessionId
+ *   - a session-locked SHARE token searches ONLY its locked session - sessionId
  *     is FORCED from req.rcClient.sessionLockId, NEVER read from ?sessionId (the
  *     cycle-18 cross-session leak class);
  *   - any other caller needs OWNER (in-handler) for an unrestricted search;
@@ -51,7 +51,7 @@ const SEARCH_TIMEOUT_MS = 2000;
  *
  * `resolveDir` yields the chats dir for the current workspace (or undefined
  * when there is no workspace / the daemon errored → 200 {hits:[]}). The audit
- * entry carries ONLY { kind, resultCount } — NEVER the query text, which may
+ * entry carries ONLY { kind, resultCount } - NEVER the query text, which may
  * contain sensitive terms. No filesystem path is ever built from q/kind/
  * sessionId.
  */
@@ -81,7 +81,7 @@ export function createSearchRoute(
       // Defense-in-depth: a BLANK lock must never fall through to an unfiltered
       // full-workspace search (the scanner treats sessionId='' as "no filter").
       // Share creation rejects an empty sessionId so this is unreachable today,
-      // but the handler must not depend on that external invariant — deny it.
+      // but the handler must not depend on that external invariant - deny it.
       if (lock === '') {
         void audit?.record({
           action: 'scope_denied',
@@ -124,7 +124,7 @@ export function createSearchRoute(
     }
     // Bounds parse/tree cost (the per-query scan timeout is a separate, still
     // deferred guard). 1024 chars per the design's threat table. NOTE: this cap
-    // ALSO bounds parser recursion depth — `parseQuery` recurses ~3 frames per
+    // ALSO bounds parser recursion depth - `parseQuery` recurses ~3 frames per
     // `(`, and V8 overflows the stack at ~2124 nested parens, so 1024 chars
     // keeps a ~2x safety margin. Do NOT raise this above ~2000 without first
     // making the parser iterative or adding a depth guard in query.ts.
@@ -180,7 +180,7 @@ export function createSearchRoute(
     }
 
     // Opt-in BM25 ranked mode (search slice 2): ?rank=bm25. Effective `mode` in
-    // the response reflects what actually RAN — a requested rank that is
+    // the response reflects what actually RAN - a requested rank that is
     // unavailable transparently falls back to the scan and reports mode:'scan'.
     const wantRank = req.query.rank === 'bm25';
 
@@ -207,7 +207,7 @@ export function createSearchRoute(
 
     // BM25 ranked attempt (opt-in). Best-effort: a provider that returns null
     // (unavailable / empty index) or throws transparently falls back to the
-    // scan below — ranked search must never turn an answerable query into an
+    // scan below - ranked search must never turn an answerable query into an
     // error. NOTE: better-sqlite3 is synchronous, so a ranked query briefly
     // blocks the event loop; acceptable for the single-owner localhost gateway
     // (a worker-thread offload is the documented future path if a very large
@@ -271,7 +271,7 @@ export function createSearchRoute(
             actorTokenId: req.rcClient?.id,
             shareId: req.rcClient?.shareId,
             shareLabel: req.rcClient?.shareLabel,
-            // Privacy: kind + timeout flag only — never the query text or count.
+            // Privacy: kind + timeout flag only - never the query text or count.
             detail: {
               kind,
               timedOut: true,
@@ -299,7 +299,7 @@ export function createSearchRoute(
       actorTokenId: req.rcClient?.id,
       shareId: req.rcClient?.shareId,
       shareLabel: req.rcClient?.shareLabel,
-      // Privacy: count + kind only — never the query text. timing is not audited.
+      // Privacy: count + kind only - never the query text. timing is not audited.
       // `rank` is recorded ONLY on a successful bm25 run, so the scan path's
       // detail stays byte-identical to before.
       detail: {

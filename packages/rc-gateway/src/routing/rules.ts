@@ -26,7 +26,7 @@ export interface RoutingRuleMatch {
   /**
    * Per-subscription (cycle 33): the subscription's owning-token scope(s). A
    * rule matches a subscription when its token holds AT LEAST ONE listed scope.
-   * Exact string membership (scopes are a closed enum) — NOT a glob.
+   * Exact string membership (scopes are a closed enum) - NOT a glob.
    */
   scopeIn?: string | string[];
   /**
@@ -36,7 +36,7 @@ export interface RoutingRuleMatch {
   tokenIdsIn?: string | string[];
   /**
    * Event-global (cycle 96): matches when the event's URGENCY (derived from its
-   * kind — see {@link urgencyOf}) is at least this level. One of
+   * kind - see {@link urgencyOf}) is at least this level. One of
    * 'low' | 'medium' | 'high'. e.g. `urgencyAtLeast: high` matches only
    * action-required events (permission.required); a `drop` rule using it sheds
    * exactly that band. Derivable from `kind` alone, so it needs no event content.
@@ -194,7 +194,7 @@ export interface RoutingMatcher {
    * The id of the first EVENT-GLOBAL `drop` rule matching this event, or `null`
    * when none matches. An unnamed matching rule reports `'<unnamed>'`. Rules
    * carrying a per-subscription field (`scopeIn`/`tokenIdsIn`) are EXCLUDED here
-   * by construction — they can never suppress the whole fan-out.
+   * by construction - they can never suppress the whole fan-out.
    */
   firstDrop(
     ev: RoutingEvent | { kind: string; sessionName?: string },
@@ -527,8 +527,8 @@ export function mergeRoutingConfigs(
 
 /**
  * Load one routing file FAIL-OPEN: a missing file (ENOENT) yields `null`, and
- * ANY other failure — a {@link RoutingError} (malformed schema), a YAML parse
- * error, or an fs error like EACCES/EISDIR — is logged via `warn` and ALSO
+ * ANY other failure - a {@link RoutingError} (malformed schema), a YAML parse
+ * error, or an fs error like EACCES/EISDIR - is logged via `warn` and ALSO
  * yields `null`. Routing only suppresses, so the safe default on misconfig is
  * more notifications, never a missed prompt. This broad catch is what makes the
  * function (and its caller) never throw.
@@ -576,7 +576,7 @@ async function loadBothRoutingLayers(
 /**
  * Load the user-level routing file and, when a workspace cwd is given, the
  * workspace override `<workspaceCwd>/.qwen/routing.yaml`, merge them (workspace
- * rules PREPENDED — design D1), and compile a single {@link RoutingMatcher}.
+ * rules PREPENDED - design D1), and compile a single {@link RoutingMatcher}.
  *
  * Per-file FAIL-OPEN + NEVER-THROW (design D4): each layer is loaded
  * independently; a malformed file at either layer is logged and ignored while
@@ -606,7 +606,7 @@ export async function loadLayeredRoutingMatcher(
  * file at EITHER layer THROWS ({@link RoutingError}/YAML/fs error) instead of
  * being logged-and-ignored. A reload must RETAIN the previously-compiled ruleset
  * on a parse error (spec: "Parse failure preserves prior rules" + emits
- * `routing_reload_failed`) — silently dropping a bad layer would instead WIDEN
+ * `routing_reload_failed`) - silently dropping a bad layer would instead WIDEN
  * the fan-out (fewer drops) on a half-typed save, the opposite of the spec. A
  * MISSING file (ENOENT) at either layer is NOT an error: it resolves to no rules
  * for that layer (an intended removal), matching the boot loader. Returns
@@ -649,7 +649,7 @@ export interface ResolvedRoutingRule {
 /**
  * The effective (merged) routing ruleset for the `routing rules` inspector:
  * workspace rules FIRST (each tagged with the workspace file path), then user
- * rules (tagged with the user file path) — mirroring cycle-36's prepend and the
+ * rules (tagged with the user file path) - mirroring cycle-36's prepend and the
  * spec's "workspace first" ordering. `workspaceCwd` undefined → user rules only.
  * Per-file FAIL-OPEN (a malformed layer is logged + omitted); never throws.
  */
@@ -687,7 +687,7 @@ function fmtSpec(spec: string | string[]): string {
 
 /**
  * Render the resolved ruleset as one line per rule (source path, id, a compact
- * match summary — `any` when the match is empty — and the drop flag). An empty
+ * match summary - `any` when the match is empty - and the drop flag). An empty
  * ruleset renders `(no routing rules)`. Pure, no I/O.
  */
 export function formatResolvedRouting(rules: ResolvedRoutingRule[]): string {
@@ -746,7 +746,7 @@ function matchSessionTag(
 
 /**
  * A present `scopeIn` requires the subscription's token to hold AT LEAST ONE
- * listed scope (exact membership; an empty list matches nobody — see D5).
+ * listed scope (exact membership; an empty list matches nobody - see D5).
  */
 function matchScopeIn(
   spec: string | string[] | undefined,
@@ -791,7 +791,7 @@ function hasPerSubMatch(r: RoutingRule): boolean {
  * wins. Drop rules are PARTITIONED: those with no per-subscription field
  * participate in the event-global {@link RoutingMatcher.firstDrop} pass; those
  * carrying `scopeIn`/`tokenIdsIn` participate ONLY in the per-subscription
- * {@link RoutingMatcher.firstDropForSubscription} pass — so a per-subscription
+ * {@link RoutingMatcher.firstDropForSubscription} pass - so a per-subscription
  * rule can never suppress the whole fan-out.
  */
 export function compileRouting(config: RoutingConfig): RoutingMatcher {
@@ -823,7 +823,7 @@ export function compileRouting(config: RoutingConfig): RoutingMatcher {
       for (const r of globalDropRules) {
         if (matchEventFields(r, richEv)) {
           // `||` not `??`: a non-null return signals "matched", and the notifier
-          // gates on truthiness — an empty-string id (`id: ""`) must still
+          // gates on truthiness - an empty-string id (`id: ""`) must still
           // suppress, reported under the '<unnamed>' label.
           return r.id || '<unnamed>';
         }

@@ -8,7 +8,7 @@
  * Bridge an {@link AcmeManager}'s rotating cert to a long-lived `https` server. The
  * server is created with an `SNICallback` that returns the CURRENT secure context;
  * a renewal calls {@link LiveTlsContext.update} (wired to the manager's `onChange`)
- * so the new cert is served on the next handshake — no restart, no dropped
+ * so the new cert is served on the next handshake - no restart, no dropped
  * connections. The callback must read the live context per handshake (not capture
  * one at boot), which is exactly what this indirection guarantees.
  */

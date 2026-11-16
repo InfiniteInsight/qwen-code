@@ -7,7 +7,7 @@
 /**
  * The multi-daemon registry (`add-multi-workspace-client`: "Daemons registry
  * file" + "Registry CLI"). Persists the operator's list of remote-control
- * daemons to `~/.qwen/rc/clients.toml` as a `[[daemon]]` array-of-tables —
+ * daemons to `~/.qwen/rc/clients.toml` as a `[[daemon]]` array-of-tables -
  * the exact shape the daemon-side `GET /ui/clients-manifest.json` route reads
  * (see routes/clientsManifest.ts).
  *

@@ -46,7 +46,7 @@ function payloadOf(run: WorkflowRun): WorkflowEventPayload {
   };
 }
 
-/** POST /rc/workflows — start a run (WRITE scope at the mount). */
+/** POST /rc/workflows - start a run (WRITE scope at the mount). */
 export function createStartWorkflowRoute(
   deps: WorkflowRoutesDeps,
 ): RequestHandler {
@@ -79,7 +79,7 @@ export function createStartWorkflowRoute(
     // Resolve source: inline script or named workflow. The named path goes
     // through the SAME guarded resolver the CLI tool uses (deps.resolveNamed →
     // core resolveNamedWorkflow), so a traversal `name` is refused before any
-    // file is read — surfaced here as a 400.
+    // file is read - surfaced here as a 400.
     let source: string | undefined;
     if (typeof body.script === 'string') source = body.script;
     else if (typeof body.name === 'string' && deps.resolveNamed) {
@@ -137,7 +137,7 @@ export function createStartWorkflowRoute(
       actorTokenId: req.rcClient?.id,
       subActor: req.rcClient?.subActor,
       target: run.runId,
-      // name + hash only — NEVER the script source.
+      // name + hash only - NEVER the script source.
       detail: { name: parsed.meta.name, scriptHash: parsed.scriptHash },
     });
 
@@ -197,17 +197,17 @@ function finish(
 }
 
 /**
- * GET /rc/workflows — list (SESSION_READ scope at the mount, which admits a
+ * GET /rc/workflows - list (SESSION_READ scope at the mount, which admits a
  * session-locked SHARE token). add-link-share: a session-locked token gets
- * `read` on `session_lock_id` ONLY and SHALL NOT access other sessions — this
+ * `read` on `session_lock_id` ONLY and SHALL NOT access other sessions - this
  * is a workspace-wide list, so a locked caller is confined here, in-handler
  * (mirroring routes/search.ts's `req.rcClient.sessionLockId` confinement), to
  * runs tied to its one session. A workflow run has no single `sessionId` of
- * its own — it fans out to per-phase agent sessions — so the tie is "one of
+ * its own - it fans out to per-phase agent sessions - so the tie is "one of
  * this run's agents backs the locked session" (`run.agents[].sessionId`).
  * Fail-closed: a run with no agents yet (no determinable session tie) is
  * excluded for a locked caller. A non-locked (owner/write) token is
- * unaffected — full list, as before.
+ * unaffected - full list, as before.
  */
 export function createListWorkflowsRoute(
   deps: WorkflowRoutesDeps,
@@ -235,15 +235,15 @@ export function createListWorkflowsRoute(
 }
 
 /**
- * GET /rc/workflows/:runId — detail incl. the per-agent session map.
+ * GET /rc/workflows/:runId - detail incl. the per-agent session map.
  * SESSION_READ scope at the mount, which admits a session-locked SHARE token.
  * Mirrors createListWorkflowsRoute's confinement: a locked caller may only
  * fetch a run that has at least one agent backing the locked session
- * (`run.agents[].sessionId`) — fail-closed, so a run with no agents yet is
- * not visible to a locked token. A run that fails the tie is reported 404 —
- * the SAME shape as a missing runId — so a locked token cannot distinguish
+ * (`run.agents[].sessionId`) - fail-closed, so a run with no agents yet is
+ * not visible to a locked token. A run that fails the tie is reported 404 -
+ * the SAME shape as a missing runId - so a locked token cannot distinguish
  * "exists in another session" from "doesn't exist". A non-locked (owner/
- * write) token is unaffected — full access, as before.
+ * write) token is unaffected - full access, as before.
  */
 export function createGetWorkflowRoute(
   deps: WorkflowRoutesDeps,
@@ -278,7 +278,7 @@ export function createGetWorkflowRoute(
   };
 }
 
-/** POST /rc/workflows/:runId/cancel — abort (WRITE scope). */
+/** POST /rc/workflows/:runId/cancel - abort (WRITE scope). */
 export function createCancelWorkflowRoute(
   deps: WorkflowRoutesDeps,
 ): RequestHandler {
@@ -287,7 +287,7 @@ export function createCancelWorkflowRoute(
     // Atomic terminal-guarded transition: two concurrent cancels (or a cancel
     // repeated within the drain window before the background finish() runs)
     // can both pass a plain isTerminal() pre-check. beginCancel is the single
-    // source of truth for "who won" — only the caller whose running->cancelling
+    // source of truth for "who won" - only the caller whose running->cancelling
     // CAS actually landed aborts/audits/emits; every other caller (already
     // cancelling, already terminal, or unknown run) gets 409, matching the
     // agentRegistry.setStatus CAS pattern used for agent cancel.

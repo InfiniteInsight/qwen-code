@@ -10,7 +10,7 @@ import type { SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 
 /**
- * POST /session/:id/subagents/:subagentRef/cancel — stop ONE running subagent
+ * POST /session/:id/subagents/:subagentRef/cancel - stop ONE running subagent
  * while leaving the parent turn alive.
  *
  * This is the gap the route exists to close: before it, the only way to stop a
@@ -21,8 +21,8 @@ import type { AuditRecorder } from '../auditLog.js';
  * `subagentRef` is the PARENT transcript's tool-call id, not a session id (the
  * daemon matches it against `task.toolUseId`). The page already holds it as
  * `_meta.parentToolCallId`, so no new identifier is introduced here. It is not
- * path-joined by this process — the SDK url-encodes it into the daemon URL and
- * the daemon bounds its length — so there is no local traversal surface to
+ * path-joined by this process - the SDK url-encodes it into the daemon URL and
+ * the daemon bounds its length - so there is no local traversal surface to
  * guard and no duplicate length check to drift from the daemon's own.
  *
  * A 404 is answered as a 404. Flattening "no such subagent" into a 502 would

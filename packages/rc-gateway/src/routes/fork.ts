@@ -35,7 +35,7 @@ import { getSharedWal } from '../wal.js';
 import { activeBranch } from './activeBranch.js';
 
 /** The daemon surface this route needs: `loadSession` (restore the freshly
- * written fork as a live session) plus `resumeSession` — the pool-ownership
+ * written fork as a live session) plus `resumeSession` - the pool-ownership
  * ensure, so under `DaemonPool` the new fork id is routed to the workspace
  * daemon that owns the parent before the restore call. */
 type ForkDaemon = Pick<DaemonClient, 'loadSession' | 'resumeSession'> & {
@@ -69,19 +69,19 @@ export interface ForkRouteDeps {
 }
 
 /**
- * POST /session/:id/fork — fork a settled session into a brand-new
+ * POST /session/:id/fork - fork a settled session into a brand-new
  * daemon-hosted session that inherits the parent's full on-disk transcript.
  *
  * Replicates core `SessionService.forkSession` from OUTSIDE the daemon: read
  * the parent's JSONL at the derived chats path, rewrite each record's
  * `sessionId`/`parentUuid`-chain/`forkedFrom`, write a new `<newId>.jsonl`
  * exclusively, then drive the daemon's public `loadSession(newId)` (via the
- * SDK) so it restores the fork as a live, listable session — exactly what the
+ * SDK) so it restores the fork as a live, listable session - exactly what the
  * core `/branch` TUI command does internally.
  *
  * The parent lives in the chats dir of the workspace it was run in, which may
  * differ from the gateway's boot workspace. Candidate cwds (request-supplied
- * `cwd` — always flattened through `sanitizeCwd`, never a raw path — then the
+ * `cwd` - always flattened through `sanitizeCwd`, never a raw path - then the
  * trusted `resolveWorkspaceCwd()` result) are tried in order; when both miss,
  * a bounded project-dir scan (`findSessionChatsDir`) locates the transcript
  * with the workspace left unknown. Supported transcript modes:
@@ -112,7 +112,7 @@ export function createForkRoute(
       await handleFork(req, res);
     } catch {
       // No global Express error middleware is mounted, and Express 4 does not
-      // catch rejections from async handlers — an uncaught throw here (e.g. an
+      // catch rejections from async handlers - an uncaught throw here (e.g. an
       // EACCES/ENOTDIR from reading the parent or writing the fork) would
       // otherwise hang the request until socket timeout. Map any unexpected
       // failure to a clean 500. Guard against a double-send in case a response
@@ -195,7 +195,7 @@ export function createForkRoute(
     // 3. Locate the parent transcript. The session file lives in the chats dir
     //    of the workspace the session ran in, which may differ from the
     //    gateway's boot workspace. Candidate cwds: the request-supplied cwd
-    //    (flattened through sanitizeCwd — never a raw path), then the trusted
+    //    (flattened through sanitizeCwd - never a raw path), then the trusted
     //    workspace cwd; a bounded project-dir scan is the last resort. The
     //    cwd of the FIRST candidate that hits is remembered as workspaceCwd so
     //    the step-6 restore can route the pool to the owning workspace daemon;
@@ -318,7 +318,7 @@ export function createForkRoute(
 
     const forkedAt = now().toISOString();
 
-    // Build the fork header — the very first JSONL line of the fork transcript.
+    // Build the fork header - the very first JSONL line of the fork transcript.
     const forkHeader = {
       ...buildForkHeader({
         parentSessionId: parentId,
@@ -369,7 +369,7 @@ export function createForkRoute(
     //    registers the new id with the pool (a fresh id has no owner, so the
     //    session-keyed `loadSession` is unroutable under a DaemonPool); the
     //    in-band replay payload is discarded. When the workspace is unknown
-    //    (scan hit), fall back to the plain `loadSession` — unroutable under
+    //    (scan hit), fall back to the plain `loadSession` - unroutable under
     //    a pool, which rolls back below. On ANY failure: roll back the
     //    just-written file; pool-full -> 503, everything else -> 502.
     let restored:
@@ -528,7 +528,7 @@ export function createForkRoute(
       });
     }
 
-    // 8. Audit ids + count only — never transcript content.
+    // 8. Audit ids + count only - never transcript content.
     void audit?.record({
       action: 'session_forked',
       actorTokenId: req.rcClient?.id,

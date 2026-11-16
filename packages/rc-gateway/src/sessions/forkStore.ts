@@ -11,7 +11,7 @@ import type { ForkRecord } from './forkTranscript.js';
 /**
  * Thrown by {@link writeFork} when the target session file already exists. The
  * exclusive (`wx`) create both asserts non-existence and opens for writing in
- * one syscall, so we never clobber an existing session — the route maps this to
+ * one syscall, so we never clobber an existing session - the route maps this to
  * a 500 (`fork_conflict`).
  */
 export class ForkExistsError extends Error {
@@ -84,7 +84,7 @@ export async function writeFork(
 }
 
 /**
- * Best-effort unlink of `<chatsDir>/<newId>.jsonl`. Swallows all errors — used
+ * Best-effort unlink of `<chatsDir>/<newId>.jsonl`. Swallows all errors - used
  * to roll back a just-written fork when the daemon's `loadSession` rejects.
  */
 export async function removeFork(

@@ -33,7 +33,7 @@ const REVIEW_STATUSES: readonly ReviewStatus[] = [
 /**
  * Dependencies for the review control-plane routes (D.2 trigger; D.3 reuses
  * this shape for list/detail/cancel). The `bridge` and `lifecycle` are
- * constructed by the boot wiring (server.ts) and injected here — the trigger
+ * constructed by the boot wiring (server.ts) and injected here - the trigger
  * saga OWNS neither, it only drives `open`/`close` and lifecycle emits.
  */
 export interface ReviewRoutesDeps {
@@ -45,7 +45,7 @@ export interface ReviewRoutesDeps {
   /** Read-time cost rollup keyed by sessionId (used by D.3 list/detail). */
   costFor?: (sessionId: string) => number | undefined;
   /**
-   * Per-session FIFO serialiser for daemon.prompt() calls — SHARED with the
+   * Per-session FIFO serialiser for daemon.prompt() calls - SHARED with the
    * prompt/agent routes so a review's `/review` prompt never races another
    * turn on the same session. Injected by tests; defaults to a module-local
    * shared queue.
@@ -100,14 +100,14 @@ function sendSerializedPrompt(
 /**
  * Parse the wire `target` (`{pr:number}` | `{path:string}` | `{local:true}`,
  * default local when absent) into a `ReviewTarget`. Returns `null` for any
- * malformed shape — a `pr` MUST be a positive integer, a `path` a non-empty
- * string — so the caller can 400 `invalid_target`. Fail-closed: anything that
+ * malformed shape - a `pr` MUST be a positive integer, a `path` a non-empty
+ * string - so the caller can 400 `invalid_target`. Fail-closed: anything that
  * is not exactly one of the three sanctioned shapes is rejected.
  *
  * SECURITY-CRITICAL path sanitization: `targetToPrompt` concatenates `path`
  * directly after `/review ` as a command argument, so a `path` that is
  * flag-shaped (`--comment`) or multi-token (`42 --comment`, or one carrying a
- * newline) would smuggle an owner-gated flag — or arbitrary prompt text — past
+ * newline) would smuggle an owner-gated flag - or arbitrary prompt text - past
  * the owner-scope gate on a WRITE-only token. A flag/multi-token path is
  * INDISTINGUISHABLE from a real flag once it lands as an argument, so we reject
  * any `path` that begins with `-` or contains ANY whitespace/newline character.
@@ -155,16 +155,16 @@ export function targetToPrompt(
   const flag = comment ? ' --comment' : '';
   const suffix = autofix
     ? ''
-    : '\n\nReport only — do not apply autofixes (skip the autofix step).';
+    : '\n\nReport only - do not apply autofixes (skip the autofix step).';
   return base + flag + suffix;
 }
 
 /**
- * POST /rc/reviews — the trigger saga. SECURITY-CRITICAL: enforces the
+ * POST /rc/reviews - the trigger saga. SECURITY-CRITICAL: enforces the
  * owner-scope gate (privileged flags require OWNER), the pre-flight skill
  * guard, and wires the per-review permission bridge. Every failure leg after
  * session creation best-effort ends the session and closes the bridge if it
- * was opened — no zombie sessions, no half-registered reviews. WRITE scope is
+ * was opened - no zombie sessions, no half-registered reviews. WRITE scope is
  * enforced at the mount; the OWNER gate below is the escalation for privileged
  * flags.
  */
@@ -191,14 +191,14 @@ export function createTriggerReviewRoute(
     const autoApprove = body.autoApprove === true;
 
     // Saga leg 2: owner-scope gate. Any privileged flag (comment/autofix/
-    // autoApprove) demands OWNER — a WRITE token may only run a plain
+    // autoApprove) demands OWNER - a WRITE token may only run a plain
     // (vote-leg, report-only, no-comment) review. Register NOTHING on reject.
     if (
       (comment || autofix || autoApprove) &&
       !hasScope(req.rcClient?.scopes ?? [], OWNER)
     ) {
       // Audit the denial so a WRITE token attempting a privileged review is
-      // logged (the mount-level scope_denied never fires — WRITE passes it).
+      // logged (the mount-level scope_denied never fires - WRITE passes it).
       void deps.audit?.record({
         action: 'scope_denied',
         actorTokenId: req.rcClient?.id,
@@ -241,7 +241,7 @@ export function createTriggerReviewRoute(
     }
 
     // Saga leg 4: pre-flight skill guard. The `review` skill MUST be available
-    // on the session before we send the prompt — otherwise the prompt would
+    // on the session before we send the prompt - otherwise the prompt would
     // run as an ordinary turn with no reviewer behaviour. A throw from
     // sessionSupportedCommands itself is treated as unavailable (fail-closed).
     // On unavailability: best-effort end the session, register NOTHING.
@@ -258,7 +258,7 @@ export function createTriggerReviewRoute(
       try {
         await deps.daemon.closeSession(sessionId);
       } catch {
-        // Best-effort — the daemon may already have dropped the session.
+        // Best-effort - the daemon may already have dropped the session.
       }
       res.status(502).json({
         error: 'Review skill unavailable',
@@ -267,7 +267,7 @@ export function createTriggerReviewRoute(
       return;
     }
 
-    // Legs 5–8 run under a rollback guard: once the session exists, ANY thrown
+    // Legs 5-8 run under a rollback guard: once the session exists, ANY thrown
     // error (a `registry.register` file-persist rejection, a `bridge.open`
     // throw, an unexpected emit/audit throw) MUST NOT leak a live session +
     // open bridge or hang the client (Express 4 does not catch async-handler
@@ -330,7 +330,7 @@ export function createTriggerReviewRoute(
 
       // Accepted. The prompt's eventual settlement drives completed/failed,
       // then the bridge closes (the review's permission window is over once its
-      // prompt settles). (If it already resolved — 'settled' — this fires now.)
+      // prompt settles). (If it already resolved - 'settled' - this fires now.)
       void (async () => {
         try {
           await promptPromise;
@@ -350,7 +350,7 @@ export function createTriggerReviewRoute(
         'review_started',
         deps.registry.get(record.reviewId)!,
       );
-      // Audit: ids + flags + approvalLeg ONLY — NEVER the prompt/diff/report.
+      // Audit: ids + flags + approvalLeg ONLY - NEVER the prompt/diff/report.
       // `target` is sanitized the same way as the owner-stream frame (a
       // `path` target's raw filesystem path must never reach the audit log).
       void deps.audit?.record({
@@ -370,13 +370,13 @@ export function createTriggerReviewRoute(
 
       res.status(202).json({ reviewId: record.reviewId, sessionId });
     } catch {
-      // A leg 5–7 throw (e.g. a registry persist rejection) — roll back so no
+      // A leg 5-7 throw (e.g. a registry persist rejection) - roll back so no
       // zombie session or open bridge survives, and never hang the client.
       deps.bridge.close(sessionId);
       try {
         await deps.daemon.closeSession(sessionId);
       } catch {
-        // Best-effort — the daemon may already have dropped the session.
+        // Best-effort - the daemon may already have dropped the session.
       }
       if (!res.headersSent) {
         res.status(502).json({
@@ -398,14 +398,14 @@ export function withReviewCost(
 }
 
 /**
- * GET /rc/reviews?status= — SESSION_READ scope at the mount, which admits a
+ * GET /rc/reviews?status= - SESSION_READ scope at the mount, which admits a
  * session-locked SHARE token. add-link-share: a session-locked token gets
- * `read` on `session_lock_id` ONLY and SHALL NOT access other sessions — this
+ * `read` on `session_lock_id` ONLY and SHALL NOT access other sessions - this
  * is a workspace-wide list, so a locked caller is confined here, in-handler
  * (mirroring routes/search.ts's `req.rcClient.sessionLockId` confinement), to
  * reviews whose OWN `sessionId` (the dedicated daemon session the trigger saga
  * created for the review) equals the lock. A non-locked (owner/write) token
- * is unaffected — full list, as before.
+ * is unaffected - full list, as before.
  */
 export function createListReviewsRoute(deps: ReviewRoutesDeps): RequestHandler {
   return (req, res) => {
@@ -430,13 +430,13 @@ export function createListReviewsRoute(deps: ReviewRoutesDeps): RequestHandler {
 }
 
 /**
- * GET /rc/reviews/:id — SESSION_READ scope at the mount, which admits a
+ * GET /rc/reviews/:id - SESSION_READ scope at the mount, which admits a
  * session-locked SHARE token. Mirrors createListReviewsRoute's confinement: a
  * locked caller may only fetch a review whose OWN `sessionId` equals the
- * lock. A record that fails the tie is reported 404 — the SAME shape as a
- * missing id — so a locked token cannot distinguish "exists in another
+ * lock. A record that fails the tie is reported 404 - the SAME shape as a
+ * missing id - so a locked token cannot distinguish "exists in another
  * session" from "doesn't exist". A non-locked (owner/write) token is
- * unaffected — full access, as before.
+ * unaffected - full access, as before.
  */
 export function createGetReviewRoute(deps: ReviewRoutesDeps): RequestHandler {
   return (req, res) => {
@@ -455,7 +455,7 @@ export function createGetReviewRoute(deps: ReviewRoutesDeps): RequestHandler {
 }
 
 /**
- * POST /rc/reviews/:id/cancel — proxies to the daemon's session end (the
+ * POST /rc/reviews/:id/cancel - proxies to the daemon's session end (the
  * same call the trigger saga's rollback makes) and marks the record
  * cancelled. WRITE scope at the mount. 409 review_not_running on terminal
  * records (mirrors routes/agents.ts's createAgentCancelRoute).
@@ -488,7 +488,7 @@ export function createCancelReviewRoute(
     deps.bridge.close(rec.sessionId);
     // Atomic terminal transition: two concurrent cancels can both pass the
     // pre-check above and both reach here. setStatus is the single source of
-    // truth for "who won" — only the caller whose transition actually landed
+    // truth for "who won" - only the caller whose transition actually landed
     // audits/emits/200s; the loser gets 409, matching the pre-check's
     // terminal-status response.
     const transitioned = await deps.registry.setStatus(

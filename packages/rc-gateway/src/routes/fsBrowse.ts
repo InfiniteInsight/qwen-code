@@ -9,7 +9,7 @@
  * subdirectories of a given absolute path so a "New conversation" flow can
  * pick which directory a new workspace runs in.
  *
- *   GET /rc/fs?path=<abs> — 200 { path, parent, entries: [{ name, isDir }] }
+ *   GET /rc/fs?path=<abs> - 200 { path, parent, entries: [{ name, isDir }] }
  *     - `path` absent → `opts.defaultPath ?? os.homedir()`.
  *     - `path` not absolute → 400 invalid_path.
  *     - `path` exists but is not a directory (or doesn't exist) → 404
@@ -49,7 +49,7 @@ export function createFsBrowseRoute(
 
     // Normalize BEFORE stat/readdir (and before computing `parent`) so a
     // trailing slash (or `.`/`//`) never causes a distinct-looking path to
-    // be returned to the client than what was actually browsed — the
+    // be returned to the client than what was actually browsed - the
     // browse-derived `path`/`parent` must be canonical, matching what
     // `DaemonPool.getOrSpawn`/`createOrAttachSession` will key on if this
     // path is later handed back as a create's `cwd`.

@@ -72,7 +72,7 @@ function fakeDaemon(
 
 /**
  * `kind` travels in the BODY, which is what the daemon route requires
- * (`mutate({strict:true})`, packages/cli/src/serve/routes/session.ts:7451) —
+ * (`mutate({strict:true})`, packages/cli/src/serve/routes/session.ts:7451) -
  * the path segment names the task, the body names what sort of thing it is.
  */
 async function call(
@@ -164,7 +164,7 @@ describe('POST /session/:id/tasks/:taskId/cancel (#110)', () => {
 
   it('refuses a kind the daemon would reject, without blaming the daemon', async () => {
     // The SDK turns the daemon's own 400 into a throw, which the catch would
-    // report as 502 daemon_unavailable — the gateway taking the blame for the
+    // report as 502 daemon_unavailable - the gateway taking the blame for the
     // caller's typo. Checking here is what keeps that status honest.
     const { daemon, calls } = fakeDaemon();
     const { audit, entries } = recorder();

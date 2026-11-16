@@ -1072,7 +1072,7 @@
         return b;
       }
       var a = el('a', 'image-link');
-      // The viewer holds a live session, so full size never replaces it —
+      // The viewer holds a live session, so full size never replaces it -
       // same rule the markdown link branch applies.
       a.setAttribute('target', '_blank');
       a.setAttribute('rel', 'noopener noreferrer');

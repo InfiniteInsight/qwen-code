@@ -39,7 +39,7 @@ export const LAUNCHER_POLL_MS = 4_000;
 export const LAUNCHER_STALE_MS = 3 * LAUNCHER_POLL_MS;
 
 /**
- * POST /rc/terminals — ask the gateway to open a terminal on its own host
+ * POST /rc/terminals - ask the gateway to open a terminal on its own host
  * showing one conversation (issue #49).
  *
  * The gateway records the request and returns immediately; the Windows-side
@@ -47,7 +47,7 @@ export const LAUNCHER_STALE_MS = 3 * LAUNCHER_POLL_MS;
  * that itself: the gateway runs headless, and WSL only lets a process create a
  * Win32 window from inside the user's interactive session.
  *
- * Body: `{ sessionId }`. The workspace is NOT taken from the body — the pool
+ * Body: `{ sessionId }`. The workspace is NOT taken from the body - the pool
  * already knows which daemon owns the session, and that daemon's loopback
  * endpoint + token are what a terminal needs to attach to the SAME session.
  * Deriving it from the session id is also what keeps a client from naming an
@@ -71,7 +71,7 @@ export const LAUNCHER_STALE_MS = 3 * LAUNCHER_POLL_MS;
  * route answers 200 `{ alreadyMirrored: true, sessionId }` and writes nothing:
  * no request, no audit record. A tab attached to a dead daemon still counts.
  *
- * Audit records the session id and request id only — no paths, no tokens.
+ * Audit records the session id and request id only - no paths, no tokens.
  */
 export function createTerminalOpenRoute(
   daemon: SessionDaemon,

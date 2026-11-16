@@ -8,7 +8,7 @@ import { describe, it, expect } from 'vitest';
 import { generateKeyPairSync, createVerify } from 'node:crypto';
 import { createApnsJwt, ApnsJwtSigner } from './apnsJwt.js';
 
-// A real EC P-256 private key in PKCS#8 PEM — the P-8 format Apple issues.
+// A real EC P-256 private key in PKCS#8 PEM - the P-8 format Apple issues.
 function p8KeyPair() {
   const { privateKey, publicKey } = generateKeyPairSync('ec', {
     namedCurve: 'P-256',

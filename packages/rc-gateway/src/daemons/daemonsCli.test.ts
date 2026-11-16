@@ -166,12 +166,12 @@ describe('formatHealthLine', () => {
         undefined,
         'ECONNREFUSED',
       ),
-    ).toBe('a  https://a  UNREACHABLE — ECONNREFUSED');
+    ).toBe('a  https://a  UNREACHABLE - ECONNREFUSED');
   });
   it('renders error with a detail', () => {
     expect(
       formatHealthLine('a', 'https://a', 'error', undefined, 'HTTP 500'),
-    ).toBe('a  https://a  ERROR — HTTP 500');
+    ).toBe('a  https://a  ERROR - HTTP 500');
   });
 });
 

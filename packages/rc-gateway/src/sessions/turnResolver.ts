@@ -26,9 +26,9 @@ export type ResolveTurnError = 'invalid_turn' | 'rewind_not_applicable';
  * A resolved turn boundary: `targetTurnIndex` is the 0-indexed count of
  * user turns to keep (the same number the route maps onto a daemon rewind
  * snapshot); `addressableTurnCount` is the total number of addressable user
- * turns — `targetTurnIndex === addressableTurnCount` means `toTurn` addressed
+ * turns - `targetTurnIndex === addressableTurnCount` means `toTurn` addressed
  * the tip (no truncation); `truncatedEventId` is a record-ARRAY index into
- * the same `records` this function was called with — the same "slice
+ * the same `records` this function was called with - the same "slice
  * boundary" convention `routes/fork.ts`'s `fromEventId` already uses
  * (`records.slice(0, truncatedEventId)` keeps exactly the records before
  * the target turn).
@@ -52,7 +52,7 @@ export type ResolveTurnResult =
  * tip (no truncation at all).
  *
  * Turns at or before the LAST `{ type: 'system', subtype: 'chat_compression'
- * }` checkpoint are not addressable — core's own `reconstructHistory`
+ * }` checkpoint are not addressable - core's own `reconstructHistory`
  * (packages/core/src/services/sessionService.ts) only rebuilds history from
  * after that checkpoint, so nothing before it can be faithfully rewound to.
  * This collapses the design's two rejection cases ("beyond tip" and "inside
@@ -60,7 +60,7 @@ export type ResolveTurnResult =
  * indexes ADDRESSABLE (post-checkpoint) turns, so anything past the last
  * addressable turn is uniformly `rewind_not_applicable`.
  *
- * Pure and synchronous — never touches the filesystem or the daemon.
+ * Pure and synchronous - never touches the filesystem or the daemon.
  */
 export function resolveTurn(
   records: readonly ForkRecord[],

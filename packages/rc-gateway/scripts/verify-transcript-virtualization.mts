@@ -17,7 +17,7 @@
  * (served same-origin at /ui/__vt.html through page.route) loads the real
  * transcript-model.js and transcript-view.js from the gateway, imports the
  * vendored /ui/vendor/virtual-core.js, and mounts the view in its own `#vt`
- * scroller (max-height 75vh, overflow-y auto) — not the page's #transcript.
+ * scroller (max-height 75vh, overflow-y auto) - not the page's #transcript.
  *
  * Section `page` drives the shipped public/index.html: each scenario boots its
  * own gateway + stub daemon (with that scenario's frames, the stream held
@@ -2502,7 +2502,7 @@ async function runViewSection(viewer: Viewer): Promise<Result[]> {
       result = { name: s.name, ok: false, detail: msg.split('\n')[0] + extra };
     }
     console.log(
-      `${result.ok ? 'PASS' : 'FAIL'} ${result.name} — ${result.detail}`,
+      `${result.ok ? 'PASS' : 'FAIL'} ${result.name} - ${result.detail}`,
     );
     results.push(result);
   }
@@ -6521,7 +6521,7 @@ PAGE_SCENARIOS.push({
     }
     expect(
       sent.length >= 2,
-      `the 412 never produced a second connect (attempts: ${JSON.stringify(sent)}) — ` +
+      `the 412 never produced a second connect (attempts: ${JSON.stringify(sent)}) - ` +
         'self-heal state at the deadline: ' +
         (await page.evaluate(
           () =>
@@ -8162,7 +8162,7 @@ PAGE_SCENARIOS.push({
 // #85: the page's own clock. The gateway pings every 25s, so a live socket
 // always produces bytes. A path that black-holes writes without ever failing
 // them produces neither a byte nor a close, and reader.read() parks on it
-// forever — the reported freeze. Nothing else here can see it: the retry
+// forever - the reported freeze. Nothing else here can see it: the retry
 // ladder only runs once a connect has failed or ended, and this one has done
 // neither. The stub already holds the stream open after its frames
 // (holdOpenMs), which is that silence, so the scenario lowers the window and
@@ -8191,7 +8191,7 @@ PAGE_SCENARIOS.push({
     // Lowered before the connect, because armStall reads the window when it
     // arms and a later assignment would leave this watch on the 75s default.
     // 1.5s sits far under the gateway's 25s ping, so no heartbeat can be what
-    // ends this stream — only the page's own clock can.
+    // ends this stream - only the page's own clock can.
     await page.evaluate((id) => {
       lastSeenEventId = null;
       watchStallMs = 1500;
@@ -8209,7 +8209,7 @@ PAGE_SCENARIOS.push({
     }
     expect(
       sent.length >= 2,
-      `the silent stream never produced a reconnect (attempts: ${JSON.stringify(sent)}) — ` +
+      `the silent stream never produced a reconnect (attempts: ${JSON.stringify(sent)}) - ` +
         'self-heal state at the deadline: ' +
         (await page.evaluate(
           () =>
@@ -8238,7 +8238,7 @@ PAGE_SCENARIOS.push({
     expect(
       sent[1].at < 10_000,
       `the reconnect took ${sent[1].at} ms, which is not the page's 1500 ms window plus ` +
-        'its 1s first retry — something slower than the watchdog recovered it',
+        'its 1s first retry - something slower than the watchdog recovered it',
     );
     return `a stream silent for 1.5s reconnected at Last-Event-ID 3 after ${sent[1].at} ms, so a black-holed socket recovers without waiting for the server's 25s ping`;
   },
@@ -36937,7 +36937,7 @@ async function runPageSection(): Promise<Result[]> {
       console.log(
         // The pre-commit dash guard enforces on added lines only, so the
         // literal in the view section's copy of this line stays as it is.
-        `${result.ok ? 'PASS' : 'FAIL'} ${result.name} \u2014 ${result.detail}`,
+        `${result.ok ? 'PASS' : 'FAIL'} ${result.name} - ${result.detail}`,
       );
       results.push(result);
     }

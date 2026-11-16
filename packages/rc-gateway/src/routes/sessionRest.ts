@@ -12,7 +12,7 @@ import { isValidSessionId } from '../sessions/chatsPath.js';
 /**
  * The "sessions at rest" actions (add-capability-parity #111): archive,
  * unarchive, delete. Each forwards a batch of session ids to the daemon, which
- * already serves them — only the gateway path was missing.
+ * already serves them - only the gateway path was missing.
  *
  * Archive and delete are deliberately NOT one route with a flag. Archiving is
  * reversible and deleting is not, so delete carries a confirmation the others
@@ -23,7 +23,7 @@ import { isValidSessionId } from '../sessions/chatsPath.js';
  * only the one that happens to draw a dialog.
  *
  * The daemon's per-id outcome (`removed` / `notFound` / `errors`) is passed
- * through untouched — a partial failure is real information, and flattening it
+ * through untouched - a partial failure is real information, and flattening it
  * into a bare 200 is the silently-swallowed-failure bug class this issue is
  * about.
  *

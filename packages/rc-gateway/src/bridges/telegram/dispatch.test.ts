@@ -139,7 +139,7 @@ describe('TelegramChatStore', () => {
   });
 });
 
-describe('handleUpdate — messages', () => {
+describe('handleUpdate - messages', () => {
   it('/start <token> REDEEMS an invite and binds the returned session', async () => {
     const h = fakeDeps(chats);
     await handleUpdate(
@@ -310,7 +310,7 @@ describe('handleUpdate — messages', () => {
   });
 });
 
-describe('handleUpdate — callbacks', () => {
+describe('handleUpdate - callbacks', () => {
   it('an Approve tap votes allow_once and acks the query', async () => {
     await chats.bind(5, 'sess-x');
     const h = fakeDeps(chats);

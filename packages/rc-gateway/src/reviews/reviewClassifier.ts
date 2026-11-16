@@ -19,7 +19,7 @@ import { resolve, relative, isAbsolute, sep } from 'node:path';
  * escalate a call; it is never safe to approve one we cannot prove safe.
  *
  * The permission frame carries the ACP `ToolCall` shape
- * `{ kind, title, rawInput }` and NO tool-name — so we key on `kind` plus
+ * `{ kind, title, rawInput }` and NO tool-name - so we key on `kind` plus
  * `rawInput`. See docs/superpowers/specs/2026-07-20-remote-review-design.md
  * "The permission bridge".
  *
@@ -63,8 +63,8 @@ export type ReviewDecision = 'approve' | 'escalate';
  * Only these characters may appear in an auto-approvable shell command.
  * Anything else forces escalation. The class is a LITERAL-space whitelist
  * (note: not `\s`, so tab and newline are excluded). It rejects every shell
- * metacharacter — `; & | $ \` < > ( ) { } ' " \ * ? ! ~ # % ^ + [ ] newline
- * tab` — which defeats substitution/redirection/chaining/globbing smuggling
+ * metacharacter - `; & | $ \` < > ( ) { } ' " \ * ? ! ~ # % ^ + [ ] newline
+ * tab` - which defeats substitution/redirection/chaining/globbing smuggling
  * like `git diff; rm -rf /`, `echo $(cat secret)`, or `` git diff `id` ``.
  */
 const SAFE_SHELL_CHARS = /^[A-Za-z0-9 _\-./=:@,]+$/;
@@ -340,7 +340,7 @@ function validateShellArgs(
 
 /**
  * A `mkdir` (the review skill's `mkdir -p <cwd>/.qwen/reviews`) auto-approves
- * ONLY when every target path resolves INSIDE the review worktree — the SAME
+ * ONLY when every target path resolves INSIDE the review worktree - the SAME
  * string-level confinement `classifyEdit` applies, so an empty-dir mutation can
  * no longer land out-of-tree (`mkdir -p /home/victim/.qwen/x` used to approve on
  * the mere presence of a `.qwen` segment). `worktreeRoot` null/empty → escalate
@@ -443,7 +443,7 @@ function classifyShell(
 // decoy field can never slip an out-of-tree write past confinement.
 //
 // Exported so the permission bridge (C.2) confines the SAME field set with its
-// `fs.realpath` symlink check — the two layers must never drift (a field the
+// `fs.realpath` symlink check - the two layers must never drift (a field the
 // classifier string-confines but the bridge does not realpath-verify would be a
 // hole). See reviewPermissionBridge.ts Guard 2.
 export const EDIT_PATH_FIELDS = [
@@ -480,19 +480,19 @@ function isInsideRoot(rootAbs: string, p: string): boolean {
 
 /**
  * An `edit`/`write` under `autofix` may auto-approve ONLY when its target path
- * resolves inside the review worktree. EVERY present path field is confined —
- * not first-wins — so a divergent decoy (`{file_path:'src/a.ts',
+ * resolves inside the review worktree. EVERY present path field is confined -
+ * not first-wins - so a divergent decoy (`{file_path:'src/a.ts',
  * path:'/etc/passwd'}`) cannot slip through. Escalate if no path field is
  * present, or if any present one is non-string/empty, resolves outside, or
  * has a `.git` segment (see {@link hasGitSegment}).
  *
- * SECURITY CAVEAT — STRING-LEVEL ONLY: this uses `path.resolve` and does NOT
+ * SECURITY CAVEAT - STRING-LEVEL ONLY: this uses `path.resolve` and does NOT
  * resolve symlinks. A symlink committed *inside* the worktree (e.g.
  * `evil -> /home/user/.ssh/authorized_keys`) resolves "inside" by path math yet
  * the write follows it OUTSIDE the worktree. A pure function has no fs and
  * cannot detect this. The caller (the permission bridge, C.2) MUST
- * `fs.realpath`-verify the edit target — or its parent dir, for a
- * not-yet-existing file — against the realpath'd worktree root before honoring
+ * `fs.realpath`-verify the edit target - or its parent dir, for a
+ * not-yet-existing file - against the realpath'd worktree root before honoring
  * an `approve` for an `edit`/write. The classifier alone does NOT guarantee the
  * write lands inside the worktree.
  */
@@ -522,13 +522,13 @@ function classifyEdit(
  * Classify a single review tool call into `approve` (auto-approve) or
  * `escalate` (human vote).
  *
- * TRUST BOUNDARY — this classifier trusts the INTEGRITY of `toolCall.kind`: the
+ * TRUST BOUNDARY - this classifier trusts the INTEGRITY of `toolCall.kind`: the
  * daemon assigns it from each tool's registered `Kind` enum, NOT from the model
  * or the reviewed diff, so keying auto-approval on `kind` is sound. C.2 must
  * confirm this assumption holds for the frames it feeds in (a spoofable `kind`
  * would break the `read`/`search`-approve-on-kind-alone shortcut below).
  *
- * SECURITY CAVEAT — an `edit` approval is STRING-LEVEL path confinement only and
+ * SECURITY CAVEAT - an `edit` approval is STRING-LEVEL path confinement only and
  * does NOT resolve symlinks; the bridge (C.2) MUST `fs.realpath`-verify the edit
  * target against the worktree root before honoring it. See `classifyEdit`.
  */
@@ -536,10 +536,10 @@ export function classifyReviewToolCall(
   toolCall: ReviewToolCall,
   policy: ReviewPolicy,
 ): ReviewDecision {
-  // Vote mode: escalate everything — nothing auto-approves.
+  // Vote mode: escalate everything - nothing auto-approves.
   if (!policy.autoApprove) return 'escalate';
   switch (toolCall.kind) {
-    // read/search approve on `kind` alone with no payload inspection — safe
+    // read/search approve on `kind` alone with no payload inspection - safe
     // ONLY because the daemon sets `kind` from the tool's registered Kind (see
     // the trust-boundary note above), not from attacker-influenced input.
     case 'read':
@@ -552,7 +552,7 @@ export function classifyReviewToolCall(
     case 'execute':
       return classifyShell(toolCall.rawInput, policy);
     case 'fetch': // exfiltration vector
-    case 'other': // agent fanout / lsp / MCP — indistinguishable, escalate
+    case 'other': // agent fanout / lsp / MCP - indistinguishable, escalate
     default:
       return 'escalate';
   }

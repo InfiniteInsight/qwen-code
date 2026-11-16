@@ -30,7 +30,7 @@ function fakeClient(
   tag: string,
   sid?: string,
   events: () => AsyncGenerator<DaemonEvent> = noEvents,
-  /** When set, `createOrAttachSession` awaits this before resolving —
+  /** When set, `createOrAttachSession` awaits this before resolving -
    * lets tests hold a create call open mid-flight to reproduce races. */
   createGate?: Promise<void>,
 ) {
@@ -1069,7 +1069,7 @@ describe('DaemonPool death detection', () => {
     h.fireExit('/proj/a', { code: null, signal: 'SIGKILL' });
     expect(h.deaths).toHaveLength(1);
     expect(h.deaths[0].sessions.sort()).toEqual([
-      s.sessionId, // '/proj/a-s' — '/' sorts before letters
+      s.sessionId, // '/proj/a-s' - '/' sorts before letters
       'orphan-sess',
     ]);
     expect(h.auditRows[0].detail).toEqual({
@@ -1280,7 +1280,7 @@ describe('DaemonPool death detection', () => {
   });
 
   it('setOnDaemonDeath wires the hook post-construction (the cli.ts path): a later death invokes it with key/sessions/exit', async () => {
-    // Constructed WITHOUT the onDaemonDeath option — the hook arrives via
+    // Constructed WITHOUT the onDaemonDeath option - the hook arrives via
     // the setter, as cli.ts wires the recovery orchestrator after the pool
     // and orchestrator both exist.
     const spawnOuts: PooledDaemonSpawn[] = [];
@@ -2036,7 +2036,7 @@ describe('DaemonPool workspace scoping (rc-workspace-scoping, #28)', () => {
     );
     await h.pool.workspaceMcp('/proj/a');
     await h.pool.reloadWorkspaceMcp(undefined, '/proj/a');
-    // One spawn, shared by every method — and nothing hit the boot daemon.
+    // One spawn, shared by every method - and nothing hit the boot daemon.
     expect(h.log).toEqual(['/proj/a']);
     const spawned = h.clients.get('/proj/a');
     expect(spawned).toBeDefined();

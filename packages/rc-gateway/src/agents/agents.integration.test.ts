@@ -97,7 +97,7 @@ describe('agent observability end-to-end (spawn → frames → cancel)', () => {
 
     // 2b. Same frame must also reach the PARENT SESSION's own SSE stream
     // (agentLifecycle.ts emit() publishes to ownerEvents AND
-    // promptEvents.emit(parentSessionId, ...) — both surfaces are load
+    // promptEvents.emit(parentSessionId, ...) - both surfaces are load
     // bearing, not just the owner bus).
     const parentSpawned = parentFrames.find((f) => f.type === 'agent_spawned');
     expect(parentSpawned).toBeDefined();
@@ -120,7 +120,7 @@ describe('agent observability end-to-end (spawn → frames → cancel)', () => {
     ).toHaveLength(1);
 
     // 3b. Steer while running: message route accepts (202) before any
-    // cancel — the stub's promptDelayMs (2000ms) keeps the agent 'running'
+    // cancel - the stub's promptDelayMs (2000ms) keeps the agent 'running'
     // well past the spawn's 25ms accept window, so this exercises the
     // success path, not the terminal guard.
     const steerWhileRunning = await fetch(
@@ -163,7 +163,7 @@ describe('agent observability end-to-end (spawn → frames → cancel)', () => {
 
     // 5b. Double-cancel: a second cancel on an already-terminal agent must
     // also 409 (the route's post-daemon-call CAS guard, not just the
-    // pre-check — see createAgentCancelRoute's "loser gets 409" comment).
+    // pre-check - see createAgentCancelRoute's "loser gets 409" comment).
     const secondCancel = await fetch(`${url}/rc/agents/${agentId}/cancel`, {
       method: 'POST',
       headers: auth,
@@ -175,7 +175,7 @@ describe('agent observability end-to-end (spawn → frames → cancel)', () => {
 
     // 6. Audit trail: agent_spawned + agent_cancelled rows on the owner bus
     //    (the audit sink publishes every durable row as an `audit` frame).
-    //    audit.record is fire-and-forget on the routes — poll briefly.
+    //    audit.record is fire-and-forget on the routes - poll briefly.
     const auditActions = () =>
       frames
         .filter((f) => f.type === 'audit')

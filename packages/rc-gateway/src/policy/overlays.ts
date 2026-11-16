@@ -10,11 +10,11 @@ import type { Policy, PolicyAction, PolicyRule } from './loader.js';
 /**
  * Session-scoped permission overlays (issue #33). A TTL-bound rule set that
  * an operator can set from the dashboard to override the file-based policy
- * for a bounded period — "deny `web_fetch` just for this session", "allow
+ * for a bounded period - "deny `web_fetch` just for this session", "allow
  * everything for 5 minutes while I test".
  *
  * **Ephemeral by design:** the store is in-memory only. Overlays live for the
- * life of the gateway process AND their TTL — a restart drops all of them
+ * life of the gateway process AND their TTL - a restart drops all of them
  * (fail-closed: the file policy is the only durable source of truth).
  *
  * **Bounded by design:** every overlay MUST carry a future `expiresAt`; the
@@ -64,7 +64,7 @@ export class PermissionOverlayStore {
    * Add an overlay. `expiresAt` MUST be strictly in the future at `nowMs`
    * (the route validates the TTL; the store re-checks so a direct caller
    * cannot create an already-expired rule). Throws {@link OverlayLimitError}
-   * when the cap is reached (after pruning expired entries — an operator
+   * when the cap is reached (after pruning expired entries - an operator
    * whose overrides all lapsed can still add new ones).
    */
   add(
@@ -105,7 +105,7 @@ export class PermissionOverlayStore {
    * all session-unbound overlays) rendered as a standalone {@link Policy}.
    *
    * The evaluator's `source === 'policy'` is the "an overlay rule matched"
-   * discriminator — the enforcer falls back to the file policy whenever no
+   * discriminator - the enforcer falls back to the file policy whenever no
    * overlay rule matches (defaults action `prompt`, source `default`).
    *
    * `expiresAt` is rendered as an ISO STRING: `parseExpiresAt` accepts strings

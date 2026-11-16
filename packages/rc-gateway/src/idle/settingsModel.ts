@@ -20,13 +20,13 @@ import {
  * Why: `resolveSuggestConfig()` reads process env, but the gateway runs as a
  * systemd user unit whose environment carries only `QWEN_RC_TERMINAL_QWEN`. The
  * provider keys live in `settings.json`'s `env` map, which is where qwen itself
- * reads them — so reading the same file gives the gateway the same view the
+ * reads them - so reading the same file gives the gateway the same view the
  * watched conversation has. That is what per-session model selection needs.
  *
  * SECURITY POSTURE (same rule as `chatTransport.ts`): the
  * `(apiKey, baseUrl, model)` triple is a COHERENT SET from ONE file. The host
  * ALWAYS comes from the provider entry; only the secret is looked up, and only
- * under the `envKey` that same entry names — so a key can never be paired with a
+ * under the `envKey` that same entry names - so a key can never be paired with a
  * host its owner did not choose for it. Anything missing → `null`, and the
  * caller stays on its existing fallback rather than guessing a host.
  */
@@ -103,7 +103,7 @@ function defaultModelName(settings: Record<string, unknown>): string {
  * from the process environment (where a unit drop-in would put it). Reading the
  * environment is NOT the forbidden pairing: the envKey NAME is fixed by the same
  * entry that supplied the host, so the (host, key-name) binding is the user's
- * own declaration — only the value's location varies.
+ * own declaration - only the value's location varies.
  */
 export function suggestConfigFromSettings(
   settings: unknown,
@@ -131,7 +131,7 @@ export function suggestConfigFromSettings(
 
 /**
  * Reads `settings.json` and resolves it for `modelId` (empty → the user's
- * default model). Any failure — missing file, unreadable, malformed JSON —
+ * default model). Any failure - missing file, unreadable, malformed JSON -
  * yields `null` so the caller keeps its existing env-resolved endpoint. This is
  * enrichment, so it never throws and never logs the file's contents (it holds
  * secrets).

@@ -218,7 +218,7 @@ export function createPushRouter(
   // `quietHours` (a `{from, to, timezone}` window). Authorization mirrors
   // DELETE: existence + ownership are checked first (hide existence of another
   // token's subscription from non-owners with a 404, NOT a 403/400), and only
-  // then is the body validated. Fields update INDEPENDENTLY — each is applied
+  // then is the body validated. Fields update INDEPENDENTLY - each is applied
   // only when its key is present in the body: a `null` value clears it, a
   // value sets it, an absent key leaves it unchanged (so a PATCH that sets
   // only `quietHours` does not wipe `prefs`). `prefs`: array of strings (empty
@@ -242,7 +242,7 @@ export function createPushRouter(
         maxPerHour?: unknown;
       };
 
-      // Validate BOTH fields up front, then apply — the request is
+      // Validate BOTH fields up front, then apply - the request is
       // all-or-nothing. A mixed PATCH whose second field is malformed must NOT
       // have already persisted the first field (a partial commit could
       // silently narrow prefs while returning 400 → a missed-prompt-class
@@ -369,10 +369,10 @@ export function createPushRouter(
     res.status(200).json({ sent: store.listFor(req.rcClient!.id).length });
   });
 
-  // GET /digest — owner-only summary of pushes suppressed during quiet hours
+  // GET /digest - owner-only summary of pushes suppressed during quiet hours
   // ("what you missed while away", the read half of design D4). The router is
   // mounted under session:read; owner is required in-handler (mirrors the
-  // ?all=true subscriptions path). Counts/ids/kind only — no secret material.
+  // ?all=true subscriptions path). Counts/ids/kind only - no secret material.
   router.get('/digest', (req, res) => {
     if (!req.rcClient!.scopes.includes(OWNER)) {
       res

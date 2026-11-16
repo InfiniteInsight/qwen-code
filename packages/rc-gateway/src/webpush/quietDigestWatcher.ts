@@ -26,7 +26,7 @@ export interface QuietDigestRecord {
  * which is fine for a digest.
  *
  * State is initialized on a subscription's FIRST sighting, so a sub already
- * mid-quiet when the gateway starts does not spuriously fire on the first tick —
+ * mid-quiet when the gateway starts does not spuriously fire on the first tick -
  * it only fires on a LATER exit. The state map is pruned of ids no longer present
  * so it stays bounded without any DELETE-path wiring.
  *
@@ -64,7 +64,7 @@ export class QuietDigestWatcher {
     }
   }
 
-  /** Drop a subscription's edge state (not required — prune-on-tick covers it). */
+  /** Drop a subscription's edge state (not required - prune-on-tick covers it). */
   forget(id: string): void {
     this.wasQuiet.delete(id);
   }

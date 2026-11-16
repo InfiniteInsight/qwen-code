@@ -20,7 +20,7 @@ const AUTO: ReviewPolicy = {
 
 // The REAL ACP permission frame shape: { kind, title, rawInput }.
 // NEVER the synthetic { name, input } (that shape hid a latent
-// wire-mismatch bug in PolicyEnforcer — see design Follow-ups).
+// wire-mismatch bug in PolicyEnforcer - see design Follow-ups).
 const shell = (command: string) => ({
   kind: 'execute',
   title: command,
@@ -28,9 +28,9 @@ const shell = (command: string) => ({
 });
 
 // ---------------------------------------------------------------------------
-// Contract tests (verbatim from task brief) — the baseline behavior.
+// Contract tests (verbatim from task brief) - the baseline behavior.
 // ---------------------------------------------------------------------------
-describe('classifyReviewToolCall — contract', () => {
+describe('classifyReviewToolCall - contract', () => {
   it('vote mode escalates everything', () => {
     const VOTE: ReviewPolicy = {
       autoApprove: false,
@@ -157,7 +157,7 @@ describe('classifyReviewToolCall — contract', () => {
 // passes only after the corresponding hardening is added. These prove the
 // bypass is closed.
 // ---------------------------------------------------------------------------
-describe('classifyReviewToolCall — adversarial hardening', () => {
+describe('classifyReviewToolCall - adversarial hardening', () => {
   const COMMENT: ReviewPolicy = { ...AUTO, comment: true };
 
   it('escalates allowlisted git carrying command-injection / file-write flags', () => {
@@ -231,7 +231,7 @@ describe('classifyReviewToolCall — adversarial hardening', () => {
       'approve',
     );
     // DISCRIMINATOR: has a `.qwen` segment and no `..`, so the pre-fix code
-    // approved it — only worktree confinement escalates this out-of-tree target.
+    // approved it - only worktree confinement escalates this out-of-tree target.
     expect(
       classifyReviewToolCall(shell('mkdir -p /home/victim/.qwen/x'), WT),
     ).toBe('escalate');

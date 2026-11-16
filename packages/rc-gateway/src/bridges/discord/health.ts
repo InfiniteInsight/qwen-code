@@ -9,13 +9,13 @@
  * `GET /healthz` on a small LOOPBACK HTTP server returning
  * `{ ok, daemonReachable, gatewayConnected, registeredId, uptimeSec }`.
  *
- * `ok` is `daemonReachable AND gatewayConnected` — both must be true for the
+ * `ok` is `daemonReachable AND gatewayConnected` - both must be true for the
  * bridge to serve traffic (the daemon must accept registrations AND the Discord
  * gateway WebSocket must be up).
  *
  * Bound to 127.0.0.1 (not 0.0.0.0): the report is unauthenticated and leaks
  * internal reachability, so loopback is enough for an in-container probe.
- * Bind failure NEVER crashes the bridge — it logs and continues.
+ * Bind failure NEVER crashes the bridge - it logs and continues.
  */
 
 import { createServer, type Server } from 'node:http';
@@ -52,7 +52,7 @@ export function initialDiscordHealthState(): DiscordHealthState {
 
 /**
  * Build the health report from live state. `ok` is the conjunction of
- * `daemonReachable` AND `gatewayConnected` — a probe failure on either means
+ * `daemonReachable` AND `gatewayConnected` - a probe failure on either means
  * the bridge is not fully operational.
  */
 export function buildDiscordHealthReport(
@@ -78,7 +78,7 @@ export interface DiscordHealthServer {
 /**
  * Start the loopback `GET /healthz` server on `port`. `report()` is invoked
  * per request so each response reflects current state. Resolves once listening,
- * or — on a bind error — logs and resolves with a no-op handle (NEVER rejects).
+ * or - on a bind error - logs and resolves with a no-op handle (NEVER rejects).
  */
 export function startDiscordHealthServer(
   port: number,
@@ -105,7 +105,7 @@ export function startDiscordHealthServer(
       log(
         `discord healthz: could not bind port ${port} (${
           (err as Error).message ?? err
-        }) — healthz disabled`,
+        }) - healthz disabled`,
       );
       resolve({ close: async () => {}, port: 0 });
     });

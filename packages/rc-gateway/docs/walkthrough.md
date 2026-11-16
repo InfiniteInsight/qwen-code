@@ -2,7 +2,7 @@
 
 This guide walks through setting up `rc-gateway` from a clean checkout and using
 it to control a `qwen` session from a second device. It covers the golden
-path — build, serve, pair, prompt — and the most common extensions: TLS,
+path - build, serve, pair, prompt - and the most common extensions: TLS,
 browser CORS, chat bridges, policy, and notifications.
 
 Commands below use `<port>` as a placeholder for whatever port the gateway
@@ -26,7 +26,7 @@ npm run build --workspace @qwen-code/sdk
 npm run build --workspace @qwen-code/rc-gateway
 ```
 
-The SDK must be built first — `rc-gateway` depends on its compiled output.
+The SDK must be built first - `rc-gateway` depends on its compiled output.
 
 ## 3. Start the Gateway
 
@@ -90,7 +90,7 @@ The response looks like:
 }
 ```
 
-The `qwk_`-prefixed token carries owner scope — full control of the
+The `qwk_`-prefixed token carries owner scope - full control of the
 gateway. **It is shown only once.** Save it somewhere safe (a password
 manager or local secrets file); the gateway does not store it in retrievable
 form and cannot show it to you again. If you lose it, pair again with a new
@@ -141,7 +141,7 @@ loopback or a trusted LAN.
 **Option A: ACME / Let's Encrypt (automatic).** Requires a real domain
 name pointing at this host and port 443 reachable from the internet for the
 HTTP-01 challenge. Point the gateway at your domain and it will provision
-and renew the certificate automatically — no manual certificate handling.
+and renew the certificate automatically - no manual certificate handling.
 
 **Option B: Manual certificate.** Supply your own certificate and key
 files (for example, ones issued by an internal CA or a wildcard cert you
@@ -156,7 +156,7 @@ the connection.
 ## 7. Browser Access (CORS)
 
 By default the gateway only admits requests from the daemon's own UI
-origin, which is auto-admitted with no extra configuration — useful for a
+origin, which is auto-admitted with no extra configuration - useful for a
 local web UI served alongside the daemon.
 
 For any other browser-based client (a separate web app on a different
@@ -189,7 +189,7 @@ curl http://localhost:<port>/rc/cors \
 1. Create a bot via [@BotFather](https://t.me/BotFather) in Telegram and
    copy the bot token it gives you.
 2. Mint a bridge-scoped pairing code from the gateway (narrower than owner
-   scope — the bridge only needs to relay prompts and receive events) and
+   scope - the bridge only needs to relay prompts and receive events) and
    redeem it to get a `qwk_...` token for the bridge.
 3. Start the bridge sidecar:
 
@@ -229,22 +229,22 @@ token.
 ## 10. Policy Engine
 
 Policy rules let you auto-approve safe actions, require confirmation for
-risky ones, and outright deny dangerous ones — without manually approving
+risky ones, and outright deny dangerous ones - without manually approving
 every tool call from a remote client.
 
 **Upgrading from an earlier version? Read this before you rely on an
 existing policy file.** Rule matching was previously broken against real
 permission frames, so `tool:` and `pathGlob:` rules never matched a real
-call — they sat inert no matter what action they specified. This release
+call - they sat inert no matter what action they specified. This release
 fixes matching, which means **`deny` rules begin blocking and `allow` rules
 begin auto-approving for the first time** the moment you upgrade. Before you
 trust an existing file, run
-`qwen-rc policy lint <file>` — it reports how many `allow` rules are newly
+`qwen-rc policy lint <file>` - it reports how many `allow` rules are newly
 effective and warns on any that were written against a tool name (e.g.
 `write_file`) whose ACP kind also covers other tools (e.g. `edit`) it wasn't
 written to cover. The gateway only ever sees a call's ACP kind, never its
 tool name, so a rule naming one of those shared-kind tools cannot
-distinguish it from the others remotely — `allow` on `write_file` also
+distinguish it from the others remotely - `allow` on `write_file` also
 allows `edit`.
 
 Create `~/.qwen/rc/policy.yaml` (per-user; applies across every workspace
@@ -256,7 +256,7 @@ defaults:
 rules:
   # `tool` is the ACP kind: read | search | edit | execute | fetch | other.
   # A known tool name (e.g. run_shell_command) is accepted and mapped to its
-  # kind — note that mapping is lossy: write_file and edit share `edit`.
+  # kind - note that mapping is lossy: write_file and edit share `edit`.
   - id: allow-reads
     match: { tool: read }
     action: allow
@@ -282,14 +282,14 @@ rules:
     priority: 10
 ```
 
-This example auto-approves calls of kind `read` (e.g. `read_file`) —
+This example auto-approves calls of kind `read` (e.g. `read_file`) -
 except where a higher-priority deny also matches: `read_file` on `.env`
 is denied by `deny-dotenv`, not auto-approved by `allow-reads`, because of
 the explicit `priority: 10` above. (`grep_search` is kind `search`, a
 different ACP kind from `read`, so `allow-reads` never applies to it
 regardless of priority.) The two deny rules block any call that touches a
-`.env*` file anywhere under the project root — including one reached
-through a shell command such as `cat .env` — and any write anywhere under
+`.env*` file anywhere under the project root - including one reached
+through a shell command such as `cat .env` - and any write anywhere under
 `config/`. Anything no rule matches falls through to `defaults.action`,
 `prompt` here, so the operator is asked.
 
@@ -300,7 +300,7 @@ leading single `/` in a pattern (e.g. `/etc/**`) is still relative to the
 project root (`<projectRoot>/etc/**`), NOT the filesystem root; a
 filesystem-absolute pattern needs a doubled leading slash (`//etc/**`). A
 deny written for a real absolute path using a single `/` silently never
-fires — it matches a path under the project root that doesn't exist.
+fires - it matches a path under the project root that doesn't exist.
 
 **Rule ordering and the precedence trap.** Rules are evaluated in
 `(priority desc, specificity desc, index asc)` order, and the first
@@ -308,7 +308,7 @@ matching rule wins. Specificity is a fixed score per match field present on
 a rule: `tool` scores 100 (or 90 for a tool glob like `read*`), while
 `pathGlob` and `operation` each score only 30. That means a broad `tool:`
 allow OUTRANKS a narrower `pathGlob`/`operation` deny by default, even
-though the deny reads as more specific — exactly the trap `deny-dotenv` and
+though the deny reads as more specific - exactly the trap `deny-dotenv` and
 `deny-writes-to-config` above avoid by setting an explicit `priority`.
 Whenever a `deny` must beat a broader `allow`, give the `deny` a higher
 `priority` than the `allow`; do not rely on `pathGlob`/`operation` alone to
@@ -354,13 +354,13 @@ Pass the ACP kind (e.g. `read`, `execute`) as the argument, plus any of
 comma-separated, e.g. `--operation=read,write`), `--scope=`, `--tag=`, or
 `--project-root=` to shape the simulated call. `--project-root` overrides
 the default `process.cwd()` anchor for both the simulated `pathGlob`
-matching and the workspace policy-file layer — pass it when running
+matching and the workspace policy-file layer - pass it when running
 `explain` from somewhere other than the daemon's actual workspace, or the
 reported verdict can diverge from real enforcement. The output lists each
 rule in evaluation order as matched, skipped, or not-reached, followed by
 the resulting decision.
 
-The policy engine watches the file and hot-reloads it on change — no
+The policy engine watches the file and hot-reloads it on change - no
 gateway restart needed after editing rules.
 
 ## 11. Notification Routing
@@ -439,7 +439,7 @@ curl -X POST http://localhost:<port>/rc/tokens/revoke-all \
 
 Every client will need to re-pair after a revoke-all.
 
-Tokens have a 180-day maximum age, with sliding renewal on active use —
+Tokens have a 180-day maximum age, with sliding renewal on active use -
 a token that's regularly used stays valid, while one that's dormant will
 eventually expire and require re-pairing.
 
@@ -447,14 +447,14 @@ eventually expire and require re-pairing.
 
 When a workspace daemon dies (crash, OOM kill, `SIGKILL`), the gateway
 detects the exit, frees the pool slot, and automatically respawns the
-daemon and resumes every affected session in place — same session ids,
+daemon and resumes every affected session in place - same session ids,
 gapless event stream. No manual intervention required.
 
 ### What happens on a daemon crash
 
 1. **Death detection.** The pool marks the entry dead, frees the
    `maxDaemons` cap slot, and writes a `daemon_died` audit row
-   (exit code, signal, affected session count — no workspace path).
+   (exit code, signal, affected session count - no workspace path).
 2. **Recovery saga.** The orchestrator respawns the workspace daemon
    via `getOrSpawn`, then resumes each affected session sequentially
    via `resumeSession`. If the respawn fails, all sessions are marked
@@ -462,7 +462,7 @@ gapless event stream. No manual intervention required.
 3. **Marker frames.** Per session, the gateway appends a
    `session_interrupted` frame to the WAL (carrying `recovered`,
    `hadInFlightTurn`, `exitCode`). On success it also appends
-   `session_recovered` (`tookMs`). Both frames are durable — a
+   `session_recovered` (`tookMs`). Both frames are durable - a
    reconnecting client replays them via the existing Last-Event-ID
    mechanism.
 4. **Event-id continuity.** The respawned daemon's bus epoch starts
@@ -479,18 +479,18 @@ gapless event stream. No manual intervention required.
 ### What is NOT recovered
 
 The interrupted turn is never re-sent. The agent's in-memory context
-for that turn is lost. The user decides whether to resend the prompt —
+for that turn is lost. The user decides whether to resend the prompt -
 the web banner makes the state visible.
 
 ### Web banner
 
 The phone UI shows a non-blocking banner above the transcript:
 
-- **`session_interrupted`** — "Daemon crashed — this turn was
+- **`session_interrupted`** - "Daemon crashed - this turn was
   interrupted" (plus "and not recovered" when `recovered: false`).
   The unrecovered variant persists until the user's next prompt is
   accepted.
-- **`session_recovered`** — clears the crash banner and briefly shows
+- **`session_recovered`** - clears the crash banner and briefly shows
   "session recovered" (auto-fades).
 
 ### The session WAL
@@ -528,7 +528,7 @@ paths).
 | --------------------- | -------------------------------- | ------------------------------------ |
 | `daemon_died`         | Child process exits              | `exitCode`, `signal`, `sessionCount` |
 | `session_interrupted` | Per session, after outcome known | `outcome` (ok / failed)              |
-| `session_recovered`   | Per session, on success only     | —                                    |
+| `session_recovered`   | Per session, on success only     | -                                    |
 
 Push notification kinds: `session.interrupted` (bypasses quiet hours;
 owner + write scope) and `session.recovered` (owner + write + read

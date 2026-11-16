@@ -96,18 +96,18 @@ function daemonError(err: unknown, res: Parameters<RequestHandler>[1]): void {
 }
 
 /**
- * GET /rc/workspace/trust — read the workspace trust status. The optional
+ * GET /rc/workspace/trust - read the workspace trust status. The optional
  * `?statusVersion=2` query is passed through to the daemon (v2 adds the
  * reconciliation state); any other value is a 400. Mounted at the WRITE
  * floor (server.ts).
  *
- * POST /rc/workspace/trust/request — request a trust state change
+ * POST /rc/workspace/trust/request - request a trust state change
  * (`{desiredState, reason?}`). Mounted OWNER-only (server.ts). The daemon
  * answers 202 (the change is applied by a LOCAL operator confirming on the
- * daemon host — the gateway never observes the state flip itself), so the
+ * daemon host - the gateway never observes the state flip itself), so the
  * 202 and its body are passed through unchanged and the
  * `workspace_trust_requested` audit row is written on the 202, carrying
- * only `{desiredState, reason?}` — never session or prompt content.
+ * only `{desiredState, reason?}` - never session or prompt content.
  *
  * Both accept an optional `workspace` target (rc-workspace-scoping, #28):
  * `?workspace=<cwd>` on the GET, a `workspace` field on the POST body.

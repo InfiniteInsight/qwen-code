@@ -11,10 +11,10 @@ export interface CommandResult {
   stderr: string;
 }
 
-/** Injected exec boundary — every launcher flow calls the outside world through this. */
+/** Injected exec boundary - every launcher flow calls the outside world through this. */
 export type RunCommand = (argv: string[]) => Promise<CommandResult>;
 
-/** Real impl over child_process.execFile. Never rejects — a failed/absent command resolves with a nonzero code. */
+/** Real impl over child_process.execFile. Never rejects - a failed/absent command resolves with a nonzero code. */
 export const realRunCommand: RunCommand = (argv) =>
   new Promise((resolve) => {
     execFile(

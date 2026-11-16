@@ -85,7 +85,7 @@ describe('UsageStore legacy cost_cents migration', () => {
     expect(rows[1].cost_microcents).toBe(2_000_000);
   });
 
-  it('is idempotent — reopening does not double-convert', () => {
+  it('is idempotent - reopening does not double-convert', () => {
     const path = join(dir, 'usage.db');
     writeLegacyDb(path, [{ cents: 3 }]);
 

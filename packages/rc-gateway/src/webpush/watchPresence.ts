@@ -7,7 +7,7 @@
 /**
  * Per-session live-watch presence (#40): counts attached SSE event streams per
  * session so turn-end pushes can be suppressed while someone is watching the
- * session live. In-memory only — a gateway restart resets the counts to zero,
+ * session live. In-memory only - a gateway restart resets the counts to zero,
  * which fails OPEN toward sending (at worst one redundant push, never a
  * missed one). Deliberately per-session, not per-subscriber: the v1 semantic
  * is "someone is watching live ⇒ no push".

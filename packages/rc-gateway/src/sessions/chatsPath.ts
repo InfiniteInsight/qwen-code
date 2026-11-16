@@ -14,7 +14,7 @@ import { join, isAbsolute, resolve } from 'node:path';
  * character becomes a dash. On win32 the cwd is lowercased first (matching
  * `os.platform() === 'win32'` in core). This is the project-id segment of the
  * on-disk chats path; cycle-19's `search/transcripts.ts` used a looser
- * `replace(/[/.]/g,'-')` approximation that diverges for `_`/space/etc. — this
+ * `replace(/[/.]/g,'-')` approximation that diverges for `_`/space/etc. - this
  * is the corrected resolver (the search one is a documented follow-up).
  */
 export function sanitizeCwd(cwd: string): string {
@@ -74,8 +74,8 @@ function resolvePath(dir: string): string {
  * OUTSIDE the daemon process: `QWEN_RUNTIME_DIR` env → else `QWEN_HOME` env
  * (= `getGlobalQwenDir`) → else `~/.qwen`.
  *
- * The middle tier in core — a settings-based `setRuntimeBaseDir()`/contextual
- * override — is INVISIBLE to the gateway, which is exactly why the fork route
+ * The middle tier in core - a settings-based `setRuntimeBaseDir()`/contextual
+ * override - is INVISIBLE to the gateway, which is exactly why the fork route
  * guards on the parent file existing at the derived path (a mismatch becomes a
  * clean 404, never silent corruption).
  */
@@ -95,7 +95,7 @@ export function runtimeBaseDir(
 
 /**
  * The chats dir for a workspace: `<runtimeBaseDir>/projects/<sanitizeCwd>/chats`
- * — byte-identical to core's `Storage#getProjectDir()` + `'chats'`.
+ * - byte-identical to core's `Storage#getProjectDir()` + `'chats'`.
  *
  * `cwd` is canonicalised first ({@link canonicalWorkspaceRoot}) so every
  * spelling of one directory maps to the daemon's project segment.
@@ -107,7 +107,7 @@ export function runtimeBaseDir(
  * so no path separator or traversal sequence ever survives into the
  * filesystem path built below (canonicalisation only reads the filesystem to
  * resolve links; its result is still sanitised). Any future caller of this function MUST keep
- * routing untrusted `cwd` values through `sanitizeCwd` — do not bypass it.
+ * routing untrusted `cwd` values through `sanitizeCwd` - do not bypass it.
  */
 export function resolveChatsDir(
   cwd: string,
@@ -124,7 +124,7 @@ export function resolveChatsDir(
 /**
  * The dir a workspace's ARCHIVED transcripts live in. Mirrors core's
  * `getArchiveChatsDir()` (sessionService.ts:954), which is `<chatsDir>/archive`
- * — archiving MOVES the transcript rather than flagging it, so a caller that
+ * - archiving MOVES the transcript rather than flagging it, so a caller that
  * only reads the chats dir cannot see an archived conversation at all.
  *
  * Derived from an already-resolved chats dir rather than from a cwd, so the
@@ -136,7 +136,7 @@ export function archiveChatsDirOf(chatsDir: string): string {
 }
 
 /**
- * The directory holding this workspace's BM25 search index — a sibling of the
+ * The directory holding this workspace's BM25 search index - a sibling of the
  * `chats` dir under the same project segment, so it is keyed to the same
  * `sanitizeCwd(cwd)` and two workspaces can never read each other's index. The
  * index db (and any transient SQLite journal sibling) lives here; the index
@@ -156,7 +156,7 @@ export function resolveSearchIndexDir(
 }
 
 /**
- * Matches core's `SESSION_FILE_PATTERN` (minus the `.jsonl` suffix): 32–36
+ * Matches core's `SESSION_FILE_PATTERN` (minus the `.jsonl` suffix): 32-36
  * chars of hex + dashes. Used to reject path-traversal / malformed parent ids
  * before any path join.
  */
@@ -174,15 +174,15 @@ export function isValidSessionId(id: string): boolean {
  *
  * Sessions live in the chats dir of the workspace they were RUN in, which
  * need not be the gateway's boot workspace (e.g. a conversation started in a
- * project dir). `sanitizeCwd` is lossy — the project segment cannot be
- * reversed to the original cwd — so when the trusted/request cwd candidates
+ * project dir). `sanitizeCwd` is lossy - the project segment cannot be
+ * reversed to the original cwd - so when the trusted/request cwd candidates
  * miss, the only way to find the transcript is a bounded scan of the project
  * segments. The scan names the FILE, not the workspace: callers must treat a
  * scan hit as "workspace unknown" (they cannot derive a `workspaceCwd` for
  * daemon routing from it).
  *
  * Returns `null` when the file exists in no project dir (or the projects dir
- * itself is missing/unreadable). The id is validated first — this function
+ * itself is missing/unreadable). The id is validated first - this function
  * never path-joins an unvalidated id.
  */
 export async function findSessionChatsDir(
@@ -203,7 +203,7 @@ export async function findSessionChatsDir(
       await stat(join(chatsDir, `${sessionId}.jsonl`));
       return chatsDir;
     } catch {
-      // not in this segment — keep scanning
+      // not in this segment - keep scanning
     }
   }
   return null;
@@ -245,7 +245,7 @@ export async function isSessionArchived(
       await stat(join(archiveChatsDirOf(preferredChatsDir), file));
       return true;
     } catch {
-      // not filed in this workspace — the scan below may still find it
+      // not filed in this workspace - the scan below may still find it
     }
   }
   const projectsDir = join(runtimeBaseDir(env), 'projects');
@@ -261,7 +261,7 @@ export async function isSessionArchived(
       await stat(join(archiveDir, file));
       return true;
     } catch {
-      // not filed here — keep scanning
+      // not filed here - keep scanning
     }
   }
   return false;

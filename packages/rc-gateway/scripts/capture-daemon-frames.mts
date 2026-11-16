@@ -5,7 +5,7 @@
  */
 
 /**
- * Phase-2 ground-truth capture (NOT a CI test — needs a real `qwen serve` + a
+ * Phase-2 ground-truth capture (NOT a CI test - needs a real `qwen serve` + a
  * reachable model). Spawns a daemon, attaches a session, drives ONE text turn,
  * and records the real `events()` frame sequence so the `useDaemonStream`
  * projection can be built against actual shapes/ordering, not guesses.
@@ -15,14 +15,14 @@
  *     CAPTURE_OUT=/tmp/daemon-tool-frames.json npx tsx scripts/capture-daemon-frames.mts
  *
  * To capture a REAL `permission_request` (the approval slice's ground truth),
- * force a GATING approval mode and prompt for a non-read tool — reads are
+ * force a GATING approval mode and prompt for a non-read tool - reads are
  * auto-approved, writes/shell gate in `default`/`plan`:
  *   CAPTURE_APPROVAL_MODE=default \
  *     CAPTURE_PROMPT="Create a file named hello.txt containing the word hi" \
  *     CAPTURE_OUT=/tmp/daemon-perm-frames.json npx tsx scripts/capture-daemon-frames.mts
  *
  * If a `qwen serve` is ALREADY running (e.g. the daemon a --attach-daemon TUI
- * connects to), attach to it instead of spawning — avoids `spawn qwen` PATH /
+ * connects to), attach to it instead of spawning - avoids `spawn qwen` PATH /
  * permission problems and captures against the exact daemon you're using:
  *   CAPTURE_ATTACH_URL=http://127.0.0.1:<port> CAPTURE_ATTACH_TOKEN=<token> \
  *     CAPTURE_APPROVAL_MODE=default CAPTURE_PROMPT="…a write/shell task…" \
@@ -33,7 +33,7 @@
  * Writes the full frame log to $CAPTURE_OUT (default /tmp/daemon-frames.json)
  * and prints a type histogram. SAFE: any `permission_request` is immediately
  * DECLINED (`outcome: { outcome: 'cancelled' }`), so a tool the model proposes
- * never executes — we only capture the request shape.
+ * never executes - we only capture the request shape.
  */
 import { writeFileSync } from 'node:fs';
 import { startDaemon } from '../src/daemonSupervisor.js';
@@ -68,7 +68,7 @@ function short(v: unknown, n = 240): string {
 //  - ATTACH to an already-running one (set CAPTURE_ATTACH_URL [+ _TOKEN]); the
 //    capture creates its own fresh session and never touches the daemon's
 //    lifecycle. Use this when a `qwen serve` is already up (e.g. the one your
-//    --attach-daemon TUI connects to) — it sidesteps `spawn qwen` PATH/permission
+//    --attach-daemon TUI connects to) - it sidesteps `spawn qwen` PATH/permission
 //    issues entirely.
 //  - SPAWN a throwaway daemon (default). The launcher is `qwen` on PATH unless
 //    CAPTURE_QWEN_BIN points at the right executable (e.g. an absolute path to
@@ -103,7 +103,7 @@ const APPROVAL_MODE = process.env['CAPTURE_APPROVAL_MODE'];
 if (APPROVAL_MODE) {
   if (!(DAEMON_APPROVAL_MODES as readonly string[]).includes(APPROVAL_MODE)) {
     console.error(
-      `[capture] ignoring CAPTURE_APPROVAL_MODE='${APPROVAL_MODE}' — not one of ${DAEMON_APPROVAL_MODES.join(', ')}`,
+      `[capture] ignoring CAPTURE_APPROVAL_MODE='${APPROVAL_MODE}' - not one of ${DAEMON_APPROVAL_MODES.join(', ')}`,
     );
   } else {
     try {
@@ -144,7 +144,7 @@ const consumer = (async () => {
     ) {
       sawAgentFrame = true;
     }
-    // SAFETY: decline any tool the model proposes so nothing ever executes —
+    // SAFETY: decline any tool the model proposes so nothing ever executes -
     // we only want to capture the request shape.
     if (ev.type === 'permission_request') {
       const reqId = (ev.data as { requestId?: string })?.requestId;
@@ -185,11 +185,11 @@ for (;;) {
   await new Promise((r) => setTimeout(r, 500));
   const idleMs = Date.now() - lastFrameAt;
   if (sawAgentFrame && idleMs > 4000) {
-    console.error('[capture] turn idle after agent output — stopping');
+    console.error('[capture] turn idle after agent output - stopping');
     break;
   }
   if (Date.now() > HARD_CAP) {
-    console.error('[capture] hard cap reached — stopping');
+    console.error('[capture] hard cap reached - stopping');
     break;
   }
 }

@@ -10,7 +10,7 @@ import type { LlamaSwapStatusResponse } from '../llama-swap/llamaSwapStatus.js';
 export type LlamaSwapProbe = () => Promise<LlamaSwapStatusResponse>;
 
 /**
- * `GET /rc/llama-swap` — owner-only (enforced at the mount), read-only
+ * `GET /rc/llama-swap` - owner-only (enforced at the mount), read-only
  * llama-swap status. Returns `200 { available, models }` (the probe result
  * verbatim), or `500 llama_swap_probe_failed` on an unexpected probe failure.
  * No daemon call, no mutation.

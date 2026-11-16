@@ -10,7 +10,7 @@ import type { GpuStatusResponse } from '../gpu/gpuStatus.js';
 export type GpuProbe = () => Promise<GpuStatusResponse>;
 
 /**
- * `GET /rc/gpu` — owner-only (enforced at the mount), read-only GPU status.
+ * `GET /rc/gpu` - owner-only (enforced at the mount), read-only GPU status.
  * Returns `200 { available, gpus }` (the probe result verbatim), or `500
  * gpu_probe_failed` on an unexpected probe failure. No daemon call, no mutation.
  */

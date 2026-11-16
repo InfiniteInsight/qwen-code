@@ -18,7 +18,7 @@ function isNonEmptyString(v: unknown): v is string {
  * embedded into the outbound APNs HTTP/2 `:path` (apnsSender.ts's
  * `/3/device/<deviceToken>`). APNs device tokens are hex; the classic length
  * is 64 chars (32 bytes) but newer tokens can run longer, so the ceiling here
- * (200) is generous — comfortably above any real token — while still
+ * (200) is generous - comfortably above any real token - while still
  * rejecting control characters, path-injection attempts, and absurd lengths
  * from reaching the outbound request line. `bundleId`/`shellVersion` get a
  * reverse-DNS-ish / dotted-version charset and a bounded length for the same
@@ -46,7 +46,7 @@ function isValidShellVersion(v: string): boolean {
  * APNs registration routes (add-native-mobile-shells "APNs subscription
  * registration"), mounted at /rc/native-push/apns so paths are /register and
  * /register/:id. Any authenticated token may register its own device token;
- * delete is own-or-owner. Audit rows carry only { subscriptionId } — never the
+ * delete is own-or-owner. Audit rows carry only { subscriptionId } - never the
  * raw device token.
  */
 export function createNativePushRouter(

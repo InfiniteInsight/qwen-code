@@ -296,7 +296,7 @@ describe('/rc/workspace/permissions', () => {
   });
 });
 
-describe('/rc/workspace/permissions — optimistic concurrency', () => {
+describe('/rc/workspace/permissions - optimistic concurrency', () => {
   // Stable daemon shape (with `.rules` objects, not bare arrays) so the
   // version hash is computed from the real fields the gateway reads.
   const basePermissions = {
@@ -356,7 +356,7 @@ describe('/rc/workspace/permissions — optimistic concurrency', () => {
     const body = await res.json();
     expect(body.code).toBe('stale_base');
     expect(typeof body.currentVersion).toBe('string');
-    // The daemon's setWorkspacePermissionRules was never called — the
+    // The daemon's setWorkspacePermissionRules was never called - the
     // stale base caused the request to be rejected before the mutation.
     expect(ctx.stub.lastPermissionRulesBody).toBeUndefined();
   });
@@ -370,7 +370,7 @@ describe('/rc/workspace/permissions — optimistic concurrency', () => {
     const { version } = (await getRes.json()) as { version: string };
     expect(version.length).toBeGreaterThan(0);
 
-    // POST with the fresh baseVersion — should succeed.
+    // POST with the fresh baseVersion - should succeed.
     const rules = ['Bash(rm:*)'];
     const res = await fetch(`${ctx.baseUrl}/rc/workspace/permissions`, {
       method: 'POST',
@@ -453,7 +453,7 @@ describe('/rc/workspace/permissions — optimistic concurrency', () => {
       headers: authed(ctx.writeToken),
     }).then((r) => r.json() as Promise<{ version: string }>);
 
-    // Mutate the user rules — a persisted field that IS covered by the hash.
+    // Mutate the user rules - a persisted field that IS covered by the hash.
     permissions.user.rules.allow = ['Bash(rm:*)'];
 
     const v2 = await fetch(`${ctx.baseUrl}/rc/workspace/permissions`, {
@@ -543,11 +543,11 @@ describe('workspace target (rc-workspace-scoping, #28)', () => {
   });
 });
 
-describe('workspace target — pool at cap (rc-workspace-scoping, #28)', () => {
+describe('workspace target - pool at cap (rc-workspace-scoping, #28)', () => {
   /**
    * A real DaemonPool wired in as the gateway's `daemon` dep: cap of 1
    * with one busy entry (a live session → not evictable), so a NEW
-   * workspace target cannot be spawned — the routes must map
+   * workspace target cannot be spawned - the routes must map
    * WorkspacePoolFullError to 503 `workspace_pool_full`, not 502.
    */
   async function setupPoolAtCap(): Promise<{
@@ -655,7 +655,7 @@ describe('workspace target — pool at cap (rc-workspace-scoping, #28)', () => {
       { workspaceCwd: '/proj/a', idle: false, state: 'busy' },
     ]);
     expect(body.next).toContain('idleReapMs');
-    // The default workspace is not pooled — it stays reachable at cap.
+    // The default workspace is not pooled - it stays reachable at cap.
     const ok = await fetch(`${ctx.baseUrl}/rc/workspace/permissions`, {
       headers: authed(ctx.writeToken),
     });

@@ -32,7 +32,7 @@ const oracle = (
   state: (id) => m[id] ?? 'untracked',
 });
 
-describe('explainPolicy — drift guard (decision === evaluate)', () => {
+describe('explainPolicy - drift guard (decision === evaluate)', () => {
   const scenarios: Array<{
     name: string;
     p: Policy;
@@ -97,7 +97,7 @@ describe('explainPolicy — drift guard (decision === evaluate)', () => {
   }
 });
 
-describe('explainPolicy — trace structure', () => {
+describe('explainPolicy - trace structure', () => {
   it('walks rules in evaluation order; winner matched, later rules not-reached', () => {
     // Two rules both match bash; the more specific (higher priority) wins.
     const p = policy([
@@ -163,7 +163,7 @@ describe('explainPolicy — trace structure', () => {
   });
 });
 
-describe('explainPolicy — skipped reason tokens', () => {
+describe('explainPolicy - skipped reason tokens', () => {
   const cases: Array<{
     name: string;
     rule: Policy['rules'][number];
@@ -221,7 +221,7 @@ describe('explainPolicy — skipped reason tokens', () => {
   }
 });
 
-describe('explainPolicy — condition reasons', () => {
+describe('explainPolicy - condition reasons', () => {
   it('expired → skipped/expired', () => {
     const p = policy([
       {
@@ -237,7 +237,7 @@ describe('explainPolicy — condition reasons', () => {
   });
 
   it('outside-time-window → skipped/outside-time-window', () => {
-    // NOW is 12:00 UTC; window 01:00–02:00 UTC excludes it.
+    // NOW is 12:00 UTC; window 01:00-02:00 UTC excludes it.
     const p = policy([
       {
         id: 'a',

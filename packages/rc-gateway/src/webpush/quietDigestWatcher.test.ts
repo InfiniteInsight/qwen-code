@@ -71,7 +71,7 @@ describe('QuietDigestWatcher', () => {
     expect(tick(w, [QUIET_WRAP], at('2026-06-10T03:00:00Z'))).toEqual([]); // still quiet
     expect(tick(w, [QUIET_WRAP], at('2026-06-10T07:30:00Z'))).toEqual([
       'sub-1',
-    ]); // exit — single fire
+    ]); // exit - single fire
   });
 
   it('does not fire while staying quiet across many ticks', () => {
@@ -106,7 +106,7 @@ describe('QuietDigestWatcher', () => {
   it('prunes state for subscriptions no longer present', () => {
     const w = new QuietDigestWatcher();
     tick(w, [QUIET_WRAP], at('2026-06-09T02:00:00Z')); // seed sub-1 quiet
-    // sub-1 disappears; later it reappears already mid-quiet — must be re-seeded
+    // sub-1 disappears; later it reappears already mid-quiet - must be re-seeded
     // (no fire), proving its old "quiet" state was pruned.
     expect(tick(w, [], at('2026-06-09T07:30:00Z'))).toEqual([]);
     expect(tick(w, [QUIET_WRAP], at('2026-06-09T08:00:00Z'))).toEqual([]); // re-seed not-quiet

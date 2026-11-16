@@ -8,18 +8,18 @@
  * Matrix bridge healthz endpoint (`add-matrix-bridge`: "Healthz endpoint"). The
  * bridge exposes `GET /healthz` on a small LOOPBACK HTTP server returning
  * `{ ok, daemonReachable, homeserverReachable, olmStorePresent, registeredId,
- * uptimeSec }` — a liveness/observability probe (e.g. a Docker `HEALTHCHECK` for
+ * uptimeSec }` - a liveness/observability probe (e.g. a Docker `HEALTHCHECK` for
  * the sidecar). It is the surface that reflects the olm-store status.
  *
  * Bound to 127.0.0.1 (not 0.0.0.0): the report is unauthenticated and leaks
  * internal reachability + the registered id, so loopback matches the fork's
  * posture and is enough for an in-container probe. Bind failure (e.g. the port is
- * taken) NEVER crashes the bridge — it logs and continues (the same never-kill
+ * taken) NEVER crashes the bridge - it logs and continues (the same never-kill
  * invariant as the rest of the bridge boot).
  *
  * The dynamic fields are right-sized to the spec, which tests only
  * `olmStorePresent`: `registeredId`/`daemonReachable` come from one post-register
- * hook and `homeserverReachable` from the sync-success / adapter-start signal —
+ * hook and `homeserverReachable` from the sync-success / adapter-start signal -
  * no heartbeat-failure tracking and no periodic probes. NOTE the asymmetry: on the
  * fetch path `homeserverReachable` flips false on a sync error, but on the E2EE
  * adapter path the SDK owns `/sync` and hides later reconnects from the runner, so
@@ -55,7 +55,7 @@ export interface MatrixHealthReport {
  * Resolve the healthz port from `QWEN_BRIDGE_HEALTHZ_PORT`. `fallback` is the
  * default when the var is unset (9100 for the sidecar per spec; `undefined`
  * in-process so the gateway process never binds a surprise port). `off`/`none`/`0`
- * (or empty) explicitly disables; a valid 1–65535 wins; anything else → fallback.
+ * (or empty) explicitly disables; a valid 1-65535 wins; anything else → fallback.
  */
 export function parseHealthzPort(
   value: string | undefined,
@@ -80,9 +80,9 @@ export function initialMatrixHealthState(): MatrixHealthState {
 
 /**
  * Build the health report from the live state plus the olm-store fs check.
- * `ok` is the conjunction of `daemonReachable` AND `homeserverReachable` —
+ * `ok` is the conjunction of `daemonReachable` AND `homeserverReachable` -
  * both must be true for the bridge to be fully operational. Pure (aside from
- * the fs read olmStorePresent does) — `nowMs`/`startedAtMs` are injected so
+ * the fs read olmStorePresent does) - `nowMs`/`startedAtMs` are injected so
  * uptime is testable.
  */
 export function buildMatrixHealthReport(
@@ -109,7 +109,7 @@ export interface MatrixHealthServer {
 /**
  * Start the loopback `GET /healthz` server on `port`. `report()` is invoked per
  * request (so each response reflects current state + a fresh olm-store check).
- * Resolves once listening, or — on a bind error — logs and resolves with a no-op
+ * Resolves once listening, or - on a bind error - logs and resolves with a no-op
  * handle (NEVER rejects: a healthz port conflict must not take down the bridge).
  */
 export function startMatrixHealthServer(
@@ -139,7 +139,7 @@ export function startMatrixHealthServer(
       log(
         `matrix healthz: could not bind port ${port} (${
           (err as Error).message ?? err
-        }) — healthz disabled`,
+        }) - healthz disabled`,
       );
       resolve({ close: async () => {}, port: 0 });
     });

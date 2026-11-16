@@ -258,7 +258,7 @@ describe('per-token keying', () => {
     await put({ stampZone: 'Asia/Tokyo' });
 
     // A second paired token on the same gateway sees the default, not the
-    // phone's choice — which is the whole reason this is keyed per token.
+    // phone's choice - which is the whole reason this is keyed per token.
     const other = await get('laptop');
     expect(other.json).toEqual({
       stampZone: DEFAULT_STAMP_ZONE,

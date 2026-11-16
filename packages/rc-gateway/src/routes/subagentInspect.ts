@@ -9,7 +9,7 @@ import { classifySubagentFailure } from './subagentFailure.js';
 import type { SessionDaemon } from '../daemonPool.js';
 
 /**
- * GET /session/:id/subagents/:subagentRef — read ONE subagent's own run state.
+ * GET /session/:id/subagents/:subagentRef - read ONE subagent's own run state.
  *
  * This is the read half of the pair whose write half already ships as
  * `/cancel`. A viewer can already draw a nested subagent block and already

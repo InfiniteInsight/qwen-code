@@ -121,7 +121,7 @@ function deps(over: Partial<DiscordDispatchDeps> = {}) {
   };
 }
 
-describe('discord dispatch — chat message → prompt', () => {
+describe('discord dispatch - chat message → prompt', () => {
   it('forwards a bound-channel message with a snowflake sub-actor', async () => {
     await channels.bind('chan_42', 'g1', 'sess_abc');
     const f = deps();
@@ -255,7 +255,7 @@ describe('discord dispatch — chat message → prompt', () => {
   });
 });
 
-describe('discord dispatch — slash commands', () => {
+describe('discord dispatch - slash commands', () => {
   const cmd = (name: 'attach' | 'detach' | 'status', arg?: string) => ({
     interactionId: 'int_1',
     interactionToken: 'tok',
@@ -305,7 +305,7 @@ describe('discord dispatch — slash commands', () => {
   });
 });
 
-describe('discord dispatch — button click → vote', () => {
+describe('discord dispatch - button click → vote', () => {
   const comp = (customId: string, userId = '111122223333') => ({
     interactionId: 'int_1',
     interactionToken: 'tok',

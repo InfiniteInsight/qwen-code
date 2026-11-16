@@ -233,7 +233,7 @@ describe('buildForkTitleRecord', () => {
     ];
     const forked = forkRecords(withTitle, 'src', 'NEW');
     const rec = buildForkTitleRecord(forked, 'new name', opts);
-    // Chains onto the inherited title record (the literal last line) — faithful
+    // Chains onto the inherited title record (the literal last line) - faithful
     // to core's readLastRecordUuid title->title chaining on a double-rename.
     expect(rec['parentUuid']).toBe('told');
 

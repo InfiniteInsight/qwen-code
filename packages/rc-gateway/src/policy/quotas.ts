@@ -41,7 +41,7 @@ export interface QuotaRecord {
 }
 
 /**
- * Durable storage for consume records. A dumb append log — all window/limit logic
+ * Durable storage for consume records. A dumb append log - all window/limit logic
  * lives in {@link QuotaStore}. Every method NEVER throws (errors degrade to a warn
  * + best-effort), so the store can stay total.
  */
@@ -80,7 +80,7 @@ export class MemoryQuotaWal implements QuotaWal {
  * they are NOT used.
  *
  * The clock is injected per call (`nowMs`) so a single evaluation is consistent and
- * tests are deterministic — there is no `Date.now()` inside. Pruning is lazy
+ * tests are deterministic - there is no `Date.now()` inside. Pruning is lazy
  * (on access) plus an amortized WAL compaction to bound on-disk growth.
  *
  * INERT this cycle: nothing in the evaluator/enforcer imports it yet. The wiring
@@ -100,7 +100,7 @@ export class QuotaStore {
     this.floor = compactionFloor;
   }
 
-  /** Load+replay the WAL (lazy prune — no pruning here, done on first access). */
+  /** Load+replay the WAL (lazy prune - no pruning here, done on first access). */
   static async create(
     wal: QuotaWal,
     limitsFor: (ruleId: string) => QuotaLimit | undefined,
@@ -164,14 +164,14 @@ export class QuotaStore {
       this.walLines += 1;
       if (this.walLines > this.floor) await this.compact(nowMs);
     } catch {
-      /* swallow — counter stands in memory; the lost line just won't persist */
+      /* swallow - counter stands in memory; the lost line just won't persist */
     }
   }
 
   /**
    * Atomically reserve one slot for `ruleId` at `nowMs` if room exists: pushes
-   * `nowMs` into the in-memory window IMMEDIATELY (synchronously — no `await`
-   * anywhere in this method) and returns true; returns false — no mutation —
+   * `nowMs` into the in-memory window IMMEDIATELY (synchronously - no `await`
+   * anywhere in this method) and returns true; returns false - no mutation -
    * when exhausted or untracked.
    *
    * This closes the classic check-then-act race across concurrent callers of
@@ -179,22 +179,22 @@ export class QuotaStore {
    * shared `ruleId`, since quota state is keyed by ruleId alone, not
    * session): `state()`/`remaining()` are read-only, so two concurrent
    * decisions can both observe `'room'` before either commits. `reserve()` is
-   * the commit — callers must invoke it synchronously, right when a decision
+   * the commit - callers must invoke it synchronously, right when a decision
    * is made (before any `await`, e.g. the permission vote), so a second
-   * caller's own `state()`/`evaluate()` check — which can only run before
+   * caller's own `state()`/`evaluate()` check - which can only run before
    * this call's synchronous prefix starts or after it ends, never
-   * interleaved, by JS run-to-completion — is guaranteed to see the
+   * interleaved, by JS run-to-completion - is guaranteed to see the
    * reservation already committed.
    *
    * A caller that reserves MUST follow up with EXACTLY ONE of:
-   * - {@link confirmReserved} — the reserved action succeeded; persist the
+   * - {@link confirmReserved} - the reserved action succeeded; persist the
    *   slot durably (WAL).
-   * - {@link releaseReserved} — the reserved action failed/threw; roll the
+   * - {@link releaseReserved} - the reserved action failed/threw; roll the
    *   reservation back so it does not count against future decisions.
    */
   reserve(ruleId: string, nowMs: number): boolean {
     const limit = this.limitsFor(ruleId);
-    if (!limit) return false; // untracked — nothing to reserve
+    if (!limit) return false; // untracked - nothing to reserve
     const used = this.usedAfterPrune(ruleId, limit.windowSec, nowMs);
     if (used >= limit.count) return false;
     const arr = this.hits.get(ruleId);
@@ -206,7 +206,7 @@ export class QuotaStore {
   /**
    * Durably persist a slot previously reserved via {@link reserve}. The
    * in-memory count was already committed by `reserve()` itself, so this is
-   * WAL-append-only (never a second in-memory push). Never throws — mirrors
+   * WAL-append-only (never a second in-memory push). Never throws - mirrors
    * {@link consume}'s persistence contract.
    *
    * NOTE (benign, documented): if this triggers the amortized `compact()`
@@ -214,7 +214,7 @@ export class QuotaStore {
    * *unconfirmed* reservation, that reservation's instant is still in
    * `this.hits` and will be written to the WAL here. Should that other
    * reservation later be released (vote failed), the WAL keeps a phantom
-   * record until the next compaction prunes it out by window age — a
+   * record until the next compaction prunes it out by window age - a
    * bounded, fail-closed over-count (fewer future auto-allows), never an
    * under-count. Not fixed here: narrowing it needs compaction to snapshot
    * only confirmed instants, out of scope for this race fix.
@@ -225,16 +225,16 @@ export class QuotaStore {
       this.walLines += 1;
       if (this.walLines > this.floor) await this.compact(nowMs);
     } catch {
-      /* swallow — counter stands in memory; the lost line just won't persist */
+      /* swallow - counter stands in memory; the lost line just won't persist */
     }
   }
 
   /**
    * Roll back one slot previously reserved via {@link reserve} that was never
-   * confirmed (e.g. a permission vote that failed or threw) — removes ONE
+   * confirmed (e.g. a permission vote that failed or threw) - removes ONE
    * matching instant from memory (the most recently pushed, LIFO, in case of
    * duplicate `nowMs` values). Never persisted (confirmReserved wasn't
-   * called), so there is nothing to undo in the WAL. Synchronous — never
+   * called), so there is nothing to undo in the WAL. Synchronous - never
    * throws.
    */
   releaseReserved(ruleId: string, nowMs: number): void {
@@ -268,7 +268,7 @@ export class QuotaStore {
     try {
       await this.wal.rewrite(survivors);
     } catch {
-      /* swallow — memory is already pruned; the on-disk WAL just stays larger */
+      /* swallow - memory is already pruned; the on-disk WAL just stays larger */
     }
     this.walLines = survivors.length;
     this.floor = Math.max(this.floor, 2 * survivors.length);
@@ -281,7 +281,7 @@ export class QuotaStore {
  * a throw, so a misconfigured/unreadable WAL never blocks a policy decision.
  *
  * Fail-direction (design D4): `load` returns `[]` on a missing file (NORMAL, no
- * warn) and on a whole-file read error (FAILS OPEN — a reset counter resumes a
+ * warn) and on a whole-file read error (FAILS OPEN - a reset counter resumes a
  * fresh window; `maxPerWindow`'s beyond-cap fallback is prompt, not deny, so this
  * is a bounded cap-reset, with a loud warn). Torn/garbage/wrong-shape individual
  * lines are skipped.

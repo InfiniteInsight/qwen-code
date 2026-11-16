@@ -8,7 +8,7 @@
  * Pure config + capability logic for add-native-mobile-shells (Cycle B). Parses
  * the optional `~/.qwen/rc/native-push.yaml`, builds the
  * `remoteControl.nativeShells` capability block, and builds the Android TWA
- * `assetlinks.json` statement. No fs/network here — cli wiring reads the file and
+ * `assetlinks.json` statement. No fs/network here - cli wiring reads the file and
  * checks the P-8 key's readability; this module is unit-tested in full.
  */
 

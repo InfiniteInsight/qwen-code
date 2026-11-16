@@ -18,8 +18,8 @@ import type { AuditRecorder } from '../auditLog.js';
  * POST /session/:id/permission/:requestId
  * { outcome, optionId?, answers? } → vote.
  *
- * `answers` carries ask_user_question responses — a flat string→string map
- * keyed by question index — forwarded to the daemon at the PermissionResponse
+ * `answers` carries ask_user_question responses - a flat string→string map
+ * keyed by question index - forwarded to the daemon at the PermissionResponse
  * level so the tool's onConfirm/execute can read it.
  */
 export function createPermissionVoteRoute(

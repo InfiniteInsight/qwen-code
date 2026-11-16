@@ -30,7 +30,7 @@ function fakeAudit(): { entries: AuditEntry[]; recorder: AuditRecorder } {
 /**
  * REAL permission_request data: the daemon emits the ACP ToolCall verbatim as
  * `{ toolCallId, title, kind, rawInput }`. The old synthetic `{ name, input }`
- * shape is what hid the extraction bug for nine policy cycles — never
+ * shape is what hid the extraction bug for nine policy cycles - never
  * reintroduce it. Every permission event in this file is built through this
  * one helper.
  *
@@ -544,7 +544,7 @@ describe('PolicyEnforcer', () => {
       voted: true,
     });
 
-    // prompt (no rule matched — tool still recorded)
+    // prompt (no rule matched - tool still recorded)
     const p = fakeAudit();
     await new PolicyEnforcer(daemon, emptyPolicy, p.recorder).handlePermission(
       's1',
@@ -721,7 +721,7 @@ describe('PolicyEnforcer', () => {
       });
     });
 
-    it('an expired overlay is inert — the file policy stands', async () => {
+    it('an expired overlay is inert - the file policy stands', async () => {
       stub = await startStubDaemon({ permissionStatus: 200 });
       const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
       const audit = fakeAudit();
@@ -759,7 +759,7 @@ describe('PolicyEnforcer', () => {
         { action: 'deny', tool: 'execute', expiresAt: NOW + HOUR_MS },
         NOW,
       );
-      // 3-arg ctor: no overlays wired in — the store is never consulted.
+      // 3-arg ctor: no overlays wired in - the store is never consulted.
       const enf = new PolicyEnforcer(daemon, allowExecute, audit.recorder);
 
       const handled = await enf.handlePermission(

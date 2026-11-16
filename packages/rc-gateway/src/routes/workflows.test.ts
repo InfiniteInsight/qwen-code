@@ -114,7 +114,7 @@ describe('POST /rc/workflows', () => {
     expect((row.detail?.['scriptHash'] as string).length).toBeGreaterThan(0);
 
     // Security property: the raw script SOURCE text must never appear in any
-    // audit record — only name + scriptHash are ever recorded (never the body).
+    // audit record - only name + scriptHash are ever recorded (never the body).
     const serialized = JSON.stringify(audit.calls);
     expect(serialized).not.toContain(SCRIPT);
     expect(serialized).not.toContain("phase('Go')");
@@ -134,7 +134,7 @@ describe('POST /rc/workflows', () => {
   });
 });
 
-describe('POST /rc/workflows { name } — guarded named resolution', () => {
+describe('POST /rc/workflows { name } - guarded named resolution', () => {
   async function wireNamed() {
     const projDir = await mkdtemp(join(tmpdir(), 'wf-proj-'));
     const homeDir = await mkdtemp(join(tmpdir(), 'wf-home-'));
@@ -147,7 +147,7 @@ describe('POST /rc/workflows { name } — guarded named resolution', () => {
 
   it('resolves a named workflow with project-then-user precedence', async () => {
     const { projDir, homeDir, resolveNamed } = await wireNamed();
-    // Same name in BOTH dirs, different meta.name — project MUST win.
+    // Same name in BOTH dirs, different meta.name - project MUST win.
     await writeFile(
       join(projDir, '.qwen', 'workflows', 'dup.js'),
       `export const meta = { name: 'proj-wins', description: 'd' };\nreturn 1;`,
@@ -252,14 +252,14 @@ describe('GET /rc/workflows (list)', () => {
       scriptHash: 'h1',
     });
     runRegistry.addAgent(own.runId, 'a1', 'S1');
-    // Unrelated run — must never leak.
+    // Unrelated run - must never leak.
     const other = runRegistry.create({
       runId: 'r-other',
       name: 'other-secret',
       scriptHash: 'h2',
     });
     runRegistry.addAgent(other.runId, 'a2', 'S2');
-    // A run with no agents at all — no determinable session tie, fail-closed
+    // A run with no agents at all - no determinable session tie, fail-closed
     // exclude it for a locked caller.
     runRegistry.create({ runId: 'r-empty', name: 'empty', scriptHash: 'h3' });
 
@@ -323,7 +323,7 @@ describe('GET /rc/workflows/:runId (detail)', () => {
       scriptHash: 'h3',
     });
 
-    // Another session's run, by id, must 404 — same shape as unknown id — and
+    // Another session's run, by id, must 404 - same shape as unknown id - and
     // must NEVER leak its per-agent session map in the response body.
     const otherRes = await fetch(`${url}/rc/workflows/${other.runId}`);
     expect(otherRes.status).toBe(404);
@@ -332,12 +332,12 @@ describe('GET /rc/workflows/:runId (detail)', () => {
       agents?: unknown;
     };
     expect(otherBody.code).toBe('workflow_not_found');
-    // The 404 body must be the bare not-found shape — no per-agent session
+    // The 404 body must be the bare not-found shape - no per-agent session
     // map and no leaked run name (the 200 shape's `agents`/`name` fields).
     expect(otherBody).not.toHaveProperty('agents');
     expect(JSON.stringify(otherBody)).not.toContain('other-secret');
 
-    // A run with no agents at all — no determinable session tie — is
+    // A run with no agents at all - no determinable session tie - is
     // fail-closed excluded (not visible) for a locked caller.
     const emptyRes = await fetch(`${url}/rc/workflows/${empty.runId}`);
     expect(emptyRes.status).toBe(404);
@@ -417,8 +417,8 @@ describe('cancel', () => {
   it('concurrent double-cancel on a real in-flight run: exactly one 202, one 409, one workflow_cancelled audit row + one SSE frame', async () => {
     const { url, runRegistry, audit, seen } = await setup(500);
     // Two sequential agent() calls: the first is in-flight (500ms stub delay)
-    // when cancel arrives — its spawn is aborted and resolves null (design:
-    // "spawn failure -> agent() resolves null") — but by the time the script
+    // when cancel arrives - its spawn is aborted and resolves null (design:
+    // "spawn failure -> agent() resolves null") - but by the time the script
     // reaches the SECOND agent() call the signal is already aborted, so the
     // sandbox synchronously rejects and the run surfaces as truly 'cancelled'
     // (scriptRunner.ts: `controller.signal.aborted ? 'cancelled' : 'failed'`).
@@ -430,7 +430,7 @@ describe('cancel', () => {
     });
     const { runId } = (await start.json()) as { runId: string };
     // Let the background engine progress past its journal-open await and
-    // register its internal abort listener before we cancel — otherwise the
+    // register its internal abort listener before we cancel - otherwise the
     // cancel can race ahead of listener registration and the engine would
     // never observe the abort at all (unrelated engine-internal timing, not
     // what this test is exercising).
@@ -452,7 +452,7 @@ describe('cancel', () => {
       'workflow_not_running',
     );
 
-    // Exactly one audit row, written synchronously by the winning caller —
+    // Exactly one audit row, written synchronously by the winning caller -
     // no need to wait for the background finish() path.
     expect(
       audit.calls.filter((c) => c.action === 'workflow_cancelled'),

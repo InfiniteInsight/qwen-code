@@ -8,7 +8,7 @@
  * Browser CORS allowlist derived from pairing.
  *
  * Ported from the donor remoteControl/cors.ts.  This module is pure and
- * framework-agnostic — it operates on plain header maps and never imports an
+ * framework-agnostic - it operates on plain header maps and never imports an
  * HTTP framework.  The gateway supplies the distinct `origin` values recorded
  * in the token store (populated from the `Origin` header at redemption time)
  * plus any owner-configured overrides.
@@ -225,7 +225,7 @@ function allowHeadersValue(requestHeaders?: string): string {
 
 /**
  * Is `origin` a syntactically valid RFC 6454 origin (`scheme://host[:port]`,
- * serialized form — no path, userinfo, query, fragment, or trailing slash)
+ * serialized form - no path, userinfo, query, fragment, or trailing slash)
  * whose scheme is admissible?  The scheme must be `https` (any host), or
  * `http` only when the origin's host is loopback (`127.0.0.0/8`, `::1`, or
  * `localhost`).
@@ -266,7 +266,7 @@ function isLoopbackHost(hostname: string): boolean {
  * Does the `Sec-Fetch-Site` request header permit recording the Origin at
  * redemption?  `same-origin`, `none`, or an absent header (non-browser client)
  * allow recording; `same-site`, `cross-site`, or anything else MUST NOT have
- * the Origin recorded — a sibling subdomain must not self-admit.
+ * the Origin recorded - a sibling subdomain must not self-admit.
  */
 export function secFetchSiteAllowsRecording(
   header: string | undefined,
@@ -321,7 +321,7 @@ export interface AdmissionDecision {
  *     origin exactly matches the gateway's own UI origin;
  *  3. `Sec-Fetch-Site` is `same-origin`, `none`, or absent.
  *
- * Failing the gate never fails the redemption itself — the caller still
+ * Failing the gate never fails the redemption itself - the caller still
  * issues the token; it merely skips recording the origin.
  */
 export function evaluateAdmission(input: {
@@ -346,7 +346,7 @@ export function evaluateAdmission(input: {
 }
 
 /**
- * Build the preflight allowlist from origin records — both persisted
+ * Build the preflight allowlist from origin records - both persisted
  * (`source: 'db'`) and config-sourced (`source: 'config'`) are honored equally.
  */
 export function allowlistFromRecords(

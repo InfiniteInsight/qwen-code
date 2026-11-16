@@ -247,7 +247,7 @@ describe('POST /session/:id/rewind', () => {
     expect(body.truncatedEventId).toBe(2); // turn 1 boundary = record index 2
 
     // The route mapped toTurn 1 onto the daemon snapshot whose turnIndex is
-    // 1 and rewound to THAT snapshot's promptId (never the toTurn itself —
+    // 1 and rewound to THAT snapshot's promptId (never the toTurn itself -
     // the daemon is promptId-keyed post-merge).
     expect(rewindCalls).toEqual([
       { id: SESSION_ID, promptId: `${SESSION_ID}########1` },
@@ -307,7 +307,7 @@ describe('POST /session/:id/rewind', () => {
     const res = await postRewind(url, { toTurn: 0 });
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ code: 'rewind_in_progress' });
-    // The daemon must never be touched while a prompt holds the slot —
+    // The daemon must never be touched while a prompt holds the slot -
     // neither the snapshots lookup nor the rewind itself.
     expect(rewindCalls).toHaveLength(0);
     expect(snapshotCalls).toBe(0);
@@ -447,7 +447,7 @@ describe('POST /session/:id/rewind', () => {
     expect(res.status).toBe(500);
     expect(await res.json()).toMatchObject({ code: 'rewind_marker_failed' });
     expect(spy).toHaveBeenCalledTimes(2);
-    // The daemon already rewound — that call happened exactly once.
+    // The daemon already rewound - that call happened exactly once.
     expect(rewindCalls).toHaveLength(1);
     // Atomicity: marker absent → audit MUST also be absent.
     expect(audit.calls).toHaveLength(0);
@@ -472,7 +472,7 @@ describe('POST /session/:id/rewind', () => {
     const url = await mount({ daemon, audit, bus, walDir });
 
     // The marker append succeeds (real impl → bytes durable via writeSync), but
-    // close() throws — a realistic deferred-writeback EIO on NFS. This must NOT
+    // close() throws - a realistic deferred-writeback EIO on NFS. This must NOT
     // abort the post-commit steps: the marker is already committed on disk.
     const closeSpy = vi
       .spyOn(SessionWal.prototype, 'close')
@@ -575,7 +575,7 @@ describe('POST /session/:id/rewind', () => {
     expect(body.truncatedEventId).toBe(6); // tip → whole transcript (3 turns × 2 records)
 
     // A tip rewind truncates nothing: the daemon (resume-ensure, snapshots,
-    // rewind) is NEVER called — only the gateway-side marker is recorded.
+    // rewind) is NEVER called - only the gateway-side marker is recorded.
     expect(rewindCalls).toHaveLength(0);
     expect(snapshotCalls).toBe(0);
     expect(resumeCalls).toHaveLength(0);
@@ -608,7 +608,7 @@ describe('POST /session/:id/rewind', () => {
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ code: 'rewind_not_applicable' });
     // The snapshots lookup ran (to find the missing snapshot) but the rewind
-    // itself never fired — and nothing was persisted.
+    // itself never fired - and nothing was persisted.
     expect(rewindCalls).toHaveLength(0);
     expect(audit.calls).toHaveLength(0);
     const wal = new SessionWal({ dir: walDir, sessionId: SESSION_ID });
@@ -654,7 +654,7 @@ describe('POST /session/:id/rewind', () => {
   });
 
   it('cross-workspace: transcript under a second workspace is found by the scan; resume-ensure skipped (workspace unknown)', async () => {
-    // The session ran in CWD2, but the gateway's trusted workspace is CWD —
+    // The session ran in CWD2, but the gateway's trusted workspace is CWD -
     // exactly the production shape (conversations started in a project dir
     // while the daemon booted in $HOME).
     await writeTranscript(3, resolveChatsDir(CWD2));

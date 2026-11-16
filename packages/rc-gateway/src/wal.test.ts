@@ -107,7 +107,7 @@ describe('SessionWal', () => {
     });
 
     wal.append(makeFrame(1)); // at t=1_000_000
-    now += 15_000; // jump 15s forward — frame 1 is now beyond 10s horizon
+    now += 15_000; // jump 15s forward - frame 1 is now beyond 10s horizon
     wal.append(makeFrame(2)); // at t=1_015_000
 
     wal.close();

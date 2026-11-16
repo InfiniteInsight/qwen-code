@@ -4,7 +4,7 @@ The Discord bridge lets a team approve tool calls and send prompts to a qwen
 session from a Discord channel. It is the second conformant consumer of the
 `add-bridge-protocol` contract (after Telegram) and runs **in-process** inside
 the gateway, talking the gateway only over the loopback HTTP+SSE contract with an
-operator-minted bridge-scope token — so it can be promoted to a separate-process
+operator-minted bridge-scope token - so it can be promoted to a separate-process
 sidecar later by changing only its configuration.
 
 > **Placement note.** The change spec proposes a standalone
@@ -17,7 +17,7 @@ sidecar later by changing only its configuration.
 
 - Renders each `permission_request` into a channel message with **Approve /
   Deny** buttons (or a single _Open in web client_ link button when the gateway
-  marks the call sensitive/large — the full args are never dumped to chat).
+  marks the call sensitive/large - the full args are never dumped to chat).
 - Turns a button click into a gateway vote, attributed to the clicking Discord
   user.
 - Forwards chat messages in a bound channel to the session as prompts.
@@ -42,7 +42,7 @@ sidecar later by changing only its configuration.
   individually fence-balanced); cross-flush fence continuity is not attempted.
 - If a turn ends with a sub-trigger tail still buffered (no paragraph break,
   under the char cap, idle timer not yet fired), that tail isn't force-flushed at
-  the boundary — it merges into the next turn's first message. Cosmetic only;
+  the boundary - it merges into the next turn's first message. Cosmetic only;
   content and fence balance are preserved.
 - **Last-Event-ID resume is not used.** The daemon replays nothing without a
   cursor (`EventBus.subscribe` only replays when a cursor is supplied), so a
@@ -76,7 +76,7 @@ https://discord.com/api/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot+ap
 
 (Use the generated `permissions` integer rather than hand-computing the bitfield.)
 Open the URL and add the bot to a server you control. Bound channels should be
-private — anyone who can see a bound channel can see the deeplink (which exposes
+private - anyone who can see a bound channel can see the deeplink (which exposes
 the gateway URL; the URL is not a secret, bearer auth is what protects the
 daemon).
 
@@ -111,7 +111,7 @@ is missing, the gateway logs a warning and does **not** start the bridge.
 
 ### Binding a channel
 
-Binding is **operator-issued** — a channel only binds when an operator hands out
+Binding is **operator-issued** - a channel only binds when an operator hands out
 a one-time invite token. First, on the workstation, mint an invite for the
 session you want to expose:
 
@@ -131,20 +131,20 @@ Then, in a channel the bot can see, a guild member runs:
 
 The bridge redeems the token via `POST /rc/bridges/:id/invite/redeem`, binds the
 channel to the session the token names, and replies **ephemerally** (visible only
-to you). A guild member never types a session id — the operator decides every
+to you). A guild member never types a session id - the operator decides every
 channel→session binding, and an invalid or expired token is refused with the
 gateway's error text (no binding persisted). `/qwen detach` unbinds the channel;
 `/qwen status` reports the current binding and a usage tip.
 
 Invites are one-time and short-lived (20 min). The gateway holds them in memory,
-so a gateway restart drops any unredeemed invite — just mint a fresh one.
+so a gateway restart drops any unredeemed invite - just mint a fresh one.
 
 ### Sending prompts
 
 Once a channel is bound, **type in chat** to send a prompt to the session. Slash
 commands are the control plane; the chat input is the data plane. The bot's own
 messages are never relayed back to the daemon. As the agent works, its reply is
-streamed back into the channel (and into a thread once a turn runs long — see
+streamed back into the channel (and into a thread once a turn runs long - see
 above).
 
 ### Approving tool calls
@@ -200,11 +200,11 @@ restart, so re-running the bridge with new credentials preserves them.
 
 ## Verification ceiling
 
-The pure layers — rendering, event normalization, the channel store, the REST
-client, and the dispatcher — are unit-tested. The runner's outbound delivery and
+The pure layers - rendering, event normalization, the channel store, the REST
+client, and the dispatcher - are unit-tested. The runner's outbound delivery and
 subscription logic are unit-tested with fakes. The **live discord.js gateway
 connection** (heartbeat, IDENTIFY, RESUME, inbound interaction delivery) is
-delegated to `discord.js` and is **not** exercised in CI — there is no real
+delegated to `discord.js` and is **not** exercised in CI - there is no real
 Discord to test against in this environment. A boot-smoke confirms the module
 chain loads and that the bridge authenticates over the loopback contract (a bad
 token draws a `401` from the gateway's own auth).

@@ -11,7 +11,7 @@
  * retries). `cleanup` deletes it (best-effort).
  *
  * Logic takes an injectable {@link CloudflareApi} (unit-tested with a fake);
- * {@link createCloudflareApi} is the real `fetch`-based client (no SDK needed) —
+ * {@link createCloudflareApi} is the real `fetch`-based client (no SDK needed) -
  * the token comes from `CLOUDFLARE_API_TOKEN`, the zone id from
  * `CLOUDFLARE_ZONE_ID`.
  */

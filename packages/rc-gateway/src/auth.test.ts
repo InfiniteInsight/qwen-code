@@ -258,7 +258,7 @@ describe('auth middleware', () => {
       headers: { authorization: `Bearer ${share.token}` },
     } as Request;
     // bearerResolve enriches rcClient.shareId/shareLabel, then a scope it
-    // lacks is denied — that denial row must be attributable + labeled.
+    // lacks is denied - that denial row must be attributable + labeled.
     bearerResolve(store, audit)(req, fakeRes(), () => {});
     requireScope(APPROVE, audit)(req, fakeRes(), () => {});
     const denied = audit.calls.find((c) => c.action === 'scope_denied');

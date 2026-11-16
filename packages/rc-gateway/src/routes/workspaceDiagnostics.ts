@@ -103,7 +103,7 @@ function diagnosticsRead(
 }
 
 /**
- * GET /rc/workspace/env — the workspace's environment cells. Mounted at the
+ * GET /rc/workspace/env - the workspace's environment cells. Mounted at the
  * WRITE floor (server.ts), like the other workspace reads.
  *
  * WRITE rather than a read floor because of what these cells are. The daemon
@@ -128,7 +128,7 @@ export function createWorkspaceEnvRoute(
 }
 
 /**
- * GET /rc/workspace/preflight — the workspace's startup checks. Same floor and
+ * GET /rc/workspace/preflight - the workspace's startup checks. Same floor and
  * same reasoning as the environment read above.
  *
  * `DaemonPreflightCell.kind` is a closed union in the SDK (12 members) and

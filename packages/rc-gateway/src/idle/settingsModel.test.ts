@@ -62,7 +62,7 @@ describe('settingsHomeDir / settingsFilePath', () => {
   });
 });
 
-describe('suggestConfigFromSettings — one coherent (key, host, model) set', () => {
+describe('suggestConfigFromSettings - one coherent (key, host, model) set', () => {
   it('maps a model id to its entry host and the secret named by that entry', () => {
     expect(
       suggestConfigFromSettings(settings(), 'session-model', NO_ENV),

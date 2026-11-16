@@ -11,11 +11,11 @@ import { isValidSessionId } from '../sessions/chatsPath.js';
 import { WRITE, hasScope } from '../scopes.js';
 
 /**
- * GET /session/:id/tasks — relay the daemon's task list, which is the run log
+ * GET /session/:id/tasks - relay the daemon's task list, which is the run log
  * this issue's title calls the "runs" half: every agent, shell, monitor and
  * workflow the session has going or has finished.
  *
- * Read-scoped, bare namespace (transparent-proxy topology — 1:1 with the
+ * Read-scoped, bare namespace (transparent-proxy topology - 1:1 with the
  * daemon's own `GET /session/:id/tasks`). Not audited: a task read is a poll
  * with no mutation, like the status and context reads beside it.
  *
@@ -39,7 +39,7 @@ export function createSessionTasksRoute(
 ): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;
-    // Reject a malformed/path-traversal-shaped id before any daemon call —
+    // Reject a malformed/path-traversal-shaped id before any daemon call -
     // mirrors the sibling session routes (events, fork, rewind, context).
     if (!isValidSessionId(sessionId)) {
       res
@@ -67,7 +67,7 @@ export function createSessionTasksRoute(
       res.status(200).json(status);
     } catch (err) {
       // `UnknownSessionError` says only "Unknown session: <id>", which a
-      // "not found" text match would miss, so test the class explicitly —
+      // "not found" text match would miss, so test the class explicitly -
       // same as sessionStatus.ts.
       const notFound =
         err instanceof UnknownSessionError ||

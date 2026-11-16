@@ -35,7 +35,7 @@ describe('splitPemChain', () => {
 
 describe('loadAcmeLib', () => {
   it('fails with an actionable message when acme-client is not installed', async () => {
-    // acme-client is an OPTIONAL dep, not in the base install — so this exercises
+    // acme-client is an OPTIONAL dep, not in the base install - so this exercises
     // the missing-dependency path and its install hint.
     await expect(loadAcmeLib()).rejects.toThrow(/acme-client/);
   });

@@ -186,7 +186,7 @@ const textMsg = (roomId: string, sender: string, body: string) => ({
   },
 });
 
-describe('MatrixBridge runner — sync loop', () => {
+describe('MatrixBridge runner - sync loop', () => {
   it('registers accurate capabilities (full markdown via formatted_body, threads)', async () => {
     const h = harness([]);
     await h.bridge.start(h.ac.signal);
@@ -201,7 +201,7 @@ describe('MatrixBridge runner — sync loop', () => {
 
   it('runs the injected inbound transport instead of the fetch syncLoop (E2EE subsume)', async () => {
     // When the crypto adapter owns /sync (E2EE on), the runner MUST NOT also run
-    // its fetch sync loop — two syncs on one device race for the to-device megolm
+    // its fetch sync loop - two syncs on one device race for the to-device megolm
     // keys. A provided runInbound replaces syncLoop entirely.
     let ranInbound = false;
     const h = harness(
@@ -233,7 +233,7 @@ describe('MatrixBridge runner — sync loop', () => {
   it('skips replaying timeline history on the initial sync', async () => {
     await rooms.bind('!r:h', 'sess_q');
     const h = harness([
-      // initial sync (since=undefined) carries a message — must NOT be replayed.
+      // initial sync (since=undefined) carries a message - must NOT be replayed.
       { next_batch: 's1', ...textMsg('!r:h', '@alice:h', 'old history') },
     ]);
     await h.bridge.start(h.ac.signal);
@@ -337,7 +337,7 @@ describe('MatrixBridge runner — sync loop', () => {
   it('backs off between failed syncs instead of busy-spinning', async () => {
     // No bound rooms → the SSE loop subscribes nothing, so `sleep` is called
     // ONLY by the sync loop's backoff. syncOnce resolves {} forever (no
-    // next_batch, no abort) — the failure mode the cli wrapper never throws on.
+    // next_batch, no abort) - the failure mode the cli wrapper never throws on.
     const ac = new AbortController();
     let syncCalls = 0;
     let sleepCalls = 0;
@@ -445,7 +445,7 @@ describe('MatrixBridge runner, cursors of unbound sessions (#204)', () => {
   });
 });
 
-describe('MatrixBridge runner — outbound delivery', () => {
+describe('MatrixBridge runner - outbound delivery', () => {
   it('renders a permission_request to every bound room', async () => {
     await rooms.bind('!r1:h', 'sess_q');
     await rooms.bind('!r2:h', 'sess_q');
@@ -506,7 +506,7 @@ describe('MatrixBridge runner — outbound delivery', () => {
   });
 });
 
-describe('MatrixBridge runner — session_update streaming', () => {
+describe('MatrixBridge runner - session_update streaming', () => {
   const chunk = (text: string) => ({
     type: 'session_update' as const,
     data: {
@@ -648,7 +648,7 @@ describe('MatrixBridge.dispatchDecryptedMessage (E2EE routing seam)', () => {
   it('picks up a session newly bound by a decrypted-path !qwen attach', async () => {
     // The crypto path has no per-batch reconcile (no fetch syncLoop), so
     // dispatchDecryptedMessage must reconcile subscriptions after a successful
-    // attach — else the freshly-bound session never gets its SSE echo loop.
+    // attach - else the freshly-bound session never gets its SSE echo loop.
     const h = harness([], { park: true });
     void h.bridge.start(h.ac.signal);
     // A moderator (power ≥ 50) attaches in a fresh (unbound) encrypted room.

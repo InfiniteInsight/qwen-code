@@ -99,17 +99,17 @@ function is2xx(code: number): boolean {
   return code >= 200 && code <= 299;
 }
 
-/** HTTP statuses meaning the endpoint is gone — safe to remove the sub. */
+/** HTTP statuses meaning the endpoint is gone - safe to remove the sub. */
 function isGone(code: number): boolean {
   return code === 404 || code === 410;
 }
 
 /**
- * Auth/config rejections (401/403). These are NOT a dead endpoint — they mean
+ * Auth/config rejections (401/403). These are NOT a dead endpoint - they mean
  * the push request itself was rejected (bad VAPID JWT signature, wrong subject,
  * application-server-key mismatch). The condition is identical across every
  * subscription, so a single VAPID misconfig would otherwise wipe the entire
- * store; we KEEP the sub and fail fast (no retry — the config won't change
+ * store; we KEEP the sub and fail fast (no retry - the config won't change
  * mid-loop).
  */
 function isAuthError(code: number): boolean {
@@ -123,7 +123,7 @@ function isAuthError(code: number): boolean {
  *  - 2xx                  → audit push_sent, stop.
  *  - 404 / 410            → store.remove(id) + push_subscription_expired, stop.
  *  - 401 / 403            → push_send_failed{reason:'auth_error'}, KEEP the sub,
- *                           no retry (auth/config error — see isAuthError).
+ *                           no retry (auth/config error - see isAuthError).
  *  - 429 / 5xx / network  → retry per backoff (max 5 attempts); after the last
  *                           attempt → push_send_failed{reason:
  *                           'transient_exhausted'}, keep the subscription.
@@ -272,7 +272,7 @@ export class PushSender {
 
         if (isAuthError(code)) {
           // Keep the sub (don't wipe the store on one VAPID misconfig) and fail
-          // fast (no retry — the config won't change across the backoff window).
+          // fast (no retry - the config won't change across the backoff window).
           await this.safeAudit('push_send_failed', {
             subscriptionId: record.id,
             kind: payload.kind,

@@ -296,14 +296,14 @@ import {
 
 /**
  * Per-daemon target resolution shared by the `--daemon`-threaded commands
- * (`fork`, `sessions`, `search` — add-multi-workspace-client task 1.4).
+ * (`fork`, `sessions`, `search` - add-multi-workspace-client task 1.4).
  *
  * Precedence: an EXPLICIT `--daemon`/`--url`/`--token` always targets the
  * daemon API. With no target flags at all, a NON-EMPTY registry resolves to
  * its default daemon (API mode, spec: "default to the registry's default
  * daemon when omitted"); an EMPTY registry means the zero-config LOCAL setup
  * and the command keeps its daemon-free on-disk behaviour (`target` is
- * undefined — `sessions` scans the chats dir, `search` scans transcripts,
+ * undefined - `sessions` scans the chats dir, `search` scans transcripts,
  * exactly as the daemon's own routes do, so the two can never drift).
  * `required: true` (fork) has no on-disk mode: an empty registry resolves to
  * the local daemon default instead of `undefined`.
@@ -651,7 +651,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   }
   // Read AND validate the cert/key NOW (before spawning the daemon) so a bad
   // path OR malformed PEM fails fast with a clean BindSecurityError and never
-  // orphans a daemon — keeping the "ENFORCE bind safety before any side effect"
+  // orphans a daemon - keeping the "ENFORCE bind safety before any side effect"
   // contract genuinely true. createSecureContext builds the context the https
   // server would build at listen time and throws on malformed PEM, with no bind
   // and no side effect. (A key that simply doesn't match the cert is only caught
@@ -985,7 +985,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     // APNs delivery materials (add-native-mobile-shells): built once at boot when
     // the config is complete AND the P-8 key parses. Absent → the notifier skips
     // APNs (a registration is harmless storage). NOTE: the SENDER is built from the
-    // key read here, so toggling delivery requires a restart — whereas the
+    // key read here, so toggling delivery requires a restart - whereas the
     // capability's `apnsEnabled` is re-checked live per request.
     let apnsDelivery:
       | { signer: { token(): string }; bundleId: string; host: string }
@@ -993,7 +993,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     {
       const a = nativePushConfig.apns;
       // Same predicate as resolveApnsEnabled (the capability flag) minus the live
-      // key re-check — so `enabled: false` turns delivery OFF, not just the
+      // key re-check - so `enabled: false` turns delivery OFF, not just the
       // capability. (Key loadability is validated by signer.token() below.)
       if (a?.enabled && a.keyPath && a.keyId && a.teamId && a.bundleId) {
         try {
@@ -1021,7 +1021,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     );
     // Load routing rules FAIL-OPEN across two layers: the user-level
     // ~/.qwen/rc/routing.yaml and the workspace override
-    // <workspaceCwd>/.qwen/routing.yaml (workspace rules prepended — cycle 36).
+    // <workspaceCwd>/.qwen/routing.yaml (workspace rules prepended - cycle 36).
     // A missing/malformed file at either layer is logged + ignored (routing only
     // suppresses, so the safe default on misconfig is more notifications, never
     // fewer). 1-daemon-1-workspace ⇒ resolve the cwd once at boot; a capabilities
@@ -1033,13 +1033,13 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       // Daemon not reporting capabilities → no workspace override layer. This
       // also leaves `workspaceCwd` undefined for the policy enforcer below, so
       // any `pathGlob` anchoring falls back to the GATEWAY PROCESS's own cwd
-      // (not the daemon's workspace) — every path-based policy rule may be
+      // (not the daemon's workspace) - every path-based policy rule may be
       // silently inert until the daemon reports capabilities successfully.
       // eslint-disable-next-line no-console
       console.warn(
         'qwen-rc: daemon capabilities() failed; policy pathGlob anchoring ' +
           "falls back to the gateway's own process cwd, not the daemon's " +
-          'workspace — path-based policy rules may not match as expected',
+          'workspace - path-based policy rules may not match as expected',
       );
     }
     // Multi-workspace daemon pool (add-multi-workspace-daemon-pool): the boot
@@ -1047,13 +1047,13 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     // POST /session routes there, unchanged), while `POST /session { cwd }`
     // naming a DIFFERENT workspace spawns (or reuses) its own `qwen serve` on a
     // fresh loopback port. `defaultWorkspaceCwd` falls back to the gateway
-    // process's own cwd when the boot daemon's capabilities() failed above —
+    // process's own cwd when the boot daemon's capabilities() failed above -
     // the same degraded fallback already used for policy/routing pathGlob
     // anchoring (mirrors lines 614/783 below). NOTE: if capabilities() merely
     // failed transiently (the boot daemon IS healthy, just didn't answer in
     // time) and a later POST /session names that same true boot workspace, the
     // pool won't recognise it as the default and will spawn a REDUNDANT second
-    // daemon for it — a known residual of resolving this fallback once at boot.
+    // daemon for it - a known residual of resolving this fallback once at boot.
     const defaultWorkspaceCwd = workspaceCwd ?? process.cwd();
     const daemonPool = new DaemonPool({
       defaultDaemon: handle.daemon,
@@ -1109,7 +1109,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     // add-mid-turn-recovery: the boot daemon's death flows through the SAME
     // markDead path as pooled daemons. cli.ts owns this child (the pool's
     // spawner never saw it), so its exit is wired directly against the pool.
-    // Attach mode: `whenExited` is undefined — the gateway doesn't own a
+    // Attach mode: `whenExited` is undefined - the gateway doesn't own a
     // daemon it merely attached to, so there is no exit to observe.
     handle.whenExited?.then((exit) =>
       daemonPool.handleDaemonExit(defaultWorkspaceCwd, {
@@ -1127,7 +1127,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     // Idle suggestions pre-wiring (built before createGatewayApp so the toggle
     // store + status resolver can be injected): the per-session override store, the
     // rolling-hour limiter, and the live idle.yaml config. `suggestCfg` (resolved
-    // model creds) decides whether idle is wired at all — when absent, the status
+    // model creds) decides whether idle is wired at all - when absent, the status
     // route reports `available:false`. The idleStatus closure reads idleConfig +
     // idleLimiter LIVE so a hot-reload / consumed budget is reflected immediately.
     const idleToggles = new IdleSessionToggles();
@@ -1141,7 +1141,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     // The env chain first, since it is the operator's explicit override for THIS
     // process; then the user's own settings.json. Env alone leaves the feature
     // inert on a workstation whose gateway runs as a systemd unit exporting none
-    // of the provider keys — the keys are in settings.json's `env` map, which is
+    // of the provider keys - the keys are in settings.json's `env` map, which is
     // where qwen itself reads them. Building a handler is NOT egress: `enabled` in
     // idle.yaml stays the sole egress guard and is OFF by default.
     const suggestCfg =
@@ -1200,7 +1200,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         endsDir: hostTabEndsDir(join(homedir(), '.qwen', 'rc')),
       },
     );
-    // Shared read-time cost rollup (UsageStore.sessionTotals) — the SAME
+    // Shared read-time cost rollup (UsageStore.sessionTotals) - the SAME
     // function is handed to both `agents.costFor` and `review.costFor` so the
     // two control planes never disagree on a session's cost.
     const costFor = usageStore
@@ -1243,7 +1243,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
           const reviewsDir = join(cwd, '.qwen', 'reviews');
           const entries = await readdir(reviewsDir);
           const matches = entries.filter((f) => f.endsWith(`-${suffix}.md`));
-          // Filenames sort lexically by <date>-<time>-<suffix> — the max string
+          // Filenames sort lexically by <date>-<time>-<suffix> - the max string
           // is the newest report.
           matches.sort();
           const newest = matches.at(-1);
@@ -1297,7 +1297,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     // dashboard-set overrides that preempt the file policy for one session (or
     // all sessions). One instance is shared by the /rc/permission-overlays
     // routes and the PolicyEnforcer below; ephemeral by design (a gateway
-    // restart drops all overlays — the file policy stays the only durable
+    // restart drops all overlays - the file policy stays the only durable
     // source of truth). Created here, pre-app, because the gateway deps need
     // it at createGatewayApp time while the enforcer is built later.
     const permissionOverlays = new PermissionOverlayStore();
@@ -1387,7 +1387,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         });
       },
       // GET /rc/gpu: probe nvidia-smi (optional CLI dep) for live GPU status.
-      // No pidResolver override — workspace resolution via `/proc/<pid>/cwd`
+      // No pidResolver override - workspace resolution via `/proc/<pid>/cwd`
       // happens automatically inside probeGpuStatus.
       gpuProbe: () => probeGpuStatus(),
       // GET /rc/llama-swap: probe the optional llama-swap base URL
@@ -1401,7 +1401,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         projectRoot: () => workspaceCwd ?? process.cwd(),
         // Local alias so the truthiness narrowing survives into the nested
         // arrow at tsc time (a bare `quota.state` inside the inner closure does
-        // not stay narrowed — this is why enforcer.ts:106 uses `this.quota!`).
+        // not stay narrowed - this is why enforcer.ts:106 uses `this.quota!`).
         quotaOracle: () => {
           const q = quota;
           return q ? { state: (id, ms) => q.state(id, ms) } : undefined;
@@ -1486,7 +1486,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     });
 
     // Startup reconciliation (design: "Reconciliation"): running/blocked agent
-    // records whose daemon session is gone become `orphaned` — surfaced in
+    // records whose daemon session is gone become `orphaned` - surfaced in
     // GET /rc/agents, never silently dropped. Best-effort: an unreachable
     // daemon at boot leaves records untouched for the next start.
     try {
@@ -1505,7 +1505,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
           console.warn(`agents: marked ${orphaned.length} record(s) orphaned`);
         }
         // Same reconciliation for triggered reviews (add-remote-review): a
-        // running/blocked review whose session is gone becomes `orphaned` —
+        // running/blocked review whose session is gone becomes `orphaned` -
         // surfaced in GET /rc/reviews, never silently dropped.
         const orphanedReviews = await reviewRegistry.reconcile(
           live.map((s) => s.sessionId),
@@ -1618,7 +1618,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     // rules and defaults are logged and dropped, and its deny/prompt decision
     // wins only when stricter; issue #156). Absent user file → default-prompt;
     // a MALFORMED user file still
-    // throws (cycle-14 boot-fail, unchanged — do NOT wrap in a swallowing catch); a
+    // throws (cycle-14 boot-fail, unchanged - do NOT wrap in a swallowing catch); a
     // malformed workspace file is logged + ignored (fail-closed: keep user policy).
     const userPolicyPath = join(homedir(), '.qwen', 'rc', 'policy.yaml');
     // eslint-disable-next-line no-console
@@ -1627,12 +1627,12 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     currentPolicy = policy;
     // Advisory-only lint warnings: alias-widened `allow` rules and the
     // newly-live-allow-rules note from policyAdvisories. Emitted ONCE at boot on
-    // the merged policy — never on hot-reload (cycle 45's reloader), which fires
+    // the merged policy - never on hot-reload (cycle 45's reloader), which fires
     // on every file change and would spam the same notes repeatedly. Reuses the
     // same warn sink as loadLayeredPolicy rather than a new logging mechanism.
     for (const w of policyAdvisories(policy)) warn(w);
     // Boot hygiene (cycle 48): warn if either policy file is group/world-writable
-    // (design threat model — a non-owner could rewrite the tool-permission policy).
+    // (design threat model - a non-owner could rewrite the tool-permission policy).
     // Advisory only: the policy still loads. The check never throws (best-effort).
     for (const insecure of await checkPolicyFilePermissions([
       userPolicyPath,
@@ -1645,7 +1645,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     // policy; persisted to ~/.qwen/rc/quotas.wal (survives restart). Only built
     // when the enforcer runs. The QuotaStore's limitsFor closure reads THIS map by
     // reference, so hot-reload (cycle 45) rebuilds limits by mutating it in place
-    // (applyQuotaLimits) — no store reconstruction needed.
+    // (applyQuotaLimits) - no store reconstruction needed.
     const quotaLimits = new Map<string, { count: number; windowSec: number }>();
     const applyQuotaLimits = (p: Policy): void => {
       quotaLimits.clear();
@@ -1665,7 +1665,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       : undefined;
     // projectRoot for pathGlob anchoring MUST be the daemon's own workspaceCwd
     // (resolved above for routing/policy layering), never a frame-supplied
-    // value — see enforcer.ts's constructor doc. Read lazily via a closure
+    // value - see enforcer.ts's constructor doc. Read lazily via a closure
     // (rather than capturing `workspaceCwd` by value here) so a future boot
     // reordering that resolves it after the enforcer is constructed still
     // sees the final value.
@@ -2000,7 +2000,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
 
     // Idle suggestions (proposal `add-idle-suggestions`): build the gateway-own
     // handler that fires on a session's active-prompt true→false edge WHENEVER a
-    // coherent model endpoint resolves — but the `enabled` flag (read live at fire
+    // coherent model endpoint resolves - but the `enabled` flag (read live at fire
     // time from idle.yaml) is the SOLE egress guard, OFF by default, so a
     // workstation that merely has model creds in its env never ships transcript
     // content to a model without the operator opting in. No coherent (key,host) →
@@ -2031,7 +2031,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         audit,
         getConfig: () => idleConfig,
         limiter: idleLimiter,
-        // Per-session `/suggest off` override (narrows only — never widens past the
+        // Per-session `/suggest off` override (narrows only - never widens past the
         // global egress gate above).
         getSessionEnabled: (id) => idleToggles.get(id),
       });
@@ -2050,7 +2050,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       // the shared `idleConfig` ref IN PLACE (the handler reads it live, so the new
       // enabled/maxSuggestions* apply on the next idle edge with no rebuild). A
       // parse error RETAINS the previous good config and audits
-      // idle_config_parse_failed (never crashes/widens on a half-typed save —
+      // idle_config_parse_failed (never crashes/widens on a half-typed save -
       // mirrors the policy reloader). A deleted file reverts to shipped defaults.
       // The env force (QWEN_RC_IDLE_SUGGESTIONS) is re-applied each reload so a file
       // edit can't silently disable an env-enabled feature.
@@ -2118,7 +2118,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         enforcer, // already notifier-gated (undefined when push off) → no auto-vote change
         // Idle suggestions previously rode on the push pump (they only ran when a
         // notifier was present). Keep that coupling: a cost-only pump (push off) must
-        // NOT newly activate idle suggestions — enabling cost tracking must not change
+        // NOT newly activate idle suggestions - enabling cost tracking must not change
         // idle behavior. So gate the idle hook on `notifier`, not just `onSessionIdle`.
         ...(onSessionIdle && notifier ? { onSessionIdle } : {}),
         ...(onSessionActive && notifier ? { onSessionActive } : {}),
@@ -2134,17 +2134,17 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
             .catch(() => {});
           // Review lifecycle (add-remote-review): a mid-review daemon
           // session_died drives the review to `failed` and emits
-          // review_failed — the wire-protocol registry promise. Same
+          // review_failed - the wire-protocol registry promise. Same
           // fire-and-forget contract as agents above.
           void reviewLifecycle
             ?.handleSessionEvent(sid, { type: ev.type, data: ev.data })
             .catch(() => {});
           // Approval-mode forward (add-remote-approval-mode): the daemon's own
           // approval_mode_changed event is the single source of truth for the
-          // owner-stream frame — the route (routes/approvalMode.ts) deliberately
+          // owner-stream frame - the route (routes/approvalMode.ts) deliberately
           // does not publish/notify itself, so this is the ONLY owner-bus
           // broadcast per change. The forward publishes to `ownerEvents` ONLY;
-          // it does NOT also call notifier.notify — the push for this event is
+          // it does NOT also call notifier.notify - the push for this event is
           // already delivered by this same pump's own universal notify path
           // just above (`await this.notifier?.notify(...)` in
           // SessionEventPump.runLoop, pump.ts), identical to how every other
@@ -2185,8 +2185,8 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
 
     // In-process bridges (add-{telegram,discord,matrix}-bridge), opt-in. The HYBRID:
     // each runs in THIS process but talks the gateway ONLY over the loopback contract
-    // with an OPERATOR-MINTED bridge token (QWEN_BRIDGE_TOKEN) — never an auto-minted
-    // internal token — so it stays extractable to a sidecar by changing only config.
+    // with an OPERATOR-MINTED bridge token (QWEN_BRIDGE_TOKEN) - never an auto-minted
+    // internal token - so it stays extractable to a sidecar by changing only config.
     // Construction is shared with the standalone sidecar via startBridge; the pure
     // resolver decides which bridges are configured (and threads MATRIX_ENABLE_E2EE
     // into the in-process Matrix bridge too). Transport is loopback; deeplinks use
@@ -2270,7 +2270,7 @@ async function readAllStdin(): Promise<string> {
 /**
  * Dynamically load the BM25 index module (the ONLY importer of the NATIVE,
  * OPTIONAL `better-sqlite3`). When the optional dep is absent or its native
- * build failed, exit 1 with an actionable hint instead of a cryptic stack — so
+ * build failed, exit 1 with an actionable hint instead of a cryptic stack - so
  * `qwen serve` (which never loads this) installs and runs regardless.
  */
 async function loadSearchIndexModule(): Promise<
@@ -2288,7 +2288,7 @@ async function loadSearchIndexModule(): Promise<
     ) {
       // eslint-disable-next-line no-console
       console.error(
-        'ranked search needs the optional better-sqlite3 dependency — run: npm install better-sqlite3',
+        'ranked search needs the optional better-sqlite3 dependency - run: npm install better-sqlite3',
       );
       process.exit(1);
     }
@@ -2299,7 +2299,7 @@ async function loadSearchIndexModule(): Promise<
 /**
  * Open the cost-tracking usage store, or return undefined to DISABLE cost
  * tracking when the optional native `better-sqlite3` build is absent (unlike
- * ranked search, a missing dep here must not stop the gateway — cost tracking is
+ * ranked search, a missing dep here must not stop the gateway - cost tracking is
  * simply off). The store dynamically imports the native dep, so this is the only
  * place that can throw a module-not-found for it on the serve path.
  */
@@ -2361,7 +2361,7 @@ function mdnsBannerLine(reason: MdnsSuppressReason): string {
     case 'loopback':
       return 'suppressed (loopback-only bind)';
     case 'insecure-proxy':
-      return 'suppressed (insecure-proxy bind — the upstream proxy should advertise)';
+      return 'suppressed (insecure-proxy bind - the upstream proxy should advertise)';
     case 'flag':
       return 'disabled by --no-mdns';
     case 'env':
@@ -2374,7 +2374,7 @@ function mdnsBannerLine(reason: MdnsSuppressReason): string {
 /**
  * Dynamically load the OPTIONAL `bonjour-service` library and return a factory
  * for a fresh instance, or `null` when the dependency is not installed (mDNS is
- * then simply off — it must never stop the gateway, mirroring the cost-store
+ * then simply off - it must never stop the gateway, mirroring the cost-store
  * loader). Any non-module-not-found error propagates.
  */
 async function loadBonjourFactory(): Promise<BonjourFactory | null> {
@@ -2693,7 +2693,7 @@ if (process.argv[2] === 'serve') {
     process.exit(1);
   });
 } else if (process.argv[2] === 'policy' && process.argv[3] === 'lint') {
-  // `qwen-rc policy lint <file>` — daemon-free schema check (exit 0 valid,
+  // `qwen-rc policy lint <file>` - daemon-free schema check (exit 0 valid,
   // 1 invalid, 2 usage). The bug-prone logic is in the pure, unit-tested
   // lintPolicyFile/formatPolicyLint; this is trivial glue.
   const file = process.argv[4];
@@ -2709,11 +2709,11 @@ if (process.argv[2] === 'serve') {
   });
 } else if (process.argv[2] === 'policy' && process.argv[3] === 'explain') {
   // `qwen-rc policy explain <toolName> [--args=…] [--path=…] [--operation=…]
-  // [--scope=…] [--tag=…] [--project-root=…]` — daemon-free dry-run of the
+  // [--scope=…] [--tag=…] [--project-root=…]` - daemon-free dry-run of the
   // layered policy (user ~/.qwen/rc/policy.yaml + <project-root>/.qwen/policy.yaml).
   // Read-only INSPECTOR: exit 0 on success, 2 on a missing tool or an invalid
   // `--operation` value, 1 when the policy is malformed (it cannot be
-  // explained — surface the loader error rather than pretend). The bug-prone
+  // explained - surface the loader error rather than pretend). The bug-prone
   // logic is in the pure, unit-tested parseExplainArgs/explainPolicy/
   // formatExplanation; this is glue. No quota oracle (no live store) → a
   // maxPerWindow rule shows as prompt, as formatExplanation's caveat notes.
@@ -2721,7 +2721,7 @@ if (process.argv[2] === 'serve') {
   // `match.operation` always reported `operation-mismatch` here, even when
   // it would match in production). `--project-root` overrides the
   // `process.cwd()` default for both the evaluator's anchor
-  // (`ctx.projectRoot`/`ctx.cwd`) and the workspace policy-file layer below —
+  // (`ctx.projectRoot`/`ctx.cwd`) and the workspace policy-file layer below -
   // running `explain` from outside the daemon's actual workspace otherwise
   // yields a verdict that can diverge from real enforcement.
   let tool: string | undefined;
@@ -2764,9 +2764,9 @@ if (process.argv[2] === 'serve') {
       process.exit(1);
     });
 } else if (process.argv[2] === 'routing' && process.argv[3] === 'rules') {
-  // `qwen-rc routing rules [--resolved]` — print the effective routing ruleset.
+  // `qwen-rc routing rules [--resolved]` - print the effective routing ruleset.
   // Read-only INSPECTOR (always exit 0): a malformed file fail-opens (logged +
-  // omitted), faithfully reflecting the gateway's suppress-only behavior — NOT a
+  // omitted), faithfully reflecting the gateway's suppress-only behavior - NOT a
   // lint. `--resolved` overlays the workspace file from the current directory.
   const resolved = process.argv.includes('--resolved');
   loadResolvedRoutingRules(
@@ -2823,7 +2823,7 @@ if (process.argv[2] === 'serve') {
 } else if (process.argv[2] === 'search') {
   // `qwen-rc search <query…> [--cwd=…] [--kind=…] [--since=…] [--until=…]
   // [--limit=…] [--session=…] [--daemon <name>|--url <u>] [--token <t>]
-  // [--insecure]` — on-disk transcript search, daemon-free by default:
+  // [--insecure]` - on-disk transcript search, daemon-free by default:
   // derives the chats dir from --cwd (default cwd) via the exact
   // resolveChatsDir and reuses searchTranscriptsDetailed (identical matcher
   // to the HTTP route). add-multi-workspace-client task 1.4: with a target
@@ -2851,7 +2851,7 @@ if (process.argv[2] === 'serve') {
       return;
     }
     // `--rank`: a relevance-ranked (BM25) query over the prebuilt FTS5 index
-    // instead of the live substring scan. TOKEN/prefix matching — deliberately
+    // instead of the live substring scan. TOKEN/prefix matching - deliberately
     // different hits/order from the default scan; build the index with
     // `qwen-rc reindex` first. The NATIVE better-sqlite3 is loaded HERE via a
     // dynamic import, so `qwen serve` / the gateway never load the addon.
@@ -2873,7 +2873,7 @@ if (process.argv[2] === 'serve') {
       if (!target.token) {
         // eslint-disable-next-line no-console
         console.error(
-          `search: no token for daemon "${target.name}" — pass --token <t> or ` +
+          `search: no token for daemon "${target.name}" - pass --token <t> or ` +
             `register + pair first: qwen-rc daemons add <name> <url>`,
         );
         process.exit(1);
@@ -2882,7 +2882,7 @@ if (process.argv[2] === 'serve') {
       if (parsed.value.cwd) {
         // eslint-disable-next-line no-console
         console.error(
-          `(remote daemon "${target.name}" — --cwd is ignored; its own workspace is searched)`,
+          `(remote daemon "${target.name}" - --cwd is ignored; its own workspace is searched)`,
         );
       }
       const res = await daemonRequest(target, {
@@ -2905,7 +2905,7 @@ if (process.argv[2] === 'serve') {
       try {
         if (idx.count() === 0) {
           // eslint-disable-next-line no-console
-          console.error('(index empty — run: qwen-rc reindex)');
+          console.error('(index empty - run: qwen-rc reindex)');
         }
         const result = idx.query(parsed.value.query, parsed.value.opts);
         // The trigram index can't match a term shorter than 3 chars (uniform
@@ -2944,7 +2944,7 @@ if (process.argv[2] === 'serve') {
     if (err instanceof DaemonHttpError && err.status === 401) {
       // eslint-disable-next-line no-console
       console.error(
-        'search: token rejected (401) — re-pair: qwen-rc daemons remove <name> && qwen-rc daemons add <name> <url>',
+        'search: token rejected (401) - re-pair: qwen-rc daemons remove <name> && qwen-rc daemons add <name> <url>',
       );
     } else if (err instanceof DaemonUnreachableError) {
       // eslint-disable-next-line no-console
@@ -2957,7 +2957,7 @@ if (process.argv[2] === 'serve') {
     process.exit(1);
   });
 } else if (process.argv[2] === 'terminals') {
-  // `qwen-rc terminals pending [--after=<n>] --json` — the host-terminal request
+  // `qwen-rc terminals pending [--after=<n>] --json` - the host-terminal request
   // log (issue #49), for the Windows launcher app. The launcher reads requests
   // this way instead of over HTTP so the daemon token never crosses the
   // network; it stores its own cursor and passes it as --after.
@@ -3025,9 +3025,9 @@ if (process.argv[2] === 'serve') {
     process.exit(1);
   });
 } else if (process.argv[2] === 'reindex') {
-  // `qwen-rc reindex [--cwd=<dir>] [--full]` — update the BM25 full-text index
+  // `qwen-rc reindex [--cwd=<dir>] [--full]` - update the BM25 full-text index
   // for a workspace's transcripts. DEFAULT is INCREMENTAL (only new/changed
-  // files re-indexed, vanished files pruned via per-file mtime) — cheap to
+  // files re-indexed, vanished files pruned via per-file mtime) - cheap to
   // re-run; `--full` forces a drop+rebuild. The index db lives under the
   // workspace's 0700 search-index dir. The NATIVE better-sqlite3 is loaded HERE
   // via a dynamic import, so `qwen serve` / the gateway never load the addon.
@@ -3100,7 +3100,7 @@ if (process.argv[2] === 'serve') {
     process.exit(1);
   });
 } else if (process.argv[2] === 'usage' && process.argv[3] === 'prune') {
-  // `qwen-rc usage prune --before <iso> [--yes]` — delete usage rows older than a
+  // `qwen-rc usage prune --before <iso> [--yes]` - delete usage rows older than a
   // timestamp (add-cost-tracking "Operator CLI"). Prompts unless --yes.
   void (async () => {
     const store = await openUsageStore();
@@ -3139,7 +3139,7 @@ if (process.argv[2] === 'serve') {
   });
 } else if (process.argv[2] === 'usage') {
   // `qwen-rc usage [--since <d>] [--group-by <axis>] [--sub-actor <s>]
-  // [--format json|csv|table]` — query aggregated usage (add-cost-tracking). Reads
+  // [--format json|csv|table]` - query aggregated usage (add-cost-tracking). Reads
   // the same ~/.qwen/rc/usage.db the gateway writes; daemon-free.
   void (async () => {
     const store = await openUsageStore();
@@ -3204,7 +3204,7 @@ if (process.argv[2] === 'serve') {
     process.exit(1);
   });
 } else if (process.argv[2] === 'daemons' && process.argv[3] === 'discover') {
-  // `qwen-rc daemons discover [--timeout <d>] [--format json|table]` — browse
+  // `qwen-rc daemons discover [--timeout <d>] [--format json|table]` - browse
   // the LAN for `_qwen-rc._tcp.local.` daemons (add-mdns-discovery). Daemon-free
   // and read-only; exits 0 even when nothing advertises. Needs the optional
   // bonjour-service dependency.
@@ -3221,7 +3221,7 @@ if (process.argv[2] === 'serve') {
     if (!factory) {
       // eslint-disable-next-line no-console
       console.error(
-        'daemons discover: needs the optional bonjour-service dependency — run: npm install bonjour-service',
+        'daemons discover: needs the optional bonjour-service dependency - run: npm install bonjour-service',
       );
       process.exit(1);
     }
@@ -3276,7 +3276,7 @@ if (process.argv[2] === 'serve') {
     if (!target.token) {
       // eslint-disable-next-line no-console
       console.error(
-        `fork: no token for daemon "${target.name}" — pass --token <t> or ` +
+        `fork: no token for daemon "${target.name}" - pass --token <t> or ` +
           `register + pair first: qwen-rc daemons add <name> <url>`,
       );
       process.exit(1);
@@ -3299,7 +3299,7 @@ if (process.argv[2] === 'serve') {
     if (err instanceof DaemonHttpError && err.status === 401) {
       // eslint-disable-next-line no-console
       console.error(
-        'fork: token rejected (401) — re-pair: qwen-rc daemons remove <name> && qwen-rc daemons add <name> <url>',
+        'fork: token rejected (401) - re-pair: qwen-rc daemons remove <name> && qwen-rc daemons add <name> <url>',
       );
     } else if (err instanceof DaemonHttpError && err.code === 'name_taken') {
       // eslint-disable-next-line no-console
@@ -3310,7 +3310,7 @@ if (process.argv[2] === 'serve') {
     ) {
       // eslint-disable-next-line no-console
       console.error(
-        'fork: parent is mid-prompt (409 fork_mid_prompt) — wait for the turn to settle and retry',
+        'fork: parent is mid-prompt (409 fork_mid_prompt) - wait for the turn to settle and retry',
       );
     } else if (err instanceof DaemonUnreachableError) {
       // eslint-disable-next-line no-console
@@ -3361,7 +3361,7 @@ if (process.argv[2] === 'serve') {
       if (!target.token) {
         // eslint-disable-next-line no-console
         console.error(
-          `sessions: no token for daemon "${target.name}" — pass --token <t> or ` +
+          `sessions: no token for daemon "${target.name}" - pass --token <t> or ` +
             `register + pair first: qwen-rc daemons add <name> <url>`,
         );
         process.exit(1);
@@ -3376,7 +3376,7 @@ if (process.argv[2] === 'serve') {
       if (parsed.value.cwd) {
         // eslint-disable-next-line no-console
         console.error(
-          `(remote daemon "${target.name}" — --cwd selects a workspace on THAT daemon)`,
+          `(remote daemon "${target.name}" - --cwd selects a workspace on THAT daemon)`,
         );
       }
     } else {
@@ -3398,7 +3398,7 @@ if (process.argv[2] === 'serve') {
     if (err instanceof DaemonHttpError && err.status === 401) {
       // eslint-disable-next-line no-console
       console.error(
-        'sessions: token rejected (401) — re-pair: qwen-rc daemons remove <name> && qwen-rc daemons add <name> <url>',
+        'sessions: token rejected (401) - re-pair: qwen-rc daemons remove <name> && qwen-rc daemons add <name> <url>',
       );
     } else if (err instanceof DaemonUnreachableError) {
       // eslint-disable-next-line no-console
@@ -3410,7 +3410,7 @@ if (process.argv[2] === 'serve') {
     process.exit(1);
   });
 } else if (process.argv[2] === 'daemons') {
-  // `qwen-rc daemons <list|add|remove|set-default|health|whoami>` — the local
+  // `qwen-rc daemons <list|add|remove|set-default|health|whoami>` - the local
   // multi-daemon registry (add-multi-workspace-client task 1.3). Registry I/O:
   // ./daemons/registry.js (clients.toml); token I/O: ./daemons/tokenStore.js
   // (0600 files); pairing + probes: ./daemons/daemonClient.js. Pure parsing /
@@ -3448,12 +3448,12 @@ if (process.argv[2] === 'serve') {
       );
       if (a.format === 'json') {
         // First-time hint (spec "First-time creation": the registry file is
-        // NOT auto-created — the hint goes to stderr so stdout stays
+        // NOT auto-created - the hint goes to stderr so stdout stays
         // machine-readable).
         if (entries.length === 0) {
           // eslint-disable-next-line no-console
           console.error(
-            'no daemons registered — add one: qwen-rc daemons add <name> <url>',
+            'no daemons registered - add one: qwen-rc daemons add <name> <url>',
           );
         }
         // eslint-disable-next-line no-console
@@ -3471,7 +3471,7 @@ if (process.argv[2] === 'serve') {
       if (existing && !a.force) {
         // eslint-disable-next-line no-console
         console.error(
-          `daemons add: "${a.name}" already exists (${existing.url}) — pass --force to replace`,
+          `daemons add: "${a.name}" already exists (${existing.url}) - pass --force to replace`,
         );
         process.exit(1);
         return;
@@ -3484,12 +3484,12 @@ if (process.argv[2] === 'serve') {
       if (dupUrl) {
         // eslint-disable-next-line no-console
         console.error(
-          `daemons add: daemon_url_duplicate: "${dupUrl.name}" already uses ${base} — remove it first: qwen-rc daemons remove ${dupUrl.name}`,
+          `daemons add: daemon_url_duplicate: "${dupUrl.name}" already uses ${base} - remove it first: qwen-rc daemons remove ${dupUrl.name}`,
         );
         process.exit(1);
         return;
       }
-      // 1. Probe: GET /rc/capabilities proves liveness AND identity — a
+      // 1. Probe: GET /rc/capabilities proves liveness AND identity - a
       //    qwen-rc daemon answers 2xx or an auth wall (401/403 pre-pairing),
       //    a foreign server 404s (spec code `not_a_qwen_daemon`). The bare
       //    /capabilities mount is the transparent-proxy alias: try it when the
@@ -3516,7 +3516,7 @@ if (process.argv[2] === 'serve') {
       if (caps === 'not_found') {
         // eslint-disable-next-line no-console
         console.error(
-          `daemons add: not_a_qwen_daemon: ${base} answered 404 on /rc/capabilities (and /capabilities) — not a remote-control daemon`,
+          `daemons add: not_a_qwen_daemon: ${base} answered 404 on /rc/capabilities (and /capabilities) - not a remote-control daemon`,
         );
         process.exit(1);
         return;
@@ -3526,7 +3526,7 @@ if (process.argv[2] === 'serve') {
       //    defaults to NO, and declining writes nothing and pairs nothing.
       // eslint-disable-next-line no-console
       console.error(
-        `\nTrust check — about to pair with ${base}\n` +
+        `\nTrust check - about to pair with ${base}\n` +
           '  This daemon can serve arbitrary JavaScript to your browser\n' +
           '  when you open its UI. The token will be stored at\n' +
           '  ~/.qwen/rc/tokens/ (0600); a daemon sees your session transcripts.\n',
@@ -3537,7 +3537,7 @@ if (process.argv[2] === 'serve') {
       } else if (!process.stdin.isTTY) {
         // eslint-disable-next-line no-console
         console.error(
-          'daemons add: trust confirmation required — re-run interactively, or pass --yes to confirm',
+          'daemons add: trust confirmation required - re-run interactively, or pass --yes to confirm',
         );
         process.exit(2);
         return;
@@ -3546,7 +3546,7 @@ if (process.argv[2] === 'serve') {
       }
       if (!trustOk) {
         // eslint-disable-next-line no-console
-        console.log('aborted — no pairing attempted, registry unchanged');
+        console.log('aborted - no pairing attempted, registry unchanged');
         process.exit(0);
         return;
       }
@@ -3566,7 +3566,7 @@ if (process.argv[2] === 'serve') {
           if (!process.stdin.isTTY) {
             // eslint-disable-next-line no-console
             console.error(
-              'daemons add: non-interactive stdin — pass --code <code> (or --token <t> / --no-pair)',
+              'daemons add: non-interactive stdin - pass --code <code> (or --token <t> / --no-pair)',
             );
             process.exit(2);
             return;
@@ -3671,10 +3671,10 @@ if (process.argv[2] === 'serve') {
           );
         } catch {
           // Best-effort per spec: the daemon may already be gone or the token
-          // already revoked — the local entry still comes off.
+          // already revoked - the local entry still comes off.
           // eslint-disable-next-line no-console
           console.error(
-            '(daemon unreachable or token already gone — local entry removed)',
+            '(daemon unreachable or token already gone - local entry removed)',
           );
         }
       }
@@ -3774,7 +3774,7 @@ if (process.argv[2] === 'serve') {
         console.error(
           a.daemonName
             ? `whoami: unknown daemon "${a.daemonName}"`
-            : 'whoami: no daemons registered — add one: qwen-rc daemons add <name> <url>',
+            : 'whoami: no daemons registered - add one: qwen-rc daemons add <name> <url>',
         );
         process.exit(2);
         return;
@@ -3783,7 +3783,7 @@ if (process.argv[2] === 'serve') {
       if (!token) {
         // eslint-disable-next-line no-console
         console.error(
-          `whoami: no stored token for "${entry.name}" — pair first: qwen-rc daemons add ${entry.name} ${entry.url}`,
+          `whoami: no stored token for "${entry.name}" - pair first: qwen-rc daemons add ${entry.name} ${entry.url}`,
         );
         process.exit(1);
         return;
@@ -3791,7 +3791,7 @@ if (process.argv[2] === 'serve') {
       const target = { url: entry.url.replace(/\/+$/, ''), token };
       const meta = await readTokenMeta(tokensDir, entry.tokenStorageKey);
       // 1. Share tokens answer /rc/share/whoami (SHARE scope). A 401 here
-      //    means the bearer itself was rejected (the token is dead) — a live
+      //    means the bearer itself was rejected (the token is dead) - a live
       //    non-share token gets 403/404 and falls through to the owner probe.
       try {
         const res = await daemonRequest(target, {
@@ -3883,12 +3883,12 @@ if (process.argv[2] === 'serve') {
   process.argv[2] === 'down' ||
   process.argv[2] === 'status'
 ) {
-  // `qwen-rc up|down|status [--json] [--port <n>]` — the local launcher
+  // `qwen-rc up|down|status [--json] [--port <n>]` - the local launcher
   // (add-remote-peers-launcher): bring up (or tear down / report on) the
   // Tailscale + native-TLS + systemd --user gateway unit on this machine.
-  // Daemon-free glue: all logic lives in ./launcher/orchestrator.js — this
+  // Daemon-free glue: all logic lives in ./launcher/orchestrator.js - this
   // branch only parses argv, wires the real exec boundary, and renders the
-  // result as text or `--json`. `--json` carries connect metadata only — it
+  // result as text or `--json`. `--json` carries connect metadata only - it
   // deliberately OMITS the one-time owner pairing code (see upJson below);
   // only the human-readable terminal path prints that code.
   void (async () => {
@@ -3924,8 +3924,8 @@ if (process.argv[2] === 'serve') {
     if (cmd === 'up') {
       const r = await up(deps);
       if (wantJson) {
-        // Deliberately NOT the raw UpResult: upJson() strips bootstrapCode —
-        // a one-time OWNER credential — before it reaches this
+        // Deliberately NOT the raw UpResult: upJson() strips bootstrapCode -
+        // a one-time OWNER credential - before it reaches this
         // machine-captured stream (e.g. the Electron/wsl.exe launcher path).
         // eslint-disable-next-line no-console
         console.log(JSON.stringify(upJson(r)));

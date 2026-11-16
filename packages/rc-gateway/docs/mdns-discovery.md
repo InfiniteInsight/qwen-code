@@ -3,7 +3,7 @@
 Implements `add-mdns-discovery`: the daemon advertises itself on the LAN as a
 `_qwen-rc._tcp.local.` service so a client can find its host:port without the
 operator looking up an IP, and `qwen-rc daemons discover` browses for them. mDNS
-is **discovery only** — it carries no auth material; the pairing flow remains the
+is **discovery only** - it carries no auth material; the pairing flow remains the
 trust boundary (`add-remote-control` / `pairing-auth`).
 
 ## When the daemon advertises
@@ -13,9 +13,9 @@ Advertising is reachable only through the step-1 bind-security gate
 
 | Bind mode (from `bindSecurity.ts`) | mDNS                                                                                          |
 | ---------------------------------- | --------------------------------------------------------------------------------------------- |
-| `loopback-http` (default)          | **suppressed** — a loopback service tells the LAN about a daemon it cannot reach (design D2). |
-| `tls` (native HTTPS)               | **advertises** — honest `tlsRequired=true`, real host:port.                                   |
-| `insecure-proxy`                   | **suppressed** — see below.                                                                   |
+| `loopback-http` (default)          | **suppressed** - a loopback service tells the LAN about a daemon it cannot reach (design D2). |
+| `tls` (native HTTPS)               | **advertises** - honest `tlsRequired=true`, real host:port.                                   |
+| `insecure-proxy`                   | **suppressed** - see below.                                                                   |
 
 `--no-mdns` or `QWEN_RC_NO_MDNS=1` suppress in every mode.
 
@@ -27,9 +27,9 @@ by the bind gate (non-loopback + no TLS story → bearer tokens in cleartext). S
 the advertising path is now reachable only with a TLS story, and the two such
 modes are not symmetric:
 
-- **`tls`** — the gateway serves HTTPS on the advertised host:port. Advertising
+- **`tls`** - the gateway serves HTTPS on the advertised host:port. Advertising
   its own endpoint with `tlsRequired=true` is honest. ✅ advertise.
-- **`insecure-proxy`** — the gateway serves **plain HTTP** locally while the real
+- **`insecure-proxy`** - the gateway serves **plain HTTP** locally while the real
   TLS endpoint is an upstream proxy whose host:port the gateway does not know.
   Advertising our cleartext bind as `tlsRequired=true` would mislead clients, so
   we suppress and let the proxy advertise itself (design D2: "the proxy is the
@@ -44,7 +44,7 @@ Strict four-key schema, all string values (`buildTxtRecord`):
 
 | Key           | Value                                | Notes                                                    |
 | ------------- | ------------------------------------ | -------------------------------------------------------- |
-| `version`     | `RC_PROTOCOL_VERSION` (`"1"`)        | Same constant `/rc/capabilities` reports — never drifts. |
+| `version`     | `RC_PROTOCOL_VERSION` (`"1"`)        | Same constant `/rc/capabilities` reports - never drifts. |
 | `name`        | `<hostname>-<workspace>` or override | Service display name.                                    |
 | `workspace`   | cwd **basename** or override         | NEVER an absolute path (design D3).                      |
 | `tlsRequired` | `"true"` / `"false"`                 | From the bind decision.                                  |
@@ -62,8 +62,8 @@ qwen-rc serve ... --mdns-instance-name kitchen-box             # override instan
 QWEN_RC_NO_MDNS=1 qwen-rc serve ...                            # disable via env
 ```
 
-Name overrides are validated (1–63 printable ASCII, no `/`/`\`, no `.`/`..`
-traversal) **before any side effect** — a bad value refuses to start with a clean
+Name overrides are validated (1-63 printable ASCII, no `/`/`\`, no `.`/`..`
+traversal) **before any side effect** - a bad value refuses to start with a clean
 `MdnsConfigError` (exit 1) and spawns no daemon.
 
 ## Capability surface
@@ -106,7 +106,7 @@ pairing flow before any session interaction.
 The existing SIGINT/SIGTERM `shutdown` handler calls `MdnsAdvertiser.stop(500)`,
 which sends Goodbye packets (`unpublishAll`) and waits up to 500 ms before
 destroying the socket, so a stale record does not haunt the LAN for the 75-minute
-mDNS TTL (design D4). A SIGKILL still leaves a stale record — unavoidable.
+mDNS TTL (design D4). A SIGKILL still leaves a stale record - unavoidable.
 
 ## Verification ceiling
 
@@ -115,7 +115,7 @@ mDNS TTL (design D4). A SIGKILL still leaves a stale record — unavoidable.
 advertising is simply off and the gateway runs normally. The decision logic, name validation,
 TXT schema, browse normalize/dedupe/sort/format, and the advertiser publish/
 Goodbye lifecycle are all unit-tested against a fake bonjour instance. The **live
-multicast publish/browse is not exercised in CI** — it needs a real LAN socket
+multicast publish/browse is not exercised in CI** - it needs a real LAN socket
 and is frequently broken under WSL2. The serve path was smoke-tested manually:
 loopback suppresses, a TLS bind advertises `<host>-<workspace>` with
 `tlsRequired=true`, env/flag disable, and a path-traversal override refuses at

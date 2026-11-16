@@ -6,22 +6,22 @@
 
 /**
  * Matrix E2EE crypto adapter (`add-matrix-bridge`: "Persistent olm crypto store"
- * + encrypted-room participation) — the slice-2 transport the {@link
+ * + encrypted-room participation) - the slice-2 transport the {@link
  * ./e2ee.js} scaffolding reserved. Opt-in via `MATRIX_ENABLE_E2EE`, OFF by
  * default; the tested `fetch`-based plain path is untouched and stays the default.
  *
  * The construction is typed against the ambient shim
- * (`matrixBotSdkShim.d.ts` — on Node 22 the optional SDK deps install-skip
+ * (`matrixBotSdkShim.d.ts` - on Node 22 the optional SDK deps install-skip
  * (engines `node >= 24`), so their types are unavailable to tsc there),
  * which mirrors the empirically verified 0.10.0-element.0 surface, so the
  * ctor calls are signature-checked. The live
  * olm/megolm round-trip is exercised by the env-gated `crypto.integration.test.ts`
- * (RUN GREEN against a real Synapse on the original `matrix-bot-sdk` — re-run
+ * (RUN GREEN against a real Synapse on the original `matrix-bot-sdk` - re-run
  * it after the #42 vector-fork migration): the bot decrypts an encrypted
  * message, a decrypted message reaches a BOUND SESSION through dispatch, the
  * bot's reply is real ciphertext the sender decrypts (no plaintext leak), and
- * a 👍 reaction registers a vote. The pure seams — olm-store presence, the
- * store-missing warn, `e2eeEnabled` gating — are unit-tested.
+ * a 👍 reaction registers a vote. The pure seams - olm-store presence, the
+ * store-missing warn, `e2eeEnabled` gating - are unit-tested.
  *
  * When E2EE is on, `startBridge` makes this adapter the SOLE `/sync` owner (a
  * second sync on the same device would race it for the to-device megolm keys) and
@@ -57,7 +57,7 @@ export function olmStorePresent(stateDir: string): boolean {
 /**
  * Whether to emit the first-boot `olm_store_missing` re-key warning: ONLY when
  * E2EE is enabled AND no store is present yet (with the adapter built, a missing
- * store means encrypted rooms re-key, which is the truthful warning — never warn
+ * store means encrypted rooms re-key, which is the truthful warning - never warn
  * when E2EE is off, since there is no crypto and nothing to re-key).
  */
 export function shouldWarnOlmMissing(input: {
@@ -74,7 +74,7 @@ export interface DecryptedMatrixMessage {
   body: string;
   /**
    * The sender's power level in the room, resolved from `m.room.power_levels`
-   * SDK state — so power-gated commands (`!qwen attach`) work in encrypted rooms
+   * SDK state - so power-gated commands (`!qwen attach`) work in encrypted rooms
    * exactly as they do over the plain fetch path. Defaults to 0 if unresolved.
    */
   powerLevel: number;
@@ -82,7 +82,7 @@ export interface DecryptedMatrixMessage {
 
 /**
  * The crypto-enabled Matrix client, presented as the SAME {@link MatrixInbound}
- * the runner's outbound uses — so when E2EE is on, the bridge sends through the
+ * the runner's outbound uses - so when E2EE is on, the bridge sends through the
  * SDK client (which encrypts iff the room is encrypted: no plaintext ever lands
  * in an encrypted room) and the SDK client is the SOLE `/sync` owner (running a
  * second sync on the same device would race it for the to-device megolm keys).
@@ -99,7 +99,7 @@ export interface MatrixCryptoAdapter extends MatrixInbound {
 export interface CryptoAdapterDeps {
   homeserverUrl: string;
   accessToken: string;
-  /** `$QWEN_BRIDGE_STATE_DIR` — the olm store lives at `<stateDir>/olm/`. */
+  /** `$QWEN_BRIDGE_STATE_DIR` - the olm store lives at `<stateDir>/olm/`. */
   stateDir: string;
   /** Sink for inbound decrypted room messages (route into the bridge dispatch). */
   onMessage: (msg: DecryptedMatrixMessage) => void | Promise<void>;
@@ -111,11 +111,11 @@ export interface CryptoAdapterDeps {
 /**
  * Construct the crypto-enabled Matrix client, or `null` when the optional
  * `@vector-im/matrix-bot-sdk` dependency is not installed (E2EE then stays
- * off; the plain bridge is unaffected — mirrors the other optional-dep
+ * off; the plain bridge is unaffected - mirrors the other optional-dep
  * loaders).
  *
  * The body is typed via the ambient shim (matrixBotSdkShim.d.ts) but not
- * runtime-verified here (the ceiling — the env-gated integration test is the
+ * runtime-verified here (the ceiling - the env-gated integration test is the
  * runtime verification).
  */
 export async function createMatrixCryptoAdapter(
@@ -123,7 +123,7 @@ export async function createMatrixCryptoAdapter(
 ): Promise<MatrixCryptoAdapter | null> {
   // ONE boundary over import + construction + wiring: a missing module, a failed
   // native @matrix-org/matrix-sdk-crypto-nodejs init, or an unwritable
-  // <stateDir>/olm/ ALL degrade to null (E2EE off) rather than throwing — so
+  // <stateDir>/olm/ ALL degrade to null (E2EE off) rather than throwing - so
   // flipping MATRIX_ENABLE_E2EE can never crash the working plain bridge.
   try {
     const sdk = await import('@vector-im/matrix-bot-sdk');
@@ -135,12 +135,12 @@ export async function createMatrixCryptoAdapter(
     // @vector-im/matrix-bot-sdk re-exports the store-type enum as a TYPE only
     // (`RustSdkCryptoStoreType` is a `const enum`, erased at runtime → `undefined`
     // under esbuild). Source the real runtime value from the native package, which
-    // exports `StoreType` as an actual object — both type-correct and present at
+    // exports `StoreType` as an actual object - both type-correct and present at
     // runtime, no cast.
     const { StoreType } = await import('@matrix-org/matrix-sdk-crypto-nodejs');
 
     // SQLite-backed olm/megolm store at <stateDir>/olm/ (survives restart, so
-    // encrypted-room messages remain decryptable without re-keying — the spec's
+    // encrypted-room messages remain decryptable without re-keying - the spec's
     // "Persistent olm crypto store" requirement).
     const cryptoStore = new RustSdkCryptoStorageProvider(
       olmStoreDir(deps.stateDir),
@@ -217,7 +217,7 @@ export async function createMatrixCryptoAdapter(
     // @vector-im/matrix-bot-sdk decrypts `m.room.encrypted` events IN PLACE
     // and re-emits the plaintext as `room.message` (MatrixClient processSync:
     // decrypt → fall through to the m.room.message emit), so this one handler
-    // covers BOTH cleartext and decrypted encrypted-room messages — no manual
+    // covers BOTH cleartext and decrypted encrypted-room messages - no manual
     // decryptRoomEvent needed. The same filter as the fetch path (#168): only
     // m.text, and never an m.replace edit of an earlier prompt.
     client.on('room.message', (roomId: string, event: unknown) => {
@@ -264,7 +264,7 @@ export async function createMatrixCryptoAdapter(
 
     return {
       isReady: () => client.crypto?.isReady ?? false,
-      // MatrixInbound.joinRoom (the runner's contract) — `{ok,status}`, not the
+      // MatrixInbound.joinRoom (the runner's contract) - `{ok,status}`, not the
       // SDK's raw roomId string; never throws (degrade to a failed result).
       joinRoom: async (roomId) => {
         try {
@@ -278,7 +278,7 @@ export async function createMatrixCryptoAdapter(
         }
       },
       // Outbound: send as `m.room.message`; the SDK encrypts iff the room is
-      // encrypted — so this is the ONE outbound path (correct for plain AND
+      // encrypted - so this is the ONE outbound path (correct for plain AND
       // encrypted rooms) and never leaks plaintext into an encrypted room.
       sendMessage: async (roomId, content) => {
         try {
@@ -296,7 +296,7 @@ export async function createMatrixCryptoAdapter(
         }
       },
       start: async () => {
-        // The vector fork's prepare() takes no room list — it initializes the
+        // The vector fork's prepare() takes no room list - it initializes the
         // olm machine and the RoomTracker picks rooms up as they sync.
         await client.crypto.prepare();
         await client.start();
@@ -367,12 +367,12 @@ export async function setupMatrixCrypto(
   if (!adapter) {
     io.warn(
       'matrix crypto unavailable (@vector-im/matrix-bot-sdk not installed or ' +
-        'failed to initialize) — encrypted rooms refused; plain bridge continues',
+        'failed to initialize) - encrypted rooms refused; plain bridge continues',
     );
   } else {
     io.log(
       'matrix crypto transport constructed + olm store initialized ' +
-        '(the caller wires its callbacks + start() — see startBridge)',
+        '(the caller wires its callbacks + start() - see startBridge)',
     );
   }
   return adapter;

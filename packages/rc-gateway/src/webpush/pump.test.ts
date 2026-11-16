@@ -545,7 +545,7 @@ describe('SessionEventPump', () => {
     /**
      * A `DaemonClient` stand-in that counts subscription attempts per session.
      * Unlike the stub daemon, this one keeps LISTING a session it refuses to
-     * stream — the exact shape of the live incident: `GET /sessions` returns the
+     * stream - the exact shape of the live incident: `GET /sessions` returns the
      * dead id, `GET /events` answers 404, so every reconcile re-spawns a loop
      * that only earns another refused request.
      */
@@ -584,7 +584,7 @@ describe('SessionEventPump', () => {
       Object.assign(new Error(`Unknown session: ${id}`), { status: 404 });
 
     /**
-     * Emits `frames`, then stays subscribed until the subscription is aborted —
+     * Emits `frames`, then stays subscribed until the subscription is aborted -
      * what a real SSE connection does. Returning after the last frame instead
      * would send the loop straight into a backoff-free reconnect (these tests
      * inject `reconnectMs: 0` and a no-op sleep), spinning without real I/O.
@@ -617,7 +617,7 @@ describe('SessionEventPump', () => {
       // Many poll ticks: without the refused set, s1 gets one attempt each.
       await new Promise((r) => setTimeout(r, 150));
       expect(attempts('s1')).toBe(1);
-      // The healthy session is unaffected — its loop still streams.
+      // The healthy session is unaffected - its loop still streams.
       expect(attempts('s2')).toBeGreaterThanOrEqual(1);
       expect(dispatched).toContain('s2');
     });

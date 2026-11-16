@@ -10,13 +10,13 @@ import { isSessionLevelGone } from '../daemonHttpError.js';
 import type { AuditRecorder } from '../auditLog.js';
 
 /**
- * POST /session/:id/cancel — abort the session's in-flight turn.
+ * POST /session/:id/cancel - abort the session's in-flight turn.
  *
  * Write-scoped, and deliberately NOT owner-scoped: cancelling is strictly less
  * destructive than `POST /session/:id/end`, which is itself WRITE. Anyone who
  * can start a turn can stop one.
  *
- * The session survives — only the running prompt is aborted — so unlike the end
+ * The session survives - only the running prompt is aborted - so unlike the end
  * route there is no `session_died`; the daemon settles the turn on its own
  * event stream and the live SSE relay carries that through unchanged. Nothing
  * needs fanning out here.

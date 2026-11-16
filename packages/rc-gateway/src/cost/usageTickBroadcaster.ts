@@ -6,7 +6,7 @@
 
 /**
  * Per-session fan-out for `usage_tick` frames (`add-cost-tracking`: "`usage_tick`
- * SSE event" — subscribers receive the unmodified `session_update` AND a separate
+ * SSE event" - subscribers receive the unmodified `session_update` AND a separate
  * `usage_tick`). The ingester (driven by the always-on session subscriber) writes
  * the row and pushes a coalesced tick here; each `/session/:id/events` relay
  * registers a writer for its session and forwards ticks onto its own SSE stream.
@@ -16,7 +16,7 @@
  * duplicated per-subscriber, and a session with zero subscribers still records
  * usage (the tick simply fans to nobody).
  *
- * `emit` is total — a throwing listener is swallowed so one wedged relay can never
+ * `emit` is total - a throwing listener is swallowed so one wedged relay can never
  * break ingestion or the other relays.
  */
 

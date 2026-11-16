@@ -13,7 +13,7 @@ export const DEFAULT_MAX_APNS_DEVICES_PER_TOKEN = 8;
 /**
  * APNs device-token subscriptions for the iOS native shell
  * (add-native-mobile-shells "APNs subscription registration"). Token-bound,
- * persisted as JSON at mode 0600 — mirrors {@link PushStore} (the webpush
+ * persisted as JSON at mode 0600 - mirrors {@link PushStore} (the webpush
  * sibling uses a JSON file, not sqlite, so this matches it rather than
  * introducing a second persistence story). Unique on (tokenId, deviceToken):
  * a repeat register refreshes `lastSeenAt`/`shellVersion` instead of duplicating.

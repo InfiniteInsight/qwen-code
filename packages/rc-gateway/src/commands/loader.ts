@@ -144,7 +144,7 @@ export class CommandLoader {
   /**
    * A cheap signature of both command roots: file set + per-file mtimeMs/size +
    * the workspace dir path. Changes on any add/remove/edit/workspace-change.
-   * Fail-soft like readDir — an unreadable root contributes a sentinel and never
+   * Fail-soft like readDir - an unreadable root contributes a sentinel and never
    * throws, so the signature and the read path always agree on "missing root →
    * nothing". Does NOT read file CONTENT (the whole point: avoid the parse).
    */
@@ -216,7 +216,7 @@ export class CommandLoader {
     file: string,
   ): LoadedCommand | null {
     // Emit slash_command_parse_failed (once per source:file:reason for the
-    // loader's lifetime — load() runs per request) and return null. `reason` is
+    // loader's lifetime - load() runs per request) and return null. `reason` is
     // a short field token, never file content.
     const reject = (reason: string): null => {
       const key = `${source}:${file}:${reason}`;

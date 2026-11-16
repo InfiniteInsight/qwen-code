@@ -6,7 +6,7 @@
 
 /**
  * Throwaway self-signed localhost cert+key (valid ~100y) for the in-process HTTP/2
- * server used by the APNs transport integration test. NOT a secret — it only ever
+ * server used by the APNs transport integration test. NOT a secret - it only ever
  * fronts an ephemeral test server bound to 127.0.0.1.
  */
 

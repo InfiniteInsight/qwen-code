@@ -86,7 +86,7 @@ export interface EfficiencyMetrics {
 
 /**
  * Compute efficiency metrics from raw microcent cost and output-token counts.
- * Pure function — no rounding is applied so callers can decide precision.
+ * Pure function - no rounding is applied so callers can decide precision.
  */
 export function computeEfficiency(
   costMicrocents: number,

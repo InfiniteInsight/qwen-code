@@ -22,7 +22,7 @@ export interface SearchResult {
 /**
  * UTF-8 byte offset pair for a highlight range within `snippet`.
  * `start` is inclusive, `end` is exclusive (like Buffer.slice semantics).
- * NO HTML markup is emitted — clients apply styling from these offsets.
+ * NO HTML markup is emitted - clients apply styling from these offsets.
  */
 export interface HighlightRange {
   start: number;
@@ -79,18 +79,18 @@ export interface SearchOptions {
   /**
    * Per-query scan-time budget in ms. When set (finite and > 0), the scan
    * throws {@link SearchTimeoutError} once the wall clock passes the deadline.
-   * Absent / non-finite / ≤ 0 → NO deadline (the scan never throws on time —
+   * Absent / non-finite / ≤ 0 → NO deadline (the scan never throws on time -
    * the default for every pre-cycle-34 caller). The route supplies 2000.
    */
   timeoutMs?: number;
-  /** Injectable clock (ms epoch), default `Date.now` — lets tests drive the deadline. */
+  /** Injectable clock (ms epoch), default `Date.now` - lets tests drive the deadline. */
   now?: () => number;
 }
 
 /**
  * Thrown by {@link searchTranscripts} ONLY when an opted-in `timeoutMs` budget
  * is exceeded mid-scan. The search route maps it to `503 search_timeout`. It is
- * a deliberate control-flow signal — the scanner still swallows all I/O/parse
+ * a deliberate control-flow signal - the scanner still swallows all I/O/parse
  * errors and never throws those.
  */
 export class SearchTimeoutError extends Error {
@@ -124,7 +124,7 @@ export interface TranscriptRecord {
 /**
  * Recursively collect string leaves from an arbitrary JSON value, bounded so a
  * giant tool payload can't blow up memory. Used to make `tool_result` content
- * searchable — those records carry their output under `functionResponse`, NOT
+ * searchable - those records carry their output under `functionResponse`, NOT
  * `parts[].text`, so a naive text-only read leaves tool output unsearchable.
  */
 function collectStrings(value: unknown, out: string[], budget = 200): void {
@@ -182,7 +182,7 @@ export function transcriptFileKeys(
 /**
  * Concatenated searchable text of a record's message parts. Exported so the
  * BM25 index (`./searchIndex.ts`) indexes the EXACT text this scanner searches
- * — the two then differ only by token-vs-substring matching and ranking, never
+ * - the two then differ only by token-vs-substring matching and ranking, never
  * by which content is searchable.
  */
 export function recordText(rec: TranscriptRecord): string {
@@ -221,7 +221,7 @@ function snippet(text: string, term: string): string {
 /**
  * Scan the on-disk JSONL transcripts under `chatsDir` for records whose
  * searchable text satisfies the compiled query (phrase quoting, boolean
- * `OR`/`NOT`, and `term*` prefix wildcard — see `./query.ts`; a plain
+ * `OR`/`NOT`, and `term*` prefix wildcard - see `./query.ts`; a plain
  * space-separated query is a case-insensitive AND of substrings). Returns
  * recency-sorted hits (newest first). Never throws on I/O/parse errors: a
  * missing dir, an unreadable file, or a corrupt JSONL line is treated as
@@ -321,13 +321,13 @@ export async function searchTranscriptsDetailed(
   hits.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
   const limit = Math.min(Math.max(1, opts.limit ?? 50), 200);
   // `truncated` compares the FULL match count against the clamped limit, so the
-  // caller learns the result set was capped (not whether the scan timed out —
+  // caller learns the result set was capped (not whether the scan timed out -
   // that is the separate SearchTimeoutError → 503 path).
   return { hits: hits.slice(0, limit), truncated: hits.length > limit };
 }
 
 /**
- * Recency-sorted hits for a query — the thin, back-compat delegate over
+ * Recency-sorted hits for a query - the thin, back-compat delegate over
  * {@link searchTranscriptsDetailed}. Returns only `SearchHit[]` and preserves
  * the exact signature, return shape, and `SearchTimeoutError` propagation every
  * pre-cycle-37 caller relies on.

@@ -6707,7 +6707,7 @@
             margin-top: 4px;
             opacity: 0.9;
           }
-          /* Author display above overrides the UA [hidden] rule — reassert it. */
+          /* Author display above overrides the UA [hidden] rule - reassert it. */
           #transcript .thought .thought-body[hidden] {
             display: none;
           }
@@ -8393,11 +8393,11 @@
       };
 
       // Global 401 teardown: any 401 from THIS gateway (same-origin request)
-      // means the stored token is no longer valid — drop it and fall back to
+      // means the stored token is no longer valid - drop it and fall back to
       // the pairing screen. Scoped to same-origin ONLY: the multi-workspace
       // pool (add-multi-workspace-client) fetches OTHER daemons' absolute
       // URLs and already reports their 401s as a per-row "RE-PAIR REQUIRED"
-      // status (spec 4.6) — that must NOT tear down this browser's own
+      // status (spec 4.6) - that must NOT tear down this browser's own
       // gateway session.
       (function installAuthTeardown() {
         const realFetch = window.fetch.bind(window);
@@ -8425,7 +8425,7 @@
                 showAuthGate();
               }
             } catch {
-              /* malformed/opaque URL — nothing to tear down */
+              /* malformed/opaque URL - nothing to tear down */
             }
           }
           return res;
@@ -9513,7 +9513,7 @@
         const el = ensureCrashBanner();
         el.className = '';
         el.textContent =
-          'Daemon crashed — this turn was interrupted' +
+          'Daemon crashed - this turn was interrupted' +
           (notRecovered ? ' and not recovered' : '');
         el.hidden = false;
         // Not recovered = the turn is over; stop the processing timer.
@@ -9622,9 +9622,9 @@
       // ---- Subagent feedback -------------------------------------------------
       // Subagent (Agent tool) frames carry the parent tool call's id in
       // _meta.parentToolCallId (SubAgentTracker stamps it on the child's
-      // tool calls and stream text). Nest them inside the parent's tool row —
+      // tool calls and stream text). Nest them inside the parent's tool row -
       // a running indicator with an elapsed timer plus the child's own text
-      // and tool calls — so a long subagent run is visible instead of
+      // and tool calls - so a long subagent run is visible instead of
       // crowding (or vanishing from) the top-level transcript. The subagent
       // state (start/end time, type, text, child tools) lives on the parent
       // tool item; the view ticks the running timer.
@@ -9641,7 +9641,7 @@
         transcriptModel.upsertSubagentTool(u, parentId, sentAt);
         scrollTranscript();
       }
-      // A later status-only update may omit title/kind — the model keeps the
+      // A later status-only update may omit title/kind - the model keeps the
       // name the first frame gave this call (mirrors the TUI reducer's
       // previous?.name). The parent agent tool reaching a terminal status
       // settles the nested subagent indicator (⏳ → ✔/✖ with total elapsed
@@ -11716,7 +11716,7 @@
 
       // Renders #model-picker-rows filtered by a case-insensitive substring
       // match against each model's display name AND its raw modelId (so a
-      // hashed `qwen-route:v1:<hash>` entry — unannotated, no friendly name —
+      // hashed `qwen-route:v1:<hash>` entry - unannotated, no friendly name -
       // is still findable by typing part of the hash). Empty query shows
       // everything; no matches shows a message instead of a blank list.
       function renderModelPickerRows(query) {
@@ -11799,7 +11799,7 @@
             sel.value = prev;
             const detail =
               res.status === 401 || res.status === 403
-                ? 'not authorized — needs an owner token'
+                ? 'not authorized - needs an owner token'
                 : (body.error || 'failed (' + res.status + ')') +
                   (body.code ? ' (' + body.code + ')' : '');
             setNote(detail);
@@ -11825,7 +11825,7 @@
           }
           if (out.planExitedOutOfBand) {
             addSystem(
-              'approval mode left plan — the plan document is no longer enforced',
+              'approval mode left plan - the plan document is no longer enforced',
             );
           }
           setNote(
@@ -11845,7 +11845,7 @@
       // Model picker (issue #52): POST /session/:id/model with {modelId}.
       // Mirrors changeApprovalMode's structure minus the select-revert (the
       // dialog is already closed by the time this runs, so there's nothing
-      // to revert visually) — on 200 the footer and ctxInfo update in
+      // to revert visually) - on 200 the footer and ctxInfo update in
       // place; on failure (or network error) the error is surfaced via the
       // shared status line.
       async function switchModel(modelId) {
@@ -11867,7 +11867,7 @@
             if (gen !== switchGen) return;
             const detail =
               res.status === 401 || res.status === 403
-                ? 'not authorized — needs a write-scoped token'
+                ? 'not authorized - needs a write-scoped token'
                 : (body.error || 'failed (' + res.status + ')') +
                   (body.code ? ' (' + body.code + ')' : '');
             setStatus('model switch failed: ' + detail);
@@ -12165,7 +12165,7 @@
           const warn = document.createElement('div');
           warn.style.cssText = 'font-size:12px;color:#ca0';
           warn.textContent =
-            'workspace is not trusted — workspace-scoped saves will be refused';
+            'workspace is not trusted - workspace-scoped saves will be refused';
           body.append(warn);
         }
       }
@@ -12231,23 +12231,23 @@
           if (!res.ok) {
             const body = await res.json().catch(() => ({}));
             if (res.status === 409 && body.code === 'stale_base') {
-              st.textContent = 'conflict — rules changed, reloading…';
+              st.textContent = 'conflict - rules changed, reloading…';
               permRulesDirty = false; // the reload is what the reader reviews
               await loadPermRules(false);
-              st.textContent = 'rules changed — review and retry';
+              st.textContent = 'rules changed - review and retry';
               setStatus(
-                'permission rules changed by another writer — reloaded',
+                'permission rules changed by another writer - reloaded',
               );
               return;
             }
             let msg = (body.error || 'save failed') + ' (' + res.status + ')';
             if (body.code === 'permission_session_required') {
               msg +=
-                ' — start a session in this workspace (send a prompt), then retry';
+                ' - start a session in this workspace (send a prompt), then retry';
             } else if (body.code === 'untrusted_workspace') {
               msg += ': trust the workspace first (More, Trust and policy)';
             } else if (res.status === 401 || res.status === 403) {
-              msg = 'not authorized — needs an owner token';
+              msg = 'not authorized - needs an owner token';
             }
             st.textContent = msg;
             setStatus(msg);
@@ -12266,13 +12266,13 @@
 
       // ---- Permission decisions feed (issue #32) --------------------------
       // Read-only view over the audit log's permission rows: `policy_decision`
-      // (rule-based gateway decisions — the row now carries the tool and the
+      // (rule-based gateway decisions - the row now carries the tool and the
       // ruleId that fired) and `permission_voted` (human votes on ask/default
       // requests). Filterable by tool and rule so a user can verify that a
       // rule they set actually behaves. Daemon-local rule short-circuits
       // (allow/deny decided inside the daemon) never reach the gateway, so
       // this feed shows gateway-visible decisions only (the section note).
-      // Rows are built with createElement/textContent only — never innerHTML
+      // Rows are built with createElement/textContent only - never innerHTML
       // (server-sourced tool names / rule ids must not inject markup).
       let permDecisionTool = '';
       let permDecisionRule = '';
@@ -12370,7 +12370,7 @@
               headers: { Authorization: 'Bearer ' + token() },
             });
             if (res.status === 401 || res.status === 403) {
-              st.textContent = 'not authorized — needs an owner token';
+              st.textContent = 'not authorized - needs an owner token';
               throw new Error('unauthorized');
             }
             if (!res.ok) {
@@ -12381,7 +12381,7 @@
           };
           // permission_voted rows never carry detail.tool/ruleId (the vote
           // route has no frame data), so under a tool/rule filter the second
-          // query is guaranteed empty — skip it.
+          // query is guaranteed empty - skip it.
           const [pol, votes] = await Promise.all([
             fetchRows('policy_decision'),
             !permDecisionTool && !permDecisionRule
@@ -12431,7 +12431,7 @@
             rowsEl.appendChild(line);
           }
         } catch (e) {
-          if (st.textContent !== 'not authorized — needs an owner token') {
+          if (st.textContent !== 'not authorized - needs an owner token') {
             st.textContent = failureOf(e, 'the query');
           }
         }
@@ -12601,7 +12601,7 @@
             headers: { Authorization: 'Bearer ' + token() },
           });
           if (res.status === 401 || res.status === 403) {
-            st.textContent = 'not authorized — needs an owner token';
+            st.textContent = 'not authorized - needs an owner token';
             return;
           }
           if (!res.ok) {
@@ -12638,7 +12638,7 @@
             body: JSON.stringify(payload),
           });
           if (res.status === 401 || res.status === 403) {
-            st.textContent = 'not authorized \u2014 needs an owner token';
+            st.textContent = 'not authorized - needs an owner token';
             return;
           }
           const body = await res.json().catch(() => ({}));
@@ -12687,7 +12687,7 @@
 
       // ---- Workspace trust / MCP / tools (task #27, Settings tab) ---------
       // Capability-gated (applyWorkspaceControlGating). Reads need WRITE,
-      // mutations OWNER. Trust changes are 202-async — the LOCAL operator on
+      // mutations OWNER. Trust changes are 202-async - the LOCAL operator on
       // the daemon host applies them, so we poll the status for a bounded
       // window and report "still pending" when it elapses. MCP rows show
       // name + status + transport only, never config values (secrets).
@@ -12711,7 +12711,7 @@
         body.appendChild(btn);
       }
 
-      // GET /rc/workspace/trust — v2 preferred, v1 fallback for daemons that
+      // GET /rc/workspace/trust - v2 preferred, v1 fallback for daemons that
       // reject statusVersion=2 (400 invalid_status_version).
       async function fetchWorkspaceTrust() {
         let res = await fetch(
@@ -12778,7 +12778,7 @@
                   rec.appliedRevision == null ? '?' : rec.appliedRevision,
                 ) +
                 ')' +
-                (rec.error ? ' — ' + rec.error : '') +
+                (rec.error ? ' - ' + rec.error : '') +
                 '\n';
             }
           } else {
@@ -12819,7 +12819,7 @@
       async function requestTrust(desiredState, reason) {
         const status = wsSectionStatusEl('ws-trust-status');
         status.textContent =
-          'requested — waiting for the local operator on the daemon host…';
+          'requested - waiting for the local operator on the daemon host…';
         try {
           const payload = { desiredState, ...wsTargetBody() };
           if (reason && reason.trim()) payload.reason = reason.trim();
@@ -12836,12 +12836,12 @@
             // The daemon's passthrough is 403 folder_trust_disabled (not 409).
             if (e.code === 'folder_trust_disabled') {
               status.textContent =
-                'folder trust is disabled on the daemon host — nothing to request';
+                'folder trust is disabled on the daemon host - nothing to request';
               return;
             }
             const msg =
               res.status === 401 || res.status === 403
-                ? 'not authorized — needs an owner token'
+                ? 'not authorized - needs an owner token'
                 : (e.error || 'request failed') + ' (' + res.status + ')';
             status.textContent = msg;
             setStatus(msg);
@@ -12849,7 +12849,7 @@
           }
           // 202: accepted; the flip happens on the daemon host. Poll for it.
           status.textContent =
-            'accepted — pending operator confirmation on the daemon host';
+            'accepted - pending operator confirmation on the daemon host';
           await pollTrustFlip(desiredState, status);
         } catch (err) {
           status.textContent = 'request failed: ' + err.message;
@@ -12875,11 +12875,11 @@
               return;
             }
           } catch {
-            /* transient — keep polling */
+            /* transient - keep polling */
           }
         }
         status.textContent =
-          'still pending after ~20s — the local operator on the daemon host has not applied it yet';
+          'still pending after ~20s - the local operator on the daemon host has not applied it yet';
       }
 
       function mcpOriginLabel(origin) {
@@ -13013,7 +13013,7 @@
               server.name +
               '" is defined in ' +
               mcpOriginLabel(server.configOrigin) +
-              ' — a workspace-level remove has no effect; remove it on the daemon host (or add a workspace override)';
+              ' - a workspace-level remove has no effect; remove it on the daemon host (or add a workspace override)';
             btn.disabled = false;
             return;
           }
@@ -13078,15 +13078,15 @@
           if (!res.ok) {
             const e = await res.json().catch(() => ({}));
             if (res.status === 409 && e.code === 'stale_base') {
-              status.textContent = 'conflict — server list changed, reloading…';
+              status.textContent = 'conflict - server list changed, reloading…';
               await loadWorkspaceMcp(false);
               btn.disabled = false;
-              setStatus('MCP server list changed by another writer — reloaded');
+              setStatus('MCP server list changed by another writer - reloaded');
               return;
             }
             status.textContent =
               res.status === 401 || res.status === 403
-                ? 'not authorized — needs an owner token'
+                ? 'not authorized - needs an owner token'
                 : (e.error || 'change failed') + ' (' + res.status + ')';
             btn.disabled = false;
             return;
@@ -13139,7 +13139,7 @@
         }
       }
 
-      // #31 — add / edit MCP server config. Both paths reuse the persisted
+      // #31 - add / edit MCP server config. Both paths reuse the persisted
       // `set` mutation. The config is a JSON object the operator types: the
       // schema is wide (command/args/env/cwd, url/headers, oauth, tool
       // allowlists, …), so a JSON editor is the only form that cannot lose
@@ -13147,14 +13147,14 @@
       // (GET /rc/workspace/settings): secrets render as __redacted__, and
       // the daemon restores any value saved unchanged, so an unedited
       // secret round-trips. Status text carries the server name and the
-      // operation only — never config values.
+      // operation only - never config values.
       const MCP_CONFIG_HINT =
-        'config is the server JSON object — stdio: "command", "args", ' +
+        'config is the server JSON object - stdio: "command", "args", ' +
         '"env", "cwd"; HTTP: "url" or "httpUrl", "headers"; plus "timeout", ' +
         '"trust", "description", "includeTools", "excludeTools". Written to ' +
         'workspace settings.';
       const MCP_REDACTED_HINT =
-        'Secrets are shown as __redacted__ — saving __redacted__ unchanged ' +
+        'Secrets are shown as __redacted__ - saving __redacted__ unchanged ' +
         'keeps the current secret; replace it to set a new value.';
 
       function hideMcpServerForm() {
@@ -13210,7 +13210,7 @@
           nameInput.value = server.name;
           nameInput.disabled = true;
           nameInput.title =
-            'the name is the settings key — remove and re-add to rename';
+            'the name is the settings key - remove and re-add to rename';
         }
         const configText = document.createElement('textarea');
         configText.rows = 10;
@@ -13247,7 +13247,7 @@
                 'server defined elsewhere).';
               formStatus.textContent =
                 source === 'none'
-                  ? 'no current config readable — enter the full config'
+                  ? 'no current config readable - enter the full config'
                   : 'note: prefilled from ' + source + ' (may be partial)';
             }
           });
@@ -13265,7 +13265,7 @@
           try {
             config = JSON.parse(configText.value);
           } catch {
-            // Fixed message on purpose — a parse error can quote a
+            // Fixed message on purpose - a parse error can quote a
             // fragment of the config, which may carry a secret.
             formStatus.textContent = 'config is not valid JSON';
             return;
@@ -13302,21 +13302,21 @@
                 // The list changed under us; re-read it so the next save
                 // carries the fresh version. Keep the form open.
                 status.textContent =
-                  'conflict — server list changed, reloading…';
+                  'conflict - server list changed, reloading…';
                 formStatus.textContent =
-                  'conflict — the server list changed; try saving again';
+                  'conflict - the server list changed; try saving again';
                 await loadWorkspaceMcp(false);
                 save.disabled = false;
                 return;
               }
               status.textContent =
                 res.status === 401 || res.status === 403
-                  ? 'not authorized — needs an owner token'
+                  ? 'not authorized - needs an owner token'
                   : (e.error || 'save failed') + ' (' + res.status + ')';
               save.disabled = false;
               return;
             }
-            status.textContent = 'saved "' + serverName + '" — reloading';
+            status.textContent = 'saved "' + serverName + '" - reloading';
             hideMcpServerForm();
             await reloadMcpServers();
           } catch (err) {
@@ -13382,7 +13382,7 @@
                   ? 'disabled'
                   : 'enabled',
             );
-            note.textContent = parts.join(' \u2014 ');
+            note.textContent = parts.join(' - ');
             row.dataset.state = state;
             const btn = document.createElement('button');
             btn.textContent = isOn ? 'disable' : 'enable';
@@ -13454,12 +13454,12 @@
             const e = await res.json().catch(() => ({}));
             status.textContent =
               res.status === 401 || res.status === 403
-                ? 'not authorized — needs an owner token'
+                ? 'not authorized - needs an owner token'
                 : (e.error || 'change failed') +
                   ' (' +
                   res.status +
                   ')' +
-                  (e.code === 'unknown_tool' ? ' — check the tool name' : '');
+                  (e.code === 'unknown_tool' ? ' - check the tool name' : '');
             btn.disabled = false;
             return;
           }
@@ -15455,7 +15455,7 @@
       }
 
             // Fork-lineage breadcrumb (add-session-forking): GET /session/:id/lineage
-      // (OWNER). chain[0] is the session itself, chain[1] its parent — show
+      // (OWNER). chain[0] is the session itself, chain[1] its parent - show
       // "parent: <name> @ <id>" in #lineage above the transcript only for
       // FORKED sessions (chain.length > 1). Best-effort: a non-owner token
       // gets 403 (hidden), and a slow response for a superseded session must
@@ -15481,7 +15481,7 @@
           el.textContent = 'parent: ' + name + ' @ ' + parent.sessionId;
           el.hidden = false;
         } catch {
-          /* best-effort — the transcript never depends on the breadcrumb */
+          /* best-effort - the transcript never depends on the breadcrumb */
         }
       }
 
@@ -15495,7 +15495,7 @@
         goalFromFrame(u);
         const su = u.sessionUpdate;
         const text = u.content && u.content.text;
-        // Subagent frames are tagged with the parent Agent tool call's id —
+        // Subagent frames are tagged with the parent Agent tool call's id -
         // nest them in that tool row (running indicator + elapsed time + the
         // child's own text/tools) instead of the top-level transcript. The
         // child's usage is not this session's, so skip updateLiveTokens.
@@ -15616,7 +15616,7 @@
           asstThisTurn = true;
           appendAssistant(text, sentAt);
           // A turn may span several assistant bubbles (tool calls between
-          // them) — keep the current turn's fork button under the LATEST one.
+          // them) - keep the current turn's fork button under the LATEST one.
           const fork = transcriptModel.forkItem;
           if (fork && fork.turn === forkTurnCount) placeForkButton();
           return;
@@ -15697,7 +15697,7 @@
             }
             return showRecoveredNote();
           case 'model_switched': {
-            // The freshest model id — update the footer directly (the daemon's
+            // The freshest model id - update the footer directly (the daemon's
             // /context doesn't reliably carry it for env-configured models).
             const mid = strOr(ev.data && ev.data.modelId, '');
             if (mid) {
@@ -15720,7 +15720,7 @@
           case 'approval_mode_changed': {
             // The daemon publishes this on the session stream for ANY mode
             // change (footer picker, CLI /approval-mode, plan exit) as
-            // {previous, next, persisted} — the session is implicit (this
+            // {previous, next, persisted} - the session is implicit (this
             // stream belongs to the watched session), so sync the footer
             // selection whenever it fires.
             const d = ev.data && typeof ev.data === 'object' ? ev.data : {};
@@ -15756,7 +15756,7 @@
             // the send handler's finally freeing the button, and the drain waits
             // on that button.
             drainOutbox(0);
-            // A turn can't end while an Agent tool is still in flight —
+            // A turn can't end while an Agent tool is still in flight -
             // settle any indicator whose terminal update never arrived.
             transcriptModel.settleAllSubagents();
             // The turn is what moved the fill, so re-read it now rather than
@@ -15805,8 +15805,8 @@
             // (data.toTurn) would arrive on a from-0 replay when a WAL is
             // wired. A from-0 replay (the re-sync after a rewind, or any
             // later re-watch) re-renders every discarded turn before it
-            // reaches the marker — which is always the LAST event of the
-            // replay — so cut the rendered transcript here at the user-turn
+            // reaches the marker - which is always the LAST event of the
+            // replay - so cut the rendered transcript here at the user-turn
             // count the rewind kept. Idempotent: re-watching replays the
             // marker and re-cuts, so the view stays correct.
             const d = ev.data && typeof ev.data === 'object' ? ev.data : {};
@@ -15819,7 +15819,7 @@
             if (keep >= 0) {
               // The keep-th user item (0-based) is the first one to drop,
               // along with everything after it. Fewer user items means the
-              // replay already started past the rewind (412 resume) —
+              // replay already started past the rewind (412 resume) -
               // nothing to cut. Either way the model drops the tool and
               // subagent bookkeeping (kept turns are complete, so no frames
               // will reference those ids again), the fork row, the
@@ -16194,7 +16194,7 @@
         if (!token()) return show(false, 'pair first');
         // Optional human name (same field the Fork-session panel posts).
         const name = window.prompt('Fork name (optional):');
-        if (name === null) return; // cancelled — no request
+        if (name === null) return; // cancelled - no request
         show(true, 'forking…');
         const payload = {
           fromTurn: item.turn,
@@ -16236,7 +16236,7 @@
             show(
               false,
               res.status === 401 || res.status === 403
-                ? 'not authorized — needs write scope'
+                ? 'not authorized - needs write scope'
                 : 'fork failed: ' + code,
             );
             return;
@@ -19745,13 +19745,13 @@
 
       // Validate any stored token against the gateway before revealing
       // #app-body. /rc/capabilities requires an authenticated req.rcClient
-      // and 401s otherwise, so a 200 here is proof the token still works —
+      // and 401s otherwise, so a 200 here is proof the token still works -
       // mere token() *presence* is not (a stale/revoked token is still a
       // non-empty string). renderRecentWorkspaces/browseTo/loadDaemonManifest/
       // restoreWatchedSession are function declarations defined later in this
       // script but hoisted, and this only reaches them after the `await`
-      // below — by which point the whole script has finished executing (same
-      // reasoning doPair, further down, already relies on) — so calling them
+      // below - by which point the whole script has finished executing (same
+      // reasoning doPair, further down, already relies on) - so calling them
       // here is safe regardless of source order.
       // Tab-bar reachability dot (Task 4). ok=true → green/"reachable",
       // ok=false → red/"unreachable". Driven by the auth gate's initial
@@ -19769,7 +19769,7 @@
       }
 
       // Keep the dot live independent of the Daemons section (which only
-      // populates for owner tokens with a configured clients.toml — see
+      // populates for owner tokens with a configured clients.toml - see
       // loadDaemonManifest above). A bare, unauthenticated /rc/health probe
       // covers every pairing, not just multi-daemon setups.
       let healthPollId = null;
@@ -19786,14 +19786,14 @@
       // Task #27: gate the workspace-control sections on the daemon's
       // capabilities (remoteControl.workspaceControl). A section stays
       // hidden when its capability is false or absent (older daemons). The
-      // footer mode picker is deliberately NOT capability-gated — the mode
+      // footer mode picker is deliberately NOT capability-gated - the mode
       // route is always mounted; the picker appears once the context
       // reports more than one available mode.
       function applyWorkspaceControlGating() {
         const wc =
           (caps && caps.remoteControl && caps.remoteControl.workspaceControl) ||
           {};
-        // Sections start as a Load placeholder (no auto-load — these reads
+        // Sections start as a Load placeholder (no auto-load - these reads
         // hit the daemon workspace). Only seed the placeholder when the body
         // is still empty so a re-gate never wipes loaded content.
         const sections = {
@@ -19883,7 +19883,7 @@
             headers: { Authorization: 'Bearer ' + t },
           });
           if (res.ok) {
-            // Task #27: keep the body — workspaceControl gates the
+            // Task #27: keep the body - workspaceControl gates the
             // permission-rules / trust / MCP / tools sections.
             caps = await res.json().catch(() => null);
             setStatusDot(true);
@@ -19903,7 +19903,7 @@
             // param was present (and scrubbed), so a plain reload still
             // restores the previously watched session as before.
             if (!handleSessionDeepLink()) restoreWatchedSession();
-            // issue #48: notifications are on by default — silently
+            // issue #48: notifications are on by default - silently
             // (re)enable unless the user opted out in Settings.
             void autoEnableNotifications();
           } else {
@@ -19979,7 +19979,7 @@
             const failBody = await res.json().catch(() => null);
             pairFeedback(
               res.status === 400
-                ? '✗ invalid or expired code — get a fresh one and retry'
+                ? '✗ invalid or expired code - get a fresh one and retry'
                 : '✗ ' + describeFailure(res, failBody, 'pairing'),
               false,
             );
@@ -19996,7 +19996,7 @@
           idbPutToken(data.token);
           $('code').value = ''; // single-use; clear it once redeemed
           // Task #27: authGate() ran before any token existed, so fetch the
-          // capabilities now (non-fatal — without them the workspace
+          // capabilities now (non-fatal - without them the workspace
           // control sections simply stay hidden).
           try {
             const capsRes = await fetch('/rc/capabilities', {
@@ -20014,7 +20014,7 @@
           startPendingCardsPoll(); // issue #46: same as the auth-gate path
           startLiveTick(); // #255: same as the auth-gate path
           // authGate() (above) only populates the directory picker for a
-          // token that ALREADY existed at script load — a fresh pair (QR or
+          // token that ALREADY existed at script load - a fresh pair (QR or
           // manual code) has no such run, so #dir-list would otherwise show
           // "(loading…)" forever until a manual reload. Now that a token
           // exists, populate it (this covers BOTH the QR auto-pair and the
@@ -20039,7 +20039,7 @@
           // handle any surviving ?session= param here (no-op if absent).
           handleSessionDeepLink();
           pairFeedback(
-            '✓ paired — scopes: ' + (data.scopes || []).join(', '),
+            '✓ paired - scopes: ' + (data.scopes || []).join(', '),
             true,
           );
         } catch (e) {
@@ -20057,7 +20057,7 @@
       // QR auto-fill: a scanned QR opens .../ui/#code=<code>. Read it, scrub it
       // from the address bar IMMEDIATELY (so a reload/bookmark can't retry a
       // single-use code, and it never lingers in history), prefill the field,
-      // then pair — no typing. The code rides the URL *fragment*, which never
+      // then pair - no typing. The code rides the URL *fragment*, which never
       // reaches server access logs or the Referer header.
       (function autoPairFromHash() {
         const m = /[#&]code=([^&]+)/.exec(location.hash || '');
@@ -20104,7 +20104,7 @@
                 Authorization: 'Bearer ' + token(),
               },
               // answers: ask_user_question responses, keyed by question
-              // index — the keying the tool's parser expects.
+              // index - the keying the tool's parser expects.
               body: JSON.stringify(
                 outcome === 'selected'
                   ? { outcome, optionId, ...(answers ? { answers } : {}) }
@@ -20317,7 +20317,7 @@
           Array.from(card.querySelectorAll('button, input, textarea'));
         const entry = {
           el: card,
-          // issue #46: which session this card belongs to — the pending
+          // issue #46: which session this card belongs to - the pending
           // poll auto-resolves only cards of the session it polled.
           sessionId,
           kind,
@@ -20631,7 +20631,7 @@
             { headers: { Authorization: 'Bearer ' + token() } },
           );
         } catch {
-          return; // transport blip — the stream's own reconnect handles it
+          return; // transport blip - the stream's own reconnect handles it
         }
         // #186: the answer is about `sessionId`. A reader who has moved to
         // another conversation since it was asked would otherwise get a card
@@ -20666,10 +20666,10 @@
             }
           }
           // Gone, not busy: nothing to redraw now or later (#59).
-          forgetGoneSession('session ended on the host — start or resume one');
+          forgetGoneSession('session ended on the host - start or resume one');
           return;
         }
-        if (res.status !== 200) return; // 502 — nothing to draw, keep polling
+        if (res.status !== 200) return; // 502 - nothing to draw, keep polling
         goneResumed.delete(sessionId);
         const body = await res.json().catch(() => null);
         if (superseded()) return; // #172: the body is a second await
@@ -20710,7 +20710,7 @@
           }
         }
         if (!Array.isArray(body.pendingInteractions)) return;
-        // Older daemons omit pendingInteractions entirely — the absence
+        // Older daemons omit pendingInteractions entirely - the absence
         // also skips the auto-resolve below (can't distinguish "none
         // pending" from "unknown").
         const pending = new Set();
@@ -20819,14 +20819,14 @@
       // replaces it; refreshPendingCards draws for it before it is watched.
       let deepLinkSessionId = null;
       let watchedSessionTitle = null;
-      // issue #39: the workspace the watched session runs in, when known —
+      // issue #39: the workspace the watched session runs in, when known -
       // the only cwd the resume route will accept for a state_resync_required
       // self-heal re-resume. null → the user must re-tap the conversation.
       let watchedSessionCwd = null;
       // issue #46: sessions whose from-0 resume replay was met with
       // state_resync_required. A second from-0 attempt for them would loop
       // (resume → from-0 → resync → resume …), so they re-resume at the
-      // watermark instead — the status poll still recovers the card.
+      // watermark instead - the status poll still recovers the card.
       const noReplayResynced = new Set();
       // Set by resumeConversation when it demotes a resume watch to a from-0
       // replay; consumed by the resync branch to attribute the eviction to
@@ -21018,7 +21018,7 @@
           setStatus(
             'reconnect failed after ' +
               watchRetryMax +
-              ' tries — tap Reconnect in the toolbar',
+              ' tries - tap Reconnect in the toolbar',
           );
           return;
         }
@@ -21084,7 +21084,7 @@
             title: watchedSessionTitle,
             // issue #46: the resync self-heal (re-resume after a bus-epoch
             // change) needs the workspace cwd, which a fresh page load
-            // otherwise has no source for — persist it with the watch.
+            // otherwise has no source for - persist it with the watch.
             cwd: watchedSessionCwd,
           });
           localStorage.setItem(WATCHED_KEY, pointer);
@@ -21379,7 +21379,7 @@
       // #59: a 404 means the daemon no longer knows this session, so the
       // stream can never resume and the status poll has nothing left to
       // redraw. Drop the watch the way Unwatch does, including
-      // watchedSessionId itself — the pending-cards poll is gated only on
+      // watchedSessionId itself - the pending-cards poll is gated only on
       // that, so leaving it set keeps the poll running against a dead id.
       // A 502 (daemon blip) is the opposite case and keeps polling.
       function forgetGoneSession(message) {
@@ -24894,7 +24894,7 @@
             JSON.stringify(list.slice(0, MAX_RECENT)),
           );
         } catch {
-          /* storage full/unavailable — best effort */
+          /* storage full/unavailable - best effort */
         }
         renderRecentWorkspaces();
       }
@@ -24951,7 +24951,7 @@
         list.querySelectorAll('button.token-row').forEach((b, i) => {
           b.tabIndex = i === 0 ? 0 : -1;
         });
-        // Landing on a new path is "a workspace is selected" — refresh the
+        // Landing on a new path is "a workspace is selected" - refresh the
         // past-conversations list for it (the browse-time trigger: default
         // open, subfolder tap, ".." , and a typed path routed through
         // browseTo below all flow through here. issue #35 added the
@@ -24981,7 +24981,7 @@
 
       // GET /rc/fs?path=<abs> (path omitted → server default, $HOME). Renders
       // `parent` as the ".." target and `entries` as tappable subfolder rows.
-      // On error (403/404/etc), setStatus and DO NOT navigate — curDirPath
+      // On error (403/404/etc), setStatus and DO NOT navigate - curDirPath
       // stays put so "Use this folder" still targets the last good listing.
       // #182: resolves whether it landed, and `quiet` keeps a failure off the
       // status line, for the boot's attempt at the saved folder, which falls
@@ -25053,7 +25053,7 @@
         if (listShown()) $('list-folder').focus({ preventScroll: true });
       };
 
-      // Typing an absolute path and leaving the field (blur, or Enter — both
+      // Typing an absolute path and leaving the field (blur, or Enter - both
       // fire `change`) counts as choosing a workspace the same way browsing
       // does: route it through browseTo so curDirPath updates and the
       // past-conversations refresh (renderDirList, above) fires from that one
@@ -26158,8 +26158,8 @@
       // return) plus a 30 s poll so live sessions appear. "Continue last"
       // resumes sessions[0]; a row tap resumes that row. Both funnel into
       // resumeConversation, which mirrors the New-conversation flow's watch
-      // hand-off ($('new-session').onclick, below) — a direct startWatch
-      // call — so a resumed session replays history and opens the composer
+      // hand-off ($('new-session').onclick, below) - a direct startWatch
+      // call - so a resumed session replays history and opens the composer
       // exactly the same way a fresh one does.
       // #193: pastConvos is every folder's rows merged (each carrying the
       // `cwd` it was read from), and pastConvosCwd is the current folder,
@@ -26246,7 +26246,7 @@
       }
 
       // "just now" / "N min ago" / "N h ago" / "N d ago". A skewed clock or a
-      // future timestamp must never print a negative count — clamp the raw
+      // future timestamp must never print a negative count - clamp the raw
       // diff at 0 so it reads "just now" instead of "-3 min ago". An
       // unparseable updatedAt renders as ''.
       function relativeTime(iso) {
@@ -26262,7 +26262,7 @@
         return diffD + ' d ago';
       }
 
-      // createElement + textContent only — a session title is user/model data
+      // createElement + textContent only - a session title is user/model data
       // (never innerHTML), same discipline as renderPermissionCard/subRow.
       // issue #36: the list is bounded. The #past-list box itself is a
       // fixed-height scroll region (HTML), and when the fetched list exceeds
@@ -27492,7 +27492,7 @@
 
       // GET /rc/sessions?cwd=<cwd> (Bearer/OWNER). Renders only if `cwd` is
       // STILL the folder browser's current path by the time the response
-      // lands — guards a slow response from an earlier browse arriving AFTER
+      // lands - guards a slow response from an earlier browse arriving AFTER
       // a newer one (fetch for A in flight, browse to B completes first, A's
       // response must not clobber B's list).
       // #89: the rail's list is a scan of the on-disk chats dir, so a
@@ -27861,7 +27861,7 @@
 
       // issue #35: folder browsing is no longer the ONLY refresh trigger. A
       // live session's transcript is created lazily (first record write) and
-      // its mtime/title keep moving — all AFTER the last browse. A slow
+      // its mtime/title keep moving - all AFTER the last browse. A slow
       // re-fetch covers new sessions, in-place mtime/title updates, and the
       // relative "N min ago" labels. /rc/sessions is a bounded local scan
       // (500-file cap), so the tick is cheap. Pauses while the tab is
@@ -28049,14 +28049,14 @@
       });
 
       // issue #46: while a session is watched, the event stream is the
-      // only card source — if a permission_request frame was lost (ring
+      // only card source - if a permission_request frame was lost (ring
       // overflow, daemon restart, reload mid-question) the card never
       // arrives. A light status poll covers the gap: it redraws still-
       // pending interactions and marks locally stale cards resolved.
       // 5 s keeps a stuck question recoverable without hammering the
       // daemon; the fetch is one small JSON summary. Pauses while the tab
       // is backgrounded or nothing is watched, like startHealthPoll.
-      // issue #46: NOT gated on watchStreamAlive — a dead stream (minimize
+      // issue #46: NOT gated on watchStreamAlive - a dead stream (minimize
       // killed the SSE, a failed connect, a pending resync) is exactly when
       // this safety net has to keep redrawing the pending card.
       let pendingCardsPollId = null;
@@ -28760,7 +28760,7 @@
         watchedSessionTitle = title || null;
         showSessionTitle(watchedSessionTitle);
         // issue #46: a re-tap / deep link / resume replaces the previous
-        // watch — abort it, so two streams cannot keep appending frames at
+        // watch - abort it, so two streams cannot keep appending frames at
         // once. The aborted predecessor's teardown ignores the shared state
         // unless it is still current (the controller-identity checks below),
         // so it cannot clobber the new watch.
@@ -28850,7 +28850,7 @@
               // issue #113: the 412 body names the oldest id the WAL still
               // holds. A null cursor sends no Last-Event-ID header, and the
               // comment above startWatch says that means the daemon replays
-              // nothing at all — so the retry reconnected onto an empty
+              // nothing at all - so the retry reconnected onto an empty
               // stream and clearTranscript() blanked a conversation that is
               // intact on disk. Retry from the boundary replayFrom vouches
               // for instead.
@@ -28884,7 +28884,7 @@
               }
             }
             // issue #46: a failed stream connect must not strand a pending
-            // question — the status fetch still redraws the card the
+            // question - the status fetch still redraws the card the
             // stream will not deliver.
             if (watchedSessionId === id) void refreshPendingCards(id);
             return;
@@ -28923,20 +28923,20 @@
             rosterStale = false;
             void readRoster(id);
           }
-          // issue #35: this session just (re)started — the list may predate
+          // issue #35: this session just (re)started - the list may predate
           // it. If its transcript file does not exist yet (lazy creation),
           // the startPastConvosPoll interval picks it up once the first
           // record lands.
           void refreshPastConversations(curDirPath);
           // issue #46: every watch open (fresh tap, deep link, resume,
-          // resync self-heal, reload restore) funnels through here — redraw
+          // resync self-heal, reload restore) funnels through here - redraw
           // any question/permission cards the stream has not (yet) replayed.
           void refreshPendingCards(id);
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
           let buf = '';
           // issue #85: arm the stall watchdog. Every byte counts, the gateway's
-          // `: ping` comment lines included — a ping is exactly the proof that
+          // `: ping` comment lines included - a ping is exactly the proof that
           // the socket still carries writes, which is the one thing a
           // dead-but-open connection stops producing. Cancelling the reader is
           // the whole action: the parked read() below resolves done, the loop
@@ -28984,7 +28984,7 @@
               }
               if (ev && ev.type === 'state_resync_required') {
                 // issue #39: the daemon's bus epoch changed (daemon restart)
-                // or our cursor fell out of the ring — this stream no longer
+                // or our cursor fell out of the ring - this stream no longer
                 // carries the history. Abort this watch; the finally below
                 // re-runs the resume flow (in-band reload + fresh watermark)
                 // once teardown has completed. Unknown workspace → the
@@ -29032,13 +29032,13 @@
           // during the gap moved unseen. The replay boundary reads once.
           if (roster.sessionId === id) rosterGap();
           if (agentsState && agentsState.sessionId === id) agentsGap();
-          // issue #35: the session just finished — refresh so it lands in
+          // issue #35: the session just finished - refresh so it lands in
           // the list with its final mtime/title instead of waiting for the
           // next interval tick.
           void refreshPastConversations(curDirPath);
           // Self-heal: a clean end while the tab is on the session is
           // usually a dropped subscription (daemon/gateway blip), not a
-          // finished session — retry from where we last saw. A truly gone
+          // finished session - retry from where we last saw. A truly gone
           // session just keeps failing until the attempts run out.
           scheduleWatchRetry(0);
         } catch (e) {
@@ -29057,18 +29057,18 @@
             scheduleWatchRetry(0);
           }
         } finally {
-          // issue #85: first thing, above the superseded-watch return below —
+          // issue #85: first thing, above the superseded-watch return below -
           // a watch that got replaced still owns a pending stall timer, and
           // only this frame can clear it.
           stopStallWatch();
           // issue #46: a newer startWatch already replaced this one (its
-          // abort fired) — that watch's teardown owns the shared state now,
+          // abort fired) - that watch's teardown owns the shared state now,
           // so do not clobber it.
           if (controller !== myController) return;
           watchStreamAlive = false;
           $('watch').disabled = false;
           $('stop').disabled = true;
-          // issue #39: a resync was flagged while the loop was live — run
+          // issue #39: a resync was flagged while the loop was live - run
           // the re-resume now that this teardown has finished, so the new
           // watch's state is not clobbered by this finally.
           if (pendingResyncCwd && watchedSessionId === id) {
@@ -29146,11 +29146,11 @@
         btn.textContent = 'Enable notifications';
         state.textContent =
           Notification.permission === 'denied'
-            ? 'disabled — browser permission denied (re-allow it in the site settings)'
+            ? 'disabled - browser permission denied (re-allow it in the site settings)'
             : Notification.permission === 'granted'
               ? 'disabled' +
                 (notifError ? ': ' + notifError + ', will retry on the next load' : '')
-              : 'disabled — browser permission not asked yet';
+              : 'disabled - browser permission not asked yet';
       }
 
       // register SW -> VAPID key -> subscribe -> POST the subscription.
@@ -29253,7 +29253,7 @@
               }
             }
           } catch (e) {
-            /* best-effort — the local unsubscribe still holds */
+            /* best-effort - the local unsubscribe still holds */
           }
           try {
             await sub.unsubscribe();
@@ -29385,11 +29385,11 @@
           });
           if (!res.ok) {
             // 503 = the owner-stream cap (too_many_streams); the caller IS
-            // authorized, just rejected for capacity — don't blame the scope.
+            // authorized, just rejected for capacity - don't blame the scope.
             eventLog(
               res.status === 503
-                ? 'too many active event streams — close one and retry'
-                : 'not authorized (' + res.status + ') — needs an owner token',
+                ? 'too many active event streams - close one and retry'
+                : 'not authorized (' + res.status + ') - needs an owner token',
             );
             return;
           }
@@ -29418,7 +29418,7 @@
                 eventLog(
                   'resync: dropped ' +
                     (frame.dropped ?? '?') +
-                    ' frame(s) — query /rc/audit for the gap',
+                    ' frame(s) - query /rc/audit for the gap',
                 );
                 continue;
               }
@@ -29458,7 +29458,7 @@
       };
 
       // Audit-log history (cycle 55): GET /rc/audit?action&limit, newest-first.
-      // Read-only OWNER query — the historical complement to the cycle-54 live
+      // Read-only OWNER query - the historical complement to the cycle-54 live
       // /rc/events stream (the deferred "replay path"). Self-contained: shares
       // only the read-only token()/$ helpers.
       $('audit-query').onclick = async () => {
@@ -29477,7 +29477,7 @@
           if (!res.ok) {
             out.textContent =
               res.status === 401 || res.status === 403
-                ? 'not authorized — needs an owner token'
+                ? 'not authorized - needs an owner token'
                 : describeFailure(res, await res.json().catch(() => null), 'the query');
             return;
           }
@@ -29502,7 +29502,7 @@
 
       // Token management (cycle 56): GET /rc/tokens list + DELETE revoke. The
       // first UI with a mutating action. Rows are built with createElement +
-      // textContent (a server-set `label`/`scopes` can't inject markup) —
+      // textContent (a server-set `label`/`scopes` can't inject markup) -
       // mirrors renderPermissionCard, never innerHTML. Self-contained.
       async function revokeToken(id, row, btn) {
         // #173: the page's own token is the one it signs in with.
@@ -29545,7 +29545,7 @@
           if (!res.ok) {
             out.textContent =
               res.status === 401 || res.status === 403
-                ? 'not authorized — needs an owner token'
+                ? 'not authorized - needs an owner token'
                 : describeFailure(res, await res.json().catch(() => null), 'the list');
             return;
           }
@@ -29605,7 +29605,7 @@
           // for an auto-generated title vs a manual /rename (cycle 95);
           // textContent-safe (the whole tree string renders via textContent).
           const title = s.title
-            ? ' — ' + s.title + (s.titleSource === 'auto' ? ' (auto)' : '')
+            ? ' - ' + s.title + (s.titleSource === 'auto' ? ' (auto)' : '')
             : '';
           lines.push(
             '  '.repeat(depth) +
@@ -29617,7 +29617,7 @@
           for (const f of s.forks || []) walk(byId.get(f), depth + 1);
         };
         for (const s of sessions) if (!isChild.has(s.sessionId)) walk(s, 0);
-        // Any node not reached (e.g. only reachable via a cycle) — list flat.
+        // Any node not reached (e.g. only reachable via a cycle) - list flat.
         for (const s of sessions) if (!visited.has(s.sessionId)) walk(s, 0);
         if (truncated) lines.push('… list truncated (scan cap hit)');
         return lines.length ? lines.join('\n') : '(no sessions)';
@@ -29633,7 +29633,7 @@
           if (!res.ok) {
             out.textContent =
               res.status === 401 || res.status === 403
-                ? 'not authorized — needs an owner token'
+                ? 'not authorized - needs an owner token'
                 : res.status === 502
                   ? 'no workspace (daemon unavailable)'
                   : describeFailure(res, await res.json().catch(() => null), 'the list');
@@ -29652,7 +29652,7 @@
       };
 
       // ===================================================================
-      // Multi-daemon registry UI (add-multi-workspace-client tasks 4.1–4.8).
+      // Multi-daemon registry UI (add-multi-workspace-client tasks 4.1-4.8).
       // The manifest (clients.toml) comes from GET /ui/clients-manifest.json
       // (OWNER) and is cached in localStorage under CLIENTS_KEY (spec 4.1).
       // A non-owner token gets 403 → the section stays hidden (no switcher).
@@ -29670,8 +29670,8 @@
         return Number.isFinite(v) && v > 0 ? Math.max(10000, v) : 30000;
       };
       // Spec 4.2 state machine needs the LAST SUCCESSFUL 200 per daemon, not
-      // just the latest poll outcome — persist it so a reload renders the
-      // right dot immediately (green ≤30 s, yellow 30 s–5 min, red >5 min).
+      // just the latest poll outcome - persist it so a reload renders the
+      // right dot immediately (green ≤30 s, yellow 30 s-5 min, red >5 min).
       const HEALTH_KEY = 'qwen-rc:health';
       let healthLastSuccess = {}; // { daemonUrl: epochMs }
       try {
@@ -29685,7 +29685,7 @@
         try {
           localStorage.setItem(HEALTH_KEY, JSON.stringify(healthLastSuccess));
         } catch {
-          /* private mode — dots degrade to latest-poll-only */
+          /* private mode - dots degrade to latest-poll-only */
         }
       };
       // Latest poll outcome per daemon: { kind, status? }.
@@ -29701,7 +29701,7 @@
           const clean = list.filter(
             (d) => d && typeof d.name === 'string' && typeof d.url === 'string',
           );
-          // "No explicit default → first entry is the default" (spec 4.1) —
+          // "No explicit default → first entry is the default" (spec 4.1) -
           // the endpoint does NOT synthesize `default`, the client does.
           if (clean.length > 0 && !clean.some((d) => d.default)) {
             clean[0] = { ...clean[0], default: true };
@@ -29713,7 +29713,7 @@
       }
 
       // Spec 4.2 dot state machine. Green: 200 within the last 30 s. Yellow:
-      // last successful 200 is 30 s–5 min old, OR latest poll was a 5xx. Red:
+      // last successful 200 is 30 s-5 min old, OR latest poll was a 5xx. Red:
       // latest poll was 401/403/network failure, OR no success in >5 min.
       // `unknown` (grey) only before the very first poll has any data.
       function healthDotState(d, now) {
@@ -29753,9 +29753,9 @@
           const last = healthLastSuccess[d.url];
           const detail =
             st +
-            (latest && latest.status ? ' — HTTP ' + latest.status : '') +
+            (latest && latest.status ? ' - HTTP ' + latest.status : '') +
             (last !== undefined
-              ? ' — last success ' + relTime(now - last)
+              ? ' - last success ' + relTime(now - last)
               : '');
           const dot = document.createElement('span');
           dot.style.cssText =
@@ -29772,7 +29772,7 @@
           row.appendChild(dot);
           const label = document.createElement('span');
           label.textContent =
-            d.name + (d.default ? ' (default)' : '') + ' — ' + d.url;
+            d.name + (d.default ? ' (default)' : '') + ' - ' + d.url;
           row.appendChild(label);
           if (new URL(d.url).origin === location.origin) {
             const cur = document.createElement('span');
@@ -29792,7 +29792,7 @@
       }
 
       async function checkDaemonHealth(d) {
-        // Spec 4.2: /rc/health is public. Classify the outcome — the dot
+        // Spec 4.2: /rc/health is public. Classify the outcome - the dot
         // state machine (healthDotState) combines it with the last-success
         // timestamp to derive green/yellow/red.
         try {
@@ -29824,7 +29824,7 @@
         renderDaemonRows();
       }
 
-      // Issue #34 — drift detection: other clients (the CLI, another dashboard
+      // Issue #34 - drift detection: other clients (the CLI, another dashboard
       // tab) can change workspace settings while this tab is backgrounded,
       // leaving the displayed sections stale. On refocus, re-fetch each
       // workspace GET and, only when the data differs from the last render,
@@ -29878,7 +29878,7 @@
             key === 'perms'
               ? permRulesStatusEl()
               : wsSectionStatusEl('ws-' + key + '-status');
-          status.textContent = 'updated externally — reloaded';
+          status.textContent = 'updated externally - reloaded';
         }
       }
       window.addEventListener('focus', () => {
@@ -29928,7 +29928,7 @@
           }
         }
         void pollDaemonHealths();
-        // issue #35: the 30 s tick is paused while hidden — catch up now.
+        // issue #35: the 30 s tick is paused while hidden - catch up now.
         void refreshPastConversations(curDirPath);
         if (watchedSessionId && !watchStreamAlive && token()) {
           // The user is back: drop the pending backoff retry, reconnect
@@ -29969,11 +29969,11 @@
             daemonHealthTimer = setInterval(pollDaemonHealths, healthPollMs());
           }
         } catch {
-          /* manifest fetch is best-effort — the page works without it */
+          /* manifest fetch is best-effort - the page works without it */
         }
       }
 
-      // Spec 4.5/4.6: aggregated sessions — parallel fan-out of
+      // Spec 4.5/4.6: aggregated sessions - parallel fan-out of
       // GET /rc/sessions to every configured daemon. Failures MUST NOT block
       // the view: each failing daemon contributes exactly one status row per
       // the spec 4.6 state mapping, and successful daemons feed one unified
@@ -30009,7 +30009,7 @@
         try {
           localStorage.setItem(LAST_SEEN_KEY, JSON.stringify(lastSeen));
         } catch {
-          /* private mode — last-seen degrades to this page session */
+          /* private mode - last-seen degrades to this page session */
         }
       };
 
@@ -30044,7 +30044,7 @@
           };
         } catch (e) {
           // Browsers surface BOTH a refused CORS preflight and a dead
-          // network as TypeError('Failed to fetch') — they are
+          // network as TypeError('Failed to fetch') - they are
           // indistinguishable, so the status row covers both readings.
           return {
             ok: false,
@@ -30137,33 +30137,33 @@
             daemonStatusRow(
               d,
               out,
-              'ERROR \u2014 daemon returned ' + (r.detail || r.status),
+              'ERROR - daemon returned ' + (r.detail || r.status),
             );
           } else if (r.status === 403) {
             daemonStatusRow(
               d,
               out,
-              'ERROR — daemon returned 403 (token lacks owner scope)',
+              'ERROR - daemon returned 403 (token lacks owner scope)',
             );
           } else if (r.kind === 'timeout' || r.kind === 'network') {
             const seen = ls !== undefined ? relTime(now - ls) : 'never';
             daemonStatusRow(
               d,
               out,
-              'UNREACHABLE \u2014 ' +
+              'UNREACHABLE - ' +
                 (r.error ? r.error + ' reaching ' + d.url + ' · ' : '') +
                 'last seen ' +
                 seen +
                 ' · if this daemon is up: origin not admitted on ' +
                 d.name +
-                ' — owner action required: qwen-rc cors add ' +
+                ' - owner action required: qwen-rc cors add ' +
                 location.origin,
             );
           } else {
             daemonStatusRow(
               d,
               out,
-              'ERROR \u2014 daemon returned ' + (r.detail || r.status),
+              'ERROR - daemon returned ' + (r.detail || r.status),
             );
           }
         });
@@ -30181,7 +30181,7 @@
           open.className = 'open';
           open.textContent =
             String(u.s.sessionId) +
-            (u.s.title ? ' — ' + u.s.title : '') +
+            (u.s.title ? ' - ' + u.s.title : '') +
             '  (' +
             String(u.s.updatedAt || '')
               .slice(0, 16)
@@ -30264,7 +30264,7 @@
             gpu.index +
             ': ' +
             gpu.name +
-            ' — ' +
+            ' - ' +
             used +
             '/' +
             total +
@@ -30321,7 +30321,7 @@
             daemonStatusRow(
               d,
               out,
-              'ERROR — daemon returned 403 (token lacks owner scope)',
+              'ERROR - daemon returned 403 (token lacks owner scope)',
             );
           } else if (r.kind === 'timeout' || r.kind === 'network') {
             const ls = lastSeen[d.url];
@@ -30329,20 +30329,20 @@
             daemonStatusRow(
               d,
               out,
-              'UNREACHABLE \u2014 ' +
+              'UNREACHABLE - ' +
                 (r.error ? r.error + ' reaching ' + d.url + ' · ' : '') +
                 'last seen ' +
                 seen +
                 ' · if this daemon is up: origin not admitted on ' +
                 d.name +
-                ' — owner action required: qwen-rc cors add ' +
+                ' - owner action required: qwen-rc cors add ' +
                 location.origin,
             );
           } else {
             daemonStatusRow(
               d,
               out,
-              'ERROR \u2014 ' + (r.detail || r.status || r.kind),
+              'ERROR - ' + (r.detail || r.status || r.kind),
             );
           }
         });
@@ -30361,7 +30361,7 @@
             headers: { Authorization: 'Bearer ' + token() },
           });
           if (res.status === 404) {
-            empty.textContent = 'not configured — gateway has no --llama-swap-url';
+            empty.textContent = 'not configured - gateway has no --llama-swap-url';
             return;
           }
           if (!res.ok) {
@@ -30382,7 +30382,7 @@
             const row = document.createElement('div');
             const badge = m.loaded ? '🟢 loaded' : '⚪ unloaded';
             row.textContent =
-              m.id + (m.aliases && m.aliases.length ? ' (' + m.aliases.join(', ') + ')' : '') + ' — ' + badge;
+              m.id + (m.aliases && m.aliases.length ? ' (' + m.aliases.join(', ') + ')' : '') + ' - ' + badge;
             rows.appendChild(row);
           }
         } catch (err) {
@@ -30397,7 +30397,7 @@
       // loadDaemonManifest() and the watched-session auto-restore (below)
       // both used to run unconditionally here at script-load. They now run
       // from authGate()'s success branch (see the token() helper, above)
-      // instead — self-guarding on token() *presence* isn't enough, since a
+      // instead - self-guarding on token() *presence* isn't enough, since a
       // stale/invalid stored token would still fire these eagerly before the
       // auth gate has validated it. See restoreWatchedSession(), used there.
 
@@ -30444,11 +30444,11 @@
       }
 
       // Turn-end push deep link (#40): a push notification's URL is
-      // /ui/?session=<id>. The push payload is metadata-only — it carries
-      // NO cwd — so the session's workspace is resolved by probing the
+      // /ui/?session=<id>. The push payload is metadata-only - it carries
+      // NO cwd - so the session's workspace is resolved by probing the
       // recent-workspace list (most recent first) against
       // GET /rc/sessions?cwd=. If no workspace lists the session (fresh
-      // device, stale recent list), fall back to startWatch() — attaching
+      // device, stale recent list), fall back to startWatch() - attaching
       // the event stream does not need a cwd, and a 401/404 surfaces in
       // the status line. Returns true synchronously when a ?session= param
       // was present and handled, so callers can SKIP restoreWatchedSession():
@@ -30552,7 +30552,7 @@
             }
           }
         } catch {
-          /* corrupt entry — ignore */
+          /* corrupt entry - ignore */
         }
       }
 
@@ -30578,7 +30578,7 @@
           if (!res.ok) {
             out.textContent =
               res.status === 401 || res.status === 403
-                ? ' not authorized — needs an owner token'
+                ? ' not authorized - needs an owner token'
                 : ' ' + describeFailure(res, await res.json().catch(() => null), 'the test notification');
             return;
           }
@@ -30598,7 +30598,7 @@
       // kind-allowlist is shown read-only (prefs:[]="mute all" vs
       // prefs:null="receive all" is a footgun deferred to a future toggle).
       // createElement + textContent / input.value only (server fields are
-      // hex/enum/number) — never innerHTML.
+      // hex/enum/number) - never innerHTML.
       function subRow(s) {
         const row = document.createElement('div');
         row.className = 'token-row';
@@ -30768,7 +30768,7 @@
           if (!res.ok) {
             out.textContent =
               res.status === 401 || res.status === 403
-                ? 'not authorized — needs an owner token'
+                ? 'not authorized - needs an owner token'
                 : res.status === 404
                   ? 'push not configured on this gateway'
                   : describeFailure(res, await res.json().catch(() => null), 'the list');
@@ -30791,7 +30791,7 @@
 
       // Cross-session search (cycle 61): consumer of the OWNER-only GET
       // /rc/search (an earlier cycle's backend: query operators, snippets,
-      // recency sort, timeout). THE riskiest line is rendering hit.snippet —
+      // recency sort, timeout). THE riskiest line is rendering hit.snippet -
       // it is arbitrary transcript text (user/model/tool), so it goes through
       // textContent ONLY (never innerHTML), like every other server field.
       // #173: where another daemon opens a conversation named by id: its own
@@ -30812,12 +30812,12 @@
         row.className = 'search-row';
         const head = document.createElement('div');
         // Multi-daemon fan-out (spec 4.7): tag each hit with its source
-        // daemon. Omitted for the local (origin) daemon — its results stay
+        // daemon. Omitted for the local (origin) daemon - its results stay
         // authoritative and render exactly as before.
         if (daemon) head.appendChild(daemonPill(daemon.name));
         const label = document.createElement('span');
         label.textContent = h.kind + '  ' + h.ts + '  ' + h.sessionId;
-        // Open (cycle 65): reuse the existing watch panel — hand straight to
+        // Open (cycle 65): reuse the existing watch panel - hand straight to
         // startWatch so the hit's session streams.
         const open = document.createElement('button');
         open.textContent = 'Open';
@@ -30873,7 +30873,7 @@
           if (since) params.set('since', new Date(since).toISOString());
           if (until) params.set('until', new Date(until).toISOString());
           // Opt-in BM25 ranked mode (slice 2). The server reports the EFFECTIVE
-          // mode in body.mode — a requested rank that's unavailable falls back
+          // mode in body.mode - a requested rank that's unavailable falls back
           // to the scan, so the footer reflects what actually ran.
           if ($('search-rank').checked) params.set('rank', 'bm25');
           const res = await fetch('/rc/search?' + params.toString(), {
@@ -30882,7 +30882,7 @@
           if (seq !== searchSeq) return; // a newer search superseded this one
           if (!res.ok) {
             if (res.status === 401 || res.status === 403) {
-              out.textContent = 'not authorized — needs an owner token';
+              out.textContent = 'not authorized - needs an owner token';
             } else if (res.status === 503) {
               out.textContent = 'search timed out (narrow the query)';
             } else {
@@ -30918,7 +30918,7 @@
             for (const h of hits) out.appendChild(searchHitRow(h));
           }
           // add-multi-workspace-client task 4.8 (spec 4.7): opt-in fan-out to
-          // the OTHER daemons in the registry — PARALLEL (Promise.allSettled,
+          // the OTHER daemons in the registry - PARALLEL (Promise.allSettled,
           // so one dead/slow daemon never blocks the section), each hit row
           // tagged with its daemon name (pill), one footer note per daemon
           // ("B: 0 hits" / failure state). NO merged global ranking (spec
@@ -30930,7 +30930,7 @@
             );
             if (other.length > 0) {
               const head = document.createElement('div');
-              head.textContent = '— other daemons —';
+              head.textContent = '- other daemons -';
               head.style.marginTop = '8px';
               out.appendChild(head);
               // The mapper never rejects (network/CORS/timeout are classified
@@ -30961,7 +30961,7 @@
                     return { d, hits: Array.isArray(b2.hits) ? b2.hits : [] };
                   } catch (e2) {
                     // Browsers surface BOTH a refused CORS preflight and a
-                    // dead network as TypeError('Failed to fetch') — the
+                    // dead network as TypeError('Failed to fetch') - the
                     // note covers both readings (spec 4.7 origin isolation).
                     return {
                       d,
@@ -31001,7 +31001,7 @@
                     text: 're-pair to include',
                   });
                 } else if (v.status === 403) {
-                  notes.push(v.d.name + ': 403 — token lacks owner scope · ');
+                  notes.push(v.d.name + ': 403 - token lacks owner scope · ');
                   notes.push({
                     link: base + '/ui/',
                     text: 'pair an owner token',
@@ -31009,7 +31009,7 @@
                 } else if (v.status !== undefined) {
                   notes.push(
                     v.d.name +
-                      ': ERROR \u2014 daemon returned ' +
+                      ': ERROR - daemon returned ' +
                       (v.detail || v.status),
                   );
                 } else if (v.kind) {
@@ -31019,14 +31019,14 @@
                       : 'never';
                   notes.push(
                     v.d.name +
-                      ': UNREACHABLE \u2014 ' +
+                      ': UNREACHABLE - ' +
                       (v.error ? v.error + ' reaching ' + v.d.url + ' · ' : '') +
                       'last seen ' +
                       seen +
                       (v.kind === 'timeout' ? ' (timeout)' : '') +
                       ' · origin not admitted on ' +
                       v.d.name +
-                      ' — owner action required: qwen-rc cors add ' +
+                      ' - owner action required: qwen-rc cors add ' +
                       location.origin,
                   );
                 }
@@ -31077,7 +31077,7 @@
 
       // Create share link (cycle 64): owner mints a /ui/share/<token> link via
       // POST /rc/share, completing the round-trip with the cycle-62 guest page.
-      // The token (in the URL) is shown to the OWNER who is creating it — that
+      // The token (in the URL) is shown to the OWNER who is creating it - that
       // is the point. textContent-only.
       $('share-create-btn').onclick = async () => {
         const out = $('share-result');
@@ -31111,7 +31111,7 @@
           });
           if (!res.ok) {
             if (res.status === 401 || res.status === 403) {
-              out.textContent = 'not authorized — needs an owner token';
+              out.textContent = 'not authorized - needs an owner token';
             } else {
               let code = res.status;
               try {
@@ -31148,11 +31148,11 @@
                   copyNote.textContent = 'copied';
                 },
                 () => {
-                  copyNote.textContent = 'copy failed — select the link';
+                  copyNote.textContent = 'copy failed - select the link';
                 },
               );
             } else {
-              copyNote.textContent = 'clipboard unavailable — select the link';
+              copyNote.textContent = 'clipboard unavailable - select the link';
             }
           };
           out.appendChild(link);
@@ -31204,7 +31204,7 @@
           if (!res.ok) {
             out.textContent =
               res.status === 401 || res.status === 403
-                ? 'not authorized — needs an owner token'
+                ? 'not authorized - needs an owner token'
                 : describeFailure(res, await res.json().catch(() => null), 'the list');
             return;
           }
@@ -31413,7 +31413,7 @@
       // of its own, so both consumers print the same name and description rather
       // than two formattings that could drift.
       function commandRowLabel(r) {
-        const head = '/' + r.name + '  \u2014  ' + (r.description || '');
+        const head = '/' + r.name + '  -  ' + (r.description || '');
         return r.kind === 'session'
           ? head + '  (' + r.tag + ')'
           : head + '  [' + r.tag + ']  (' + r.source + ')';
@@ -31470,7 +31470,7 @@
         }
       };
 
-      // Push digest (cycle 72): GET /rc/push/digest (OWNER) — what quiet hours
+      // Push digest (cycle 72): GET /rc/push/digest (OWNER) - what quiet hours
       // suppressed, per subscription ("while you were away"). textContent-only.
       $('digest-btn').onclick = async () => {
         if (!token()) return setStatus('pair first');
@@ -31483,7 +31483,7 @@
           if (!res.ok) {
             out.textContent =
               res.status === 401 || res.status === 403
-                ? 'not authorized — needs an owner token'
+                ? 'not authorized - needs an owner token'
                 : describeFailure(res, await res.json().catch(() => null), 'the digest');
             return;
           }
@@ -31523,7 +31523,7 @@
           if (!res.ok) {
             el.textContent =
               res.status === 401 || res.status === 403
-                ? 'not authorized — needs owner token'
+                ? 'not authorized - needs owner token'
                 : describeFailure(res, await res.json().catch(() => null), 'reading the status');
             return;
           }
@@ -31617,7 +31617,7 @@
             }
             $('snooze-status').textContent =
               res.status === 401 || res.status === 403
-                ? 'not authorized — needs owner token'
+                ? 'not authorized - needs owner token'
                 : 'snooze failed: ' + code;
             return;
           }
@@ -31686,7 +31686,7 @@
               body: text ? JSON.parse(text) : {},
             };
           } catch (e) {
-            // 2xx with a truncated or non-JSON body — a proxy cutting the
+            // 2xx with a truncated or non-JSON body - a proxy cutting the
             // response mid-flight looks exactly like this.
             return {
               ok: false,
@@ -31747,7 +31747,7 @@
             body: '{}',
           },
         );
-        // Idempotent by design — a repeated cancel is not an error.
+        // Idempotent by design - a repeated cancel is not an error.
         out.textContent = r.ok ? 'turn cancelled' : 'cancel failed: ' + rcDetail(r);
       };
 
@@ -31788,7 +31788,7 @@
       // actually watches a session. The picker enumerates the user turns
       // in the transcript (the Nth `user` item of transcriptModel is user
       // turn N, 1-based, whether or not its row is mounted) and posts the
-      // count of turns to KEEP — the gateway's turnResolver reads toTurn as
+      // count of turns to KEEP - the gateway's turnResolver reads toTurn as
       // "keep the first N user turns", so "Turn K" posts K and "Start"
       // posts 0.
       const rewindPick = $('rewind-pick');
@@ -31846,7 +31846,7 @@
           rewindTurnPick.appendChild(o);
         });
         // Default to the newest turn: the least destructive choice (the
-        // tip itself is a no-op — move up the list to discard turns).
+        // tip itself is a no-op - move up the list to discard turns).
         rewindTurnPick.value = String(turns.length);
         rewindPick.style.display = '';
       };
@@ -31877,12 +31877,12 @@
         }
         const what =
           keep === 0
-            ? 'before any turn — every turn is discarded'
+            ? 'before any turn - every turn is discarded'
             : 'to after turn ' +
               keep +
               ' of ' +
               turns.length +
-              ' — turns ' +
+              ' - turns ' +
               (keep + 1) +
               ' to ' +
               turns.length +
@@ -31914,7 +31914,7 @@
         }
         rewindPick.style.display = 'none';
         setStatus(
-          'rewound to turn ' + r.body.toTurn + ' — re-syncing transcript',
+          'rewound to turn ' + r.body.toTurn + ' - re-syncing transcript',
         );
         // Re-sync: re-watch from event 0 so the transcript reflects the
         // truncation. #173: with no cursor startWatch sends no Last-Event-ID,
@@ -32784,7 +32784,7 @@
           out.textContent =
             'the turn already ended' +
             (r.body.reason ? ' (' + r.body.reason + ')' : '') +
-            ' — send it as a prompt instead';
+            ' - send it as a prompt instead';
           return;
         }
         out.textContent =
@@ -33429,7 +33429,7 @@
             }
             out.textContent =
               res.status === 401 || res.status === 403
-                ? 'not authorized — needs write scope'
+                ? 'not authorized - needs write scope'
                 : 'fork failed: ' + code;
             return;
           }
@@ -33506,7 +33506,7 @@
         return row;
       }
 
-      // GET /rc/usage?group_by=&since= — the route is mounted only when a
+      // GET /rc/usage?group_by=&since= - the route is mounted only when a
       // usage store is wired, so a 404 here means cost tracking is off on this
       // gateway rather than that the call was wrong. Owner sees every row; a
       // lesser token sees only its own, and the route applies that filter
@@ -33521,7 +33521,7 @@
         const body = await surfaceGet(
           '/rc/usage' + q,
           out,
-          'not enabled — this gateway has no usage store',
+          'not enabled - this gateway has no usage store',
         );
         if (!body) return;
         const rows = Array.isArray(body.rows) ? body.rows : [];
@@ -33555,7 +33555,7 @@
         }
       };
 
-      // GET /rc/peers — an mDNS browse that blocks for about five seconds by
+      // GET /rc/peers - an mDNS browse that blocks for about five seconds by
       // design. 503 means the optional discovery dependency is not installed,
       // which is an install fact, not a failure to retry. The button is held
       // down for the whole browse so a second tap cannot start a second one.
@@ -33598,7 +33598,7 @@
         }
       };
 
-      // POST /policy/explain — a dry-run against the live policy. Two facts here
+      // POST /policy/explain - a dry-run against the live policy. Two facts here
       // are worth drawing rather than summarising: `source` separates "a rule
       // matched" from "nothing matched and the default answered", which a
       // bare allow/deny word would collapse; and a matched rule carrying
@@ -33679,7 +33679,7 @@
         }
       };
 
-      // /rc/cors — an allowlist, so the panel is list, admit, remove. A
+      // /rc/cors - an allowlist, so the panel is list, admit, remove. A
       // config-sourced origin is listed but the store refuses to delete it
       // (409), because the config file is its source of truth: the row says
       // that instead of offering a Remove that can only fail.
@@ -33778,7 +33778,7 @@
         }
       };
 
-      // GET /rc/share/whoami — answers for a SHARE token only, and `owner`
+      // GET /rc/share/whoami - answers for a SHARE token only, and `owner`
       // implies write/approve/session:read but NOT share (scopes.ts), so this
       // page's own token is refused by design. Drawing that as a failure would
       // be wrong: the honest line is that the route describes a guest link,
@@ -33826,8 +33826,8 @@
       };
 
       // GET /rc/bridges and /rc/bridges/bans. The registry is in-memory and
-      // advisory — a bridge re-registers on reconnect and a missed heartbeat
-      // prunes it — so an absent row means "not connected right now", not
+      // advisory - a bridge re-registers on reconnect and a missed heartbeat
+      // prunes it - so an absent row means "not connected right now", not
       // "deleted". The help text says so because the list reads as durable.
       $('list-bridges').onclick = async () => {
         const out = $('bridges-out');
@@ -33888,7 +33888,7 @@
         for (const s of banned) out.appendChild(infoRow('banned: ' + s));
       };
 
-      // GET /rc/agents — a workspace-wide list; a session-locked caller is
+      // GET /rc/agents - a workspace-wide list; a session-locked caller is
       // confined to its own session by the route itself, so the panel draws
       // what comes back without narrowing it again. Steering uses window.prompt
       // like the fork panel above rather than a second inline form.

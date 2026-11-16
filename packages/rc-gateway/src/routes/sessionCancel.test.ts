@@ -117,7 +117,7 @@ describe('POST /session/:id/cancel', () => {
     expect(stub.lastCancelledSessionId).toBe('my-session-42');
   });
 
-  it('is idempotent — a repeated cancel still succeeds', async () => {
+  it('is idempotent - a repeated cancel still succeeds', async () => {
     // A mobile stop button is easy to double-tap, and the daemon answers 204
     // whether or not a turn was actually running.
     stub = await startStubDaemon({});
@@ -132,7 +132,7 @@ describe('POST /session/:id/cancel', () => {
     }
   });
 
-  it('does not end the session — cancel and end are distinct', async () => {
+  it('does not end the session - cancel and end are distinct', async () => {
     stub = await startStubDaemon({});
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const url = await mountGateway(daemon);

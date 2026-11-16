@@ -7,11 +7,11 @@
 import type { RequestHandler } from 'express';
 import type { OwnerEvent, OwnerEventBus } from '../ownerEvents.js';
 
-/** Heartbeat comment interval — keeps proxies alive + surfaces a dead socket. */
+/** Heartbeat comment interval - keeps proxies alive + surfaces a dead socket. */
 const HEARTBEAT_MS = 25_000;
 
 /**
- * GET /rc/events — a live, OWNER-scoped stream of every audit record. Mounted
+ * GET /rc/events - a live, OWNER-scoped stream of every audit record. Mounted
  * behind requireScope(OWNER); the frame is the audit record itself (a live audit
  * feed), so `policy_decision` / `policy_reloaded` / `policy_reload_failed` and
  * every other security event flow through with zero producer-side coupling.

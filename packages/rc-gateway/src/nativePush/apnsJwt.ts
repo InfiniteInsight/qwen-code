@@ -29,7 +29,7 @@ export interface ApnsJwtInput {
 }
 
 /**
- * Sign a one-shot APNs JWT. Throws if `keyPem` is not a valid EC private key —
+ * Sign a one-shot APNs JWT. Throws if `keyPem` is not a valid EC private key -
  * callers (e.g. the capability's `apnsEnabled`) can use that to reflect
  * parse-validity, not just file presence.
  */

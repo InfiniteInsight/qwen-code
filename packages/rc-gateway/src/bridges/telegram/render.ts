@@ -9,7 +9,7 @@ import type { BridgeHints } from '../hints.js';
 /**
  * Pure Telegram translation (`add-telegram-bridge`): daemon `permission_request`
  * frames → Telegram message + inline keyboard, and button taps ↔ gateway votes.
- * No I/O, no SDK — just the wire shapes. Kept pure so the rendering contract is
+ * No I/O, no SDK - just the wire shapes. Kept pure so the rendering contract is
  * unit-testable without a bot token or live Telegram.
  */
 
@@ -75,7 +75,7 @@ export function escapeMarkdownV2(s: string): string {
  *  - `inline`  → argsSummaryShort + Approve/Deny buttons (callback votes).
  *  - `deeplink`→ argsSummaryShort + a single "Open in web client" url button;
  *    NEVER includes argsSummaryFull (so a sensitive/large call isn't dumped to
- *    chat — the user opens the web client to see full args and approve).
+ *    chat - the user opens the web client to see full args and approve).
  * Plain text (no parse_mode) so the summary appears verbatim. `baseUrl` is the
  * gateway URL the deeplink points at.
  */
@@ -107,7 +107,7 @@ export function renderPermissionRequest(
     };
   }
 
-  // inline (default): Approve/Deny. callback_data is bounded at 64 bytes —
+  // inline (default): Approve/Deny. callback_data is bounded at 64 bytes -
   // request ids are short in practice; an over-long id would be rejected by
   // Telegram (a production bridge would map it to a short token).
   const approve = buildCallbackData('approve', requestId);

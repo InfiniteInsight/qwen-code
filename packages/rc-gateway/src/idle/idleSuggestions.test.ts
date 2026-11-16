@@ -374,7 +374,7 @@ describe('createIdleSuggestionHandler', () => {
     });
 
     it('a second onSessionIdle call cancels the previous in-flight and starts fresh', async () => {
-      // Fire twice rapidly — second call should cancel the first (abort its signal),
+      // Fire twice rapidly - second call should cancel the first (abort its signal),
       // so only the second round publishes.
       let firstResolve: ((v: string) => void) | undefined;
       let secondResolve: ((v: string) => void) | undefined;

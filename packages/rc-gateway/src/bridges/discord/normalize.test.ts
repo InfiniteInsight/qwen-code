@@ -13,7 +13,7 @@ import {
   type RawChatInput,
 } from './normalize.js';
 
-describe('normalize — message', () => {
+describe('normalize - message', () => {
   it('reads channel/author/bot/content with the snowflake string intact', () => {
     const out = normalizeMessage({
       channelId: '1234567890123456789',
@@ -38,7 +38,7 @@ describe('normalize — message', () => {
   });
 });
 
-describe('normalize — chat-input slash command', () => {
+describe('normalize - chat-input slash command', () => {
   const make = (
     sub: string,
     session: string | null,
@@ -105,7 +105,7 @@ describe('normalize — chat-input slash command', () => {
   });
 });
 
-describe('normalize — button', () => {
+describe('normalize - button', () => {
   it('reads the customId and the invoking user snowflake', () => {
     expect(
       normalizeButton({
@@ -125,7 +125,7 @@ describe('normalize — button', () => {
   });
 });
 
-describe('normalize — slash command definition', () => {
+describe('normalize - slash command definition', () => {
   it('defines /qwen with attach(session)/detach/status subcommands', () => {
     expect(QWEN_COMMAND.name).toBe('qwen');
     const subs = QWEN_COMMAND.options.map((o) => o.name);

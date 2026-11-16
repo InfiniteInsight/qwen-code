@@ -210,7 +210,7 @@ async function applyOptInToggle(
 }
 
 /**
- * POST /rc/workspace/tools/:name/enable — enable/disable ONE built-in tool
+ * POST /rc/workspace/tools/:name/enable - enable/disable ONE built-in tool
  * in the workspace's `tools.disabled` list (`{enabled: boolean}`); for an
  * opt-in built-in (`todo_write`, `list_directory`) it writes the gating
  * setting instead (see applyOptInToggle). Mounted
@@ -230,7 +230,7 @@ async function applyOptInToggle(
  *
  * On success audits `workspace_tool_enabled` with ONLY
  * `{toolName, enabled}` plus the `workspace` cwd for a non-default target
- * — never session or prompt content — and the actor is always the
+ * - never session or prompt content - and the actor is always the
  * AUTHENTICATED `req.rcClient`.
  */
 export function createWorkspaceToolToggleRoute(
@@ -321,7 +321,7 @@ export function createWorkspaceToolToggleRoute(
 }
 
 /**
- * GET /rc/workspace/tools — read the workspace's tools catalog (every
+ * GET /rc/workspace/tools - read the workspace's tools catalog (every
  * built-in tool with per-tool disabled state, plus disabled MCP-style or
  * unknown names). Mounted write-scope (server.ts); the response is the
  * daemon's catalog with a `state` (`disabled` | `optIn` | `on`) added to

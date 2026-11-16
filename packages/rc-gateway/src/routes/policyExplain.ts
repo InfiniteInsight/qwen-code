@@ -15,7 +15,7 @@ import { explainPolicy } from '../policy/evaluator.js';
 export interface PolicyExplainAccess {
   /** Current (hot-reloaded) policy, or undefined when none is loaded. */
   policy(): Policy | undefined;
-  /** Trusted pathGlob anchor — the gateway's own workspace, never body-supplied. */
+  /** Trusted pathGlob anchor - the gateway's own workspace, never body-supplied. */
   projectRoot(): string;
   /** Live quota oracle, or undefined (dry-run: maxPerWindow → prompt). */
   quotaOracle?(): QuotaOracle | undefined;
@@ -47,7 +47,7 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  * `policy explain` CLI (explain.ts): `path` becomes `paths:[path]` and is
  * merged into `args.path` when absent; `operation` accepts a comma string or
  * an array and each value is validated against read|write|execute. The
- * `projectRoot` is the gateway's own — the body cannot set it.
+ * `projectRoot` is the gateway's own - the body cannot set it.
  */
 export function buildExplainContext(
   body: PolicyExplainBody,
@@ -98,10 +98,10 @@ export function buildExplainContext(
 }
 
 /**
- * `POST /policy/explain` — owner-only (enforced at the mount), read-only
+ * `POST /policy/explain` - owner-only (enforced at the mount), read-only
  * dry-run against the live policy. No daemon call, no mutation. The response
  * ({ decision, trace }) reflects the caller's path/args only as closed-enum
- * classification tokens — never as values.
+ * classification tokens - never as values.
  */
 export function createPolicyExplainRoute(
   access: PolicyExplainAccess,

@@ -10,7 +10,7 @@ import { isSessionLevelGone } from '../daemonHttpError.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
 
 /**
- * GET /session/:id/context-usage — relay the daemon's per-session context
+ * GET /session/:id/context-usage - relay the daemon's per-session context
  * USAGE so the status footer can show how full the context window actually
  * is. The payload is the daemon's `DaemonSessionContextUsageStatus` verbatim:
  * `usage.totalTokens` (what the window currently holds), `usage
@@ -27,7 +27,7 @@ import { isValidSessionId } from '../sessions/chatsPath.js';
  * it: those lists are the payload's bulk and nothing on this page renders
  * them.
  *
- * Read-scoped, bare namespace (transparent-proxy topology — 1:1 with the
+ * Read-scoped, bare namespace (transparent-proxy topology - 1:1 with the
  * daemon's own `GET /session/:id/context-usage`). Not audited: a usage read
  * is a status poll, identical in kind to `GET /session/:id/context`.
  */
@@ -36,7 +36,7 @@ export function createSessionContextUsageRoute(
 ): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;
-    // Reject a malformed/path-traversal-shaped id before any daemon call —
+    // Reject a malformed/path-traversal-shaped id before any daemon call -
     // mirrors the sibling session routes (context, status).
     if (!isValidSessionId(sessionId)) {
       res

@@ -10,7 +10,7 @@
  * `base64url(sha256(keyAuthorization))`. A provider creates that record
  * (`present`), the ACME flow waits for propagation and lets the CA validate, then
  * `cleanup` removes it. Implementations are thin wrappers over a DNS host's API
- * (Route53, Cloudflare) and hold NO ACME logic — so they're swappable and each is
+ * (Route53, Cloudflare) and hold NO ACME logic - so they're swappable and each is
  * unit-testable against a fake transport.
  */
 
@@ -36,8 +36,8 @@ export interface DnsProvider {
   /** Stable provider name; matches the `--acme-dns-provider` value. */
   readonly name: string;
   /**
-   * Create the challenge TXT record and resolve once it is set — and, where the
-   * provider can confirm it, propagated/consistent — so the caller may ask the CA
+   * Create the challenge TXT record and resolve once it is set - and, where the
+   * provider can confirm it, propagated/consistent - so the caller may ask the CA
    * to validate. Returns a handle for {@link cleanup}.
    */
   present(record: DnsChallengeRecord): Promise<DnsChallengeHandle>;

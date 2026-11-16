@@ -274,7 +274,7 @@ describe('GET /rc/agents + /rc/agents/:id', () => {
       task: 'S1 child task',
       spawnedByTokenId: 'owner',
     });
-    // Unrelated session's record — must never leak, not even its task text.
+    // Unrelated session's record - must never leak, not even its task text.
     await registry.register({
       sessionId: 'S2',
       parentSessionId: null,
@@ -346,7 +346,7 @@ describe('GET /rc/agents + /rc/agents/:id', () => {
       spawnedByTokenId: 'owner',
     });
 
-    // Another session's agent, by id, must 404 — same shape as unknown id —
+    // Another session's agent, by id, must 404 - same shape as unknown id -
     // and must NEVER leak its task text in the response body.
     const otherRes = await fetch(`${url}/rc/agents/${other.agentId}`);
     expect(otherRes.status).toBe(404);

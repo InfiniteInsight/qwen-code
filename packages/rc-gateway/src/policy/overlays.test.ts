@@ -47,7 +47,7 @@ describe('PermissionOverlayStore', () => {
     const live = store.add({ action: 'deny', expiresAt: T0 + HOUR }, T0);
     // just before the boundary only the early entry is expired
     expect(store.list(T0 + HOUR - 1).map((o) => o.id)).toEqual([live.id]);
-    // the pruned entry is gone from the backing map — revoke no longer finds it
+    // the pruned entry is gone from the backing map - revoke no longer finds it
     expect(store.revoke(expired.id, T0 + HOUR - 1)).toBe(false);
     // at the boundary instant the live entry is itself expired (now >= expiresAt)
     expect(store.list(T0 + HOUR)).toEqual([]);

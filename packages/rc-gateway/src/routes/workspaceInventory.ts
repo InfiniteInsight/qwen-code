@@ -117,7 +117,7 @@ function inventoryRead(
 }
 
 /**
- * GET /rc/workspace/skills — the workspace's installed skills. WRITE floor.
+ * GET /rc/workspace/skills - the workspace's installed skills. WRITE floor.
  *
  * WRITE because of what a skill record is. `DaemonWorkspaceSkillStatus`
  * (packages/sdk-typescript/src/daemon/types.ts:2493) carries `installedPath`, a
@@ -133,7 +133,7 @@ export function createWorkspaceSkillsRoute(
 }
 
 /**
- * GET /rc/workspace/providers — the configured model providers. WRITE floor.
+ * GET /rc/workspace/providers - the configured model providers. WRITE floor.
  *
  * The most identifying of the three. `DaemonWorkspaceProviderModel` (:2578)
  * carries `baseUrl` and `envKey`, so the payload names which environment
@@ -148,7 +148,7 @@ export function createWorkspaceProvidersRoute(
 }
 
 /**
- * GET /rc/workspace/hooks — the configured hooks. WRITE floor.
+ * GET /rc/workspace/hooks - the configured hooks. WRITE floor.
  *
  * The daemon masks what it calls the secret classes here before this gateway
  * ever sees them: `redactHookSecrets`

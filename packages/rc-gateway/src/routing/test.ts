@@ -36,7 +36,7 @@ export type RoutingTestParse =
  * `--resolved`. Unknown flags are ignored (lenient, matching `parseExplainArgs`).
  *
  * Honored event fields are `kind` (required non-empty string) and `sessionName`
- * (optional string) — exactly what the compiled matcher consumes; any other
+ * (optional string) - exactly what the compiled matcher consumes; any other
  * field is accepted and ignored, so a fuller daemon event also works. Hard
  * errors (→ exit 2): no event, unparseable JSON, a non-object event, or a
  * missing/empty `kind`.
@@ -131,7 +131,7 @@ export interface RoutingTestResult {
  * `firstDrop` match suppresses ALL subscriptions; otherwise each sub is checked
  * against the per-subscription pass. With no `--sub`, only the event-global pass
  * runs (one `(all subscriptions)` row). A `matcher` of `undefined` (no routing
- * file) means nothing is dropped — every row is `send`.
+ * file) means nothing is dropped - every row is `send`.
  */
 export function evaluateRoutingTest(
   matcher: RoutingMatcher | undefined,
@@ -188,7 +188,7 @@ export function evaluateRoutingTest(
   return { ...base, perSubEvaluated: true, decisions };
 }
 
-/** The honesty footer — see the design's "must-get-right" note. */
+/** The honesty footer - see the design's "must-get-right" note. */
 const SCOPE_NOTE =
   'NOTE: this evaluates ONLY routing.yaml drop rules. snooze, per-subscription\n' +
   'prefs, quiet-hours, working-device suppression, and the rate limiter are NOT\n' +

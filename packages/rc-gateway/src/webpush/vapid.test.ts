@@ -107,7 +107,7 @@ describe('VapidStore', () => {
         privateKey: realKeys.privateKey,
       }),
     );
-    // Open again — should migrate JSON → PEM
+    // Open again - should migrate JSON → PEM
     const store2 = await VapidStore.open(path);
     expect(store2.getApplicationServerKey()).toBe(realKeys.publicKey);
     // Now the file should be PEM

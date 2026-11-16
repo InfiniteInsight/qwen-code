@@ -83,7 +83,7 @@ export const POLICY_KINDS = [
  *
  * The mapping is LOSSY and widening: `write_file` and `edit` share `edit`, so a
  * rule naming one also matches the other. For `deny` that is safe; for `allow`
- * it grants more than written — `policy lint` warns about it.
+ * it grants more than written - `policy lint` warns about it.
  */
 export const TOOL_ALIAS_TO_KIND: Record<string, string> = {
   read_file: 'read',
@@ -180,7 +180,7 @@ function describeType(v: unknown): string {
 
 /**
  * Validate a rule's `maxPerWindow` into a typed `{ count, windowSec }`
- * (FAIL-CLOSED — a malformed quota blocks boot, like every other policy schema
+ * (FAIL-CLOSED - a malformed quota blocks boot, like every other policy schema
  * error): `count` a non-negative integer, `windowSec` a positive integer. Unknown
  * sub-keys are ignored (forward-compat).
  */
@@ -279,7 +279,7 @@ function parsePolicyDocument(text: string): {
     validateMatchTypes(match, i);
 
     // Normalize a tool NAME (e.g. `run_shell_command`) to its ACP kind (e.g.
-    // `execute`) — the permission frame carries only a kind, never a tool
+    // `execute`) - the permission frame carries only a kind, never a tool
     // name. Wildcards pass through untouched. Fail-closed on an unknown value.
     let originalTool: string | undefined;
     let normalizedTool: string | undefined;
@@ -338,7 +338,7 @@ function parsePolicyDocument(text: string): {
   });
 
   // Reject duplicate rule ids (fail-closed): ids key the audit trail AND the quota
-  // store, so a collision would make `ruleId`/quota ambiguous — almost certainly a
+  // store, so a collision would make `ruleId`/quota ambiguous - almost certainly a
   // config mistake. (cycle 43)
   const seenIds = new Set<string>();
   for (const r of rules) {
@@ -488,7 +488,7 @@ export function mergePolicies(workspace: Policy | null, user: Policy): Policy {
 /**
  * Log keyword emitted when the user-scope policy file is group- or
  * world-readable (mode bits 0o044). Workspace policy files never trigger this
- * warning — only the file that holds the operator's personal tool-permission
+ * warning - only the file that holds the operator's personal tool-permission
  * rules is flagged.
  */
 export const POLICY_PERMISSIONS_WARNING_KEYWORD = 'policy_permissions_warning';
@@ -524,26 +524,26 @@ async function checkUserPolicyReadable(
  * exceeds its bounds (an `allow` rule, a `defaults` block) is logged via `warn`
  * on every load, boot and hot-reload alike, and dropped. The user
  * file is loaded with cycle-14 semantics UNCHANGED: absent (ENOENT) → the
- * default-prompt policy; malformed → THROWS {@link PolicyError} (boot fails — a
+ * default-prompt policy; malformed → THROWS {@link PolicyError} (boot fails - a
  * malformed user policy must not be silently downgraded). The WORKSPACE layer is
  * fail-CLOSED: by default a malformed or unreadable workspace file is logged via
- * `warn` and IGNORED (keep the user policy — never apply unparseable `allow`s,
+ * `warn` and IGNORED (keep the user policy - never apply unparseable `allow`s,
  * never crash boot). So at boot this function throws ONLY on a malformed user
  * file. `warn` defaults to a no-op (the CLI passes a `console.warn` wrapper).
  *
  * Readability warning (spec-alignment): emits a `policy_permissions_warning` log
  * line (via `warn`) when the user-scope file is group- or world-readable.
- * Workspace policy files DO NOT trigger this warning — only the user-scope file
+ * Workspace policy files DO NOT trigger this warning - only the user-scope file
  * holds personal tool-permission data. The check is best-effort and never throws.
  *
  * **`strictWorkspace` (cycle 45, for HOT-RELOAD):** when true, a malformed/
  * unreadable workspace file THROWS instead of being silently dropped. At boot,
  * dropping a bad workspace layer is right (no previous ruleset to keep, must not
  * crash). At RELOAD, silently dropping it would WIDEN permissions (workspace
- * rules that shadowed user `allow`s vanish) and mis-report success — so the
+ * rules that shadowed user `allow`s vanish) and mis-report success - so the
  * caller wants the error to propagate, retain the previous ruleset, and audit a
  * failure. A workspace file that is merely ABSENT (ENOENT) still resolves to
- * `null` (no throw) in both modes — a deleted workspace file is an intended
+ * `null` (no throw) in both modes - a deleted workspace file is an intended
  * removal of the layer, not a parse error.
  */
 export async function loadLayeredPolicy(
@@ -558,7 +558,7 @@ export async function loadLayeredPolicy(
   if (readableMode !== null) {
     const octal = readableMode.toString(8).padStart(3, '0');
     warn(
-      `${POLICY_PERMISSIONS_WARNING_KEYWORD}: ${userPath} is group/world-readable (mode 0${octal}) — ` +
+      `${POLICY_PERMISSIONS_WARNING_KEYWORD}: ${userPath} is group/world-readable (mode 0${octal}) - ` +
         `anyone who can read this file can see which tools are allowed or denied; ` +
         `run: chmod go-r ${userPath}`,
     );
@@ -600,14 +600,14 @@ export interface PolicyLintResult {
    * Rule id (or `[index]`) of each rule that uses a NOT-YET-EVALUATED field
    * (would downgrade to prompt at runtime). As of cycle 43 every policy field is
    * honored (maxPerWindow joined timeOfDay/expiresAt), so this is currently always
-   * empty — kept as a forward-compat hook for any field a future cycle defers.
+   * empty - kept as a forward-compat hook for any field a future cycle defers.
    */
   deferred?: string[];
   /**
    * Advisory-only messages from {@link policyAdvisories} (valid files only):
    * ALLOW rules whose tool-name alias widens beyond what was written, plus a
    * once-per-load note that every ALLOW rule is newly effective this release.
-   * Never affects `ok`/load outcome — advisory, not validation.
+   * Never affects `ok`/load outcome - advisory, not validation.
    */
   warnings?: string[];
   /**
@@ -620,7 +620,7 @@ export interface PolicyLintResult {
   error?: string;
 }
 
-/** Kinds reachable from more than one tool name — aliasing to them widens. */
+/** Kinds reachable from more than one tool name - aliasing to them widens. */
 function kindsWithMultipleTools(): Set<string> {
   const counts = new Map<string, number>();
   for (const kind of Object.values(TOOL_ALIAS_TO_KIND)) {
@@ -633,7 +633,7 @@ function kindsWithMultipleTools(): Set<string> {
  * Advisory warnings, not errors:
  * 1. An `allow` rule written with a tool-name alias whose kind covers other
  *    tools grants MORE than it says (e.g. `allow write_file` also allows
- *    `edit`) — the one unsafe corner of accepting aliases.
+ *    `edit`) - the one unsafe corner of accepting aliases.
  * 2. Matching is being fixed in this release, so every `allow` rule becomes
  *    effective for the first time. Say so once, with a count.
  *
@@ -647,7 +647,7 @@ export function policyAdvisories(policy: Policy): string[] {
   for (const rule of policy.rules) {
     if (rule.action !== 'allow') continue;
     // `aliasedTool` is set by the loader ONLY when this rule was written as a
-    // tool name — precise, unlike scanning the raw file text.
+    // tool name - precise, unlike scanning the raw file text.
     const written = rule.aliasedTool;
     if (written === undefined) continue;
     const kind = rule.match.tool;
@@ -657,7 +657,7 @@ export function policyAdvisories(policy: Policy): string[] {
     );
     out.push(
       `rule '${rule.id ?? '(unnamed)'}': allow on '${written}' maps to kind ` +
-        `'${kind}', which also matches ${siblings.join(', ')} — this allows ` +
+        `'${kind}', which also matches ${siblings.join(', ')} - this allows ` +
         `more than written.`,
     );
   }
@@ -674,11 +674,11 @@ export function policyAdvisories(policy: Policy): string[] {
 }
 
 /**
- * Validate a policy file's schema WITHOUT loading it into a running gateway —
+ * Validate a policy file's schema WITHOUT loading it into a running gateway -
  * the `qwen-rc policy lint <file>` pre-flight check. Runs the SAME
  * {@link loadPolicy} validator the boot path uses (one schema, no drift). Never
  * throws: every failure is reported as `{ ok: false, error }`. A missing file is
- * a lint FAILURE (not the loader's "absent → default" pass) — an explicit
+ * a lint FAILURE (not the loader's "absent → default" pass) - an explicit
  * `lint <file>` target that does not exist is an error.
  *
  * A workspace file (`<dir>/.qwen/policy.yaml`, or any path with

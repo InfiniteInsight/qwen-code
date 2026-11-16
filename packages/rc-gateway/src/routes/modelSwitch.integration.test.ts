@@ -6,9 +6,9 @@
 
 /**
  * End-to-end proof for `POST /session/:id/model` (rc-gateway model picker,
- * issue #52), mounted through the REAL `createGatewayApp` — real
+ * issue #52), mounted through the REAL `createGatewayApp` - real
  * TokenStore/PairingService/requireScope(WRITE) mount, real stub daemon over
- * HTTP — mirroring approvalMode.integration.test.ts's `setup()` pattern.
+ * HTTP - mirroring approvalMode.integration.test.ts's `setup()` pattern.
  *
  * Covers what the route-unit tests (modelSwitch.test.ts) cannot: that the
  * WRITE scope floor is actually enforced AT THE MOUNT (not merely assumed),

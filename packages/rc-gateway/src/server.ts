@@ -564,7 +564,7 @@ export interface GatewayDeps {
   };
   /**
    * Hook event mirror (add-agent-observability). When set, `POST
-   * /rc/hooks/ingest` mounts — loopback-only, authenticated by the dedicated
+   * /rc/hooks/ingest` mounts - loopback-only, authenticated by the dedicated
    * persistent `ingestToken` (NOT a TokenStore token), mirroring local hook
    * firings as read-only `hook_event` frames on the OWNER events stream. The
    * route mounts BEFORE `bearerResolve` (same early-mount reason as
@@ -655,11 +655,11 @@ export interface GatewayApp {
   app: Express;
   /** Present only when both `vapid` and `pushStore` deps are supplied. */
   notifier?: PushNotifier;
-  /** The gateway's audit log — shared with the policy enforcer at boot. */
+  /** The gateway's audit log - shared with the policy enforcer at boot. */
   audit: AuditRecorder;
   /**
    * The owner-event bus backing GET /rc/events. Exposed so the boot wiring
-   * (cli.ts) can publish gateway-originated frames — e.g. the idle-suggestions
+   * (cli.ts) can publish gateway-originated frames - e.g. the idle-suggestions
    * handler emitting `idle_suggestions` when a session's active prompt finishes.
    */
   ownerEvents: OwnerEventBus;
@@ -673,7 +673,7 @@ export interface GatewayApp {
   /**
    * The live-bridge registry. Exposed so the boot wiring (cli.ts) can run the
    * staleness reaper on an interval (auto-deregister bridges that stopped
-   * heartbeating) — kept out of createGatewayApp so no background timer leaks in
+   * heartbeating) - kept out of createGatewayApp so no background timer leaks in
    * tests that construct the app directly.
    */
   bridgeRegistry: BridgeRegistry;
@@ -741,7 +741,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
 
   const registry = new ConnectionRegistry();
 
-  // Per-session prompt queue broadcaster — wired to both the prompt route
+  // Per-session prompt queue broadcaster - wired to both the prompt route
   // (emit) and the events relay (register/write). Created here so both routes
   // share the same instance without requiring the caller to instantiate it.
   const promptEventBroadcaster = new PromptEventBroadcaster();
@@ -755,7 +755,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   const promptQueue = new PromptQueue();
 
   // Owner-level event bus (cycle 49): every durably-appended audit record is
-  // fanned out to OWNER subscribers of GET /rc/events. Internal to the app — the
+  // fanned out to OWNER subscribers of GET /rc/events. Internal to the app - the
   // enforcer/reloader broadcast for free because they share this `audit`
   // instance, so policy_decision/policy_reloaded/policy_reload_failed all stream.
   const ownerEvents = new OwnerEventBus();
@@ -788,7 +788,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   const unauthAudit = new PeerAuditThrottle(audit);
 
   // ---------------------------------------------------------------------------
-  // CORS allowlist — built from persisted db origins + config overrides.
+  // CORS allowlist - built from persisted db origins + config overrides.
   // The `corsAllowlist` instance is mutated live as origins are admitted/removed.
   // ---------------------------------------------------------------------------
   const corsInitialRecords = deps.store.listOrigins(
@@ -799,7 +799,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // Owner-configured origins are in-memory overrides (config-sourced).
   for (const o of deps.corsConfigOrigins ?? []) corsAllowlist.add(o);
 
-  // CORS preflight handler — runs BEFORE auth middleware so browsers can
+  // CORS preflight handler - runs BEFORE auth middleware so browsers can
   // complete the preflight without sending credentials.
   app.options('*', (req, res) => {
     const decision = evaluatePreflight(
@@ -830,7 +830,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     }
   });
 
-  // Actual-request CORS header middleware — runs before auth so browsers
+  // Actual-request CORS header middleware - runs before auth so browsers
   // receive the CORS headers even on 401/403 responses.
   const applyActualRequestCors = (
     req: express.Request,
@@ -911,7 +911,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   app.get('/rc/health', (_req, res) => res.json({ status: 'ok' }));
 
   // PUBLIC Android TWA asset-link verification (add-native-mobile-shells).
-  // Unauthenticated by design — Android fetches it before the TWA launches.
+  // Unauthenticated by design - Android fetches it before the TWA launches.
   // Registered before the bearer middleware; 404 when no TWA is configured.
   if (deps.assetLinks) {
     app.get(
@@ -1019,7 +1019,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // still resolves the page; the page then reads the token from sessionStorage).
   // Registered BEFORE the fallthrough:false static mount (which would otherwise
   // 404 these paths). It is a DUMB sendFile: the `:token` is never read/logged/
-  // validated server-side — GET /rc/share/whoami is the sole auth gate. The
+  // validated server-side - GET /rc/share/whoami is the sole auth gate. The
   // error callback is required (no global error middleware → a sendFile error
   // must not hang/throw the request).
   const sharePage = join(webRoot, 'share.html');
@@ -1060,7 +1060,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // Reject a non-bridge authenticated token that sends X-RC-SubActor (would
   // otherwise silently pollute attribution). Must follow bearerResolve.
   app.use(enforceSubActorScope());
-  // Resolve an asserted sub-actor (bridge "acting for @human") onto rcClient —
+  // Resolve an asserted sub-actor (bridge "acting for @human") onto rcClient -
   // only honored for bridge-scope tokens. Must follow bearerResolve.
   app.use(resolveSubActor());
   // Protocol version gate: if the client sends X-RC-Version and it does not
@@ -1100,7 +1100,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       watchPresence,
     ),
   );
-  // GET /session/:id/context — read-scope; relays the daemon's per-session
+  // GET /session/:id/context - read-scope; relays the daemon's per-session
   // context status (current model + context-window limit, approval mode, cwd)
   // for the web UI's status footer. Bare namespace, 1:1 with the daemon route.
   app.get(
@@ -1109,7 +1109,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     createSessionContextRoute(deps.daemon),
   );
-  // GET /session/:id/context-usage — read-scope; relays the daemon's
+  // GET /session/:id/context-usage - read-scope; relays the daemon's
   // per-session context USAGE (how full the window is), which is a different
   // fact from the configured state /context reports and shares no fields with
   // it. Bare namespace, 1:1 with the daemon route.
@@ -1119,7 +1119,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     createSessionContextUsageRoute(deps.daemon),
   );
-  // GET /session/:id/export — read-scope; hands the caller a copy of the whole
+  // GET /session/:id/export - read-scope; hands the caller a copy of the whole
   // conversation, which the remote otherwise has no way to do (the daemon token
   // rides in a header, so no browser can follow a link to the daemon's own file
   // route). JSON rather than bytes for the same reason. Bare namespace, 1:1
@@ -1130,7 +1130,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     createSessionExportRoute(deps.daemon, audit),
   );
-  // GET /session/:id/transcript — read-scope, sitting beside /export. The
+  // GET /session/:id/transcript - read-scope, sitting beside /export. The
   // viewer's transcript is whatever the live stream has handed it since the
   // page opened; this is the daemon's STORED page, paged and readable from the
   // first record. Query parameters are relayed untouched because the daemon
@@ -1142,7 +1142,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     createSessionTranscriptRoute(deps.daemon, audit),
   );
-  // GET /session/:id/turn-index — read-scope, sitting beside /transcript. The
+  // GET /session/:id/turn-index - read-scope, sitting beside /transcript. The
   // transcript page hands back records; this hands back the list those records
   // are indexed by, which is what a jump somewhere in a long conversation needs.
   // Query parameters are relayed untouched because the daemon owns which paging
@@ -1164,7 +1164,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     createSessionTurnCurrentRoute(deps.daemon),
   );
-  // POST /session/:id/recap — asks the daemon for its one-sentence
+  // POST /session/:id/recap - asks the daemon for its one-sentence
   // 'where did I leave off' summary of one conversation. It is a POST
   // because it costs a model call, and it sits at SESSION_READ because it
   // reveals nothing the transcript route above does not. The per-actor cap
@@ -1201,7 +1201,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     modelCallRateLimit, // a side question costs a model call: per sub-actor, else per token
     createSessionBtwRoute(deps.daemon, audit),
   );
-  // GET /session/:id/supported-commands — read-scope; relays the daemon's
+  // GET /session/:id/supported-commands - read-scope; relays the daemon's
   // per-session slash command list so the Commands panel can list what the
   // watched session supports alongside the gateway's own file commands.
   // Bare namespace, 1:1 with the daemon route.
@@ -1211,7 +1211,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     createSupportedCommandsRoute(deps.daemon),
   );
-  // GET /session/:id/status — read-scope; relays the daemon's per-session
+  // GET /session/:id/status - read-scope; relays the daemon's per-session
   // status summary (including pendingInteractions) so the web UI can
   // reconstruct question/permission cards a dropped event stream lost.
   // Bare namespace, 1:1 with the daemon route.
@@ -1221,7 +1221,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     createSessionStatusRoute(deps.daemon),
   );
-  // GET /session/:id/tasks — read-scope; the run log (agent, shell, monitor and
+  // GET /session/:id/tasks - read-scope; the run log (agent, shell, monitor and
   // workflow tasks). 1:1 with the daemon's own route, and not audited, because a
   // task read is a poll like the status and context reads beside it.
   app.get(
@@ -1230,7 +1230,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     createSessionTasksRoute(deps.daemon),
   );
-  // GET /session/:id/stats — read-scope; the daemon's roll-up of one
+  // GET /session/:id/stats - read-scope; the daemon's roll-up of one
   // conversation (duration, prompt count, per-model tokens, tool calls, lines
   // written). 1:1 with the daemon's own route. Not audited: the payload is
   // counts, and the un-audited /tasks read beside it relays shell paths, which
@@ -1242,7 +1242,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     createSessionStatsRoute(deps.daemon),
   );
-  // GET /session/:id/resources — read-scope; what one live conversation has
+  // GET /session/:id/resources - read-scope; what one live conversation has
   // loaded, its skills and its MCP servers, as the daemon sanitises them for a
   // reader. 1:1 with the daemon's own route. Not audited: it carries
   // configuration names, which is what the un-audited /supported-commands and
@@ -1283,7 +1283,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     createSessionSavedWorkflowRoute(deps.daemon),
   );
-  // POST /session/:id/end — write-scope; tells the daemon to terminate the
+  // POST /session/:id/end - write-scope; tells the daemon to terminate the
   // session. On success the daemon emits `session_died` on the event stream.
   app.post(
     '/session/:id/end',
@@ -1292,7 +1292,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan, // banned chat user → 403 (a stop request is never rate-limited)
     createSessionEndRoute(deps.daemon, audit),
   );
-  // POST /session/:id/cancel — write-scope; aborts the session's in-flight
+  // POST /session/:id/cancel - write-scope; aborts the session's in-flight
   // turn without ending the session. Same guard set as /end (including the
   // no-rate-limit rationale: a stop request is never rate-limited) because a
   // cancel is strictly less destructive than an end.
@@ -1304,7 +1304,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan, // banned chat user → 403 (a stop request is never rate-limited)
     createSessionCancelRoute(deps.daemon, audit),
   );
-  // GET /session/:id/subagents/:subagentRef — read-scope; one subagent's own
+  // GET /session/:id/subagents/:subagentRef - read-scope; one subagent's own
   // run state. The read half of the pair whose write half is /cancel below, and
   // the reason the viewer's nested subagent block can stop being display only.
   // Same guard set as the other session reads.
@@ -1314,7 +1314,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     createSubagentInspectRoute(deps.daemon),
   );
-  // POST /session/:id/subagents/:subagentRef/cancel — write-scope; stops ONE
+  // POST /session/:id/subagents/:subagentRef/cancel - write-scope; stops ONE
   // running subagent while the parent turn survives. Same guard set as
   // /session/:id/cancel (and the same no-rate-limit rationale: a stop request
   // is never rate-limited), because cancelling one child is strictly less
@@ -1367,7 +1367,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan,
     createSubagentAbandonRoute(deps.daemon, audit),
   );
-  // POST /session/:id/tasks/:taskId/cancel — write-scope; stops ONE run (an
+  // POST /session/:id/tasks/:taskId/cancel - write-scope; stops ONE run (an
   // agent, shell, monitor or workflow task) and leaves the session and every
   // other run alive. Same guard set and the same no-rate-limit rationale as the
   // two cancels above it, because stopping one run is strictly less destructive
@@ -1507,7 +1507,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       queue: promptQueue,
       // Turn-end push (#40): fire the notifier after the turn's terminal
       // outcome (success / timeout / daemon error). `notifier` is a `let`
-      // initialised in the push block below — safe here because the closure
+      // initialised in the push block below - safe here because the closure
       // runs at request time, never at mount time.
       onTurnEnd: (sessionId, outcome) => {
         void notifier?.notify(
@@ -1520,7 +1520,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       },
     }),
   );
-  // POST /session/:id/attachments?name=<file name> — write-scope; pushes one
+  // POST /session/:id/attachments?name=<file name> - write-scope; pushes one
   // file into the session as the raw request body. Same guard set as /prompt
   // (an upload is a user-initiated write into a conversation, and a phone is
   // the natural place to send a photo or a log), including the rate limiter:
@@ -1586,7 +1586,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     resumableUploads.cancel,
   );
-  // GET /session/:id/attachments — session-read-scope, mirroring /export: the
+  // GET /session/:id/attachments - session-read-scope, mirroring /export: the
   // names and metadata the daemon returns are part of the conversation, and
   // the route reveals nothing the transcript does not already hold.
   app.get(
@@ -1595,7 +1595,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     createAttachmentListRoute(deps.daemon),
   );
-  // GET /session/:id/attachments/:attachmentId — write-scope. The list above
+  // GET /session/:id/attachments/:attachmentId - write-scope. The list above
   // sits at session-read because it names files the transcript already
   // implies; this one returns their contents, and #107 settled that host file
   // contents sit at WRITE. No rate limiter, unlike the upload: a read costs
@@ -1606,7 +1606,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     createAttachmentReadRoute(deps.daemon),
   );
-  // DELETE /session/:id/attachments/:attachmentId — write-scope, carrying the
+  // DELETE /session/:id/attachments/:attachmentId - write-scope, carrying the
   // upload's guard set. The rate limiter that a stop request is exempt from
   // applies here: removing a file is never the emergency action, so throttling
   // it cannot harm the person it is applied to.
@@ -1663,7 +1663,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan, // banned chat user -> 403
     createSessionArtifactRemoveRoute(deps.daemon, audit),
   );
-  // GET /session/:id/pending-prompts — session-read-scope, mirroring /export.
+  // GET /session/:id/pending-prompts - session-read-scope, mirroring /export.
   // The queue is part of the conversation's own state, and seeing it is the
   // point: issue #84 accepts a prompt mid-turn with 202 and then discards it,
   // so a queue nobody can look at cannot be told apart from a lost message.
@@ -1673,7 +1673,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     createPendingPromptsRoute(deps.daemon),
   );
-  // DELETE /session/:id/pending-prompts/:promptId — write-scope. Same guard set
+  // DELETE /session/:id/pending-prompts/:promptId - write-scope. Same guard set
   // as /session/:id/cancel and for the same reason: dropping a queued prompt is
   // a stop request, and a stop request is never rate-limited.
   app.delete(
@@ -1684,7 +1684,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan, // banned chat user -> 403 (a stop request is never rate-limited)
     createPendingPromptRemoveRoute(deps.daemon, audit),
   );
-  // GET /session/:id/mid-turn-messages — session-read-scope. The daemon's
+  // GET /session/:id/mid-turn-messages - session-read-scope. The daemon's
   // reconciliation snapshot, so a client can see what is still waiting instead
   // of re-sending it at the idle boundary.
   app.get(
@@ -1693,7 +1693,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     enforceSessionLock(audit),
     createMidTurnMessagesRoute(deps.daemon),
   );
-  // DELETE /session/:id/mid-turn-messages/:messageId — write-scope; withdraws a
+  // DELETE /session/:id/mid-turn-messages/:messageId - write-scope; withdraws a
   // typed message before the daemon delivers it. Same guard set as the pending
   // prompt removal above.
   app.delete(
@@ -1704,7 +1704,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan, // banned chat user -> 403 (a stop request is never rate-limited)
     createMidTurnMessageRemoveRoute(deps.daemon, audit),
   );
-  // POST /session/:id/mid-turn-message — write-scope, and the same guard set as
+  // POST /session/:id/mid-turn-message - write-scope, and the same guard set as
   // `POST /session/:id/prompt` above, because this is the same kind of act: chat
   // content with a body, arriving from a device. It carries `subActorRateLimit`
   // for the same reason the prompt route does (bridge fan-in). #110: this is the
@@ -1720,7 +1720,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorRateLimit, // bridge fan-in: cap mid-turn pushes per chat user
     createMidTurnMessageEnqueueRoute(deps.daemon, audit),
   );
-  // POST /session/:id/mid-turn-messages/send-now — write-scope, deliberately NOT
+  // POST /session/:id/mid-turn-messages/send-now - write-scope, deliberately NOT
   // rate-limited: it adds no content and cannot grow the queue, so throttling it
   // would punish the operator for reacting to a problem they are closing. Same
   // posture as the withdraw and cancel routes.
@@ -1736,7 +1736,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     ? createGitHubRoutes(deps.github, { audit })
     : undefined;
 
-  // POST /session — create (or attach to) a session so a freshly-paired client
+  // POST /session - create (or attach to) a session so a freshly-paired client
   // (the web UI's "New conversation" button) has one to watch and prompt.
   // Write-scoped; bare namespace, mirroring the daemon's own POST /session.
   app.post(
@@ -1749,7 +1749,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       githubRoutes?.checkSessionStart,
     ),
   );
-  // POST /rc/terminals — open a terminal on the gateway's own host showing one
+  // POST /rc/terminals - open a terminal on the gateway's own host showing one
   // conversation (issue #49). Write-scoped like /session. Mounted whenever a
   // request log is wired; when the attached `daemon` cannot resolve a session
   // endpoint the route answers 501 rather than the gateway silently lacking it.
@@ -1788,7 +1788,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       hostTabRoutes.remove,
     );
   }
-  // POST /session/:id/resume — reactivate a past (ended) conversation on its
+  // POST /session/:id/resume - reactivate a past (ended) conversation on its
   // workspace's daemon so a phone can pick it back up (add-resume-conversations).
   // Write-scoped; bare namespace. enforceSessionLock binds a session-locked
   // caller's token to its one session id (parity with every other
@@ -1832,11 +1832,11 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan, // banned chat user → 403 (before touching the daemon)
     createSessionWorktreeResetRoute(deps.daemon, audit),
   );
-  // GET /rc/fs — folder browser so the phone can pick which directory a new
+  // GET /rc/fs - folder browser so the phone can pick which directory a new
   // conversation (POST /session above) runs in. Write-scoped, owner/control-
   // plane route; lists subdirectories only.
   app.get('/rc/fs', requireScope(WRITE, audit), createFsBrowseRoute());
-  // GET /rc/usage (add-cost-tracking) — any authenticated token; the route applies
+  // GET /rc/usage (add-cost-tracking) - any authenticated token; the route applies
   // owner-sees-all / lesser-sees-own scope filtering internally. Mounted only when
   // a usage store is wired (native sqlite present + cost tracking enabled).
   if (deps.usageReader) {
@@ -1849,10 +1849,10 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       }),
     );
   }
-  // GET /rc/capabilities — always mounted (mDNS reports here even when cost
+  // GET /rc/capabilities - always mounted (mDNS reports here even when cost
   // tracking is off). costTracking sub-block is present only when a usage store
   // is wired, so it never claims enabled:true while disabled.
-  // GET /capabilities — bare-namespace alias for the transparent-proxy topology
+  // GET /capabilities - bare-namespace alias for the transparent-proxy topology
   // so a remote client can discover the gateway's remoteControl capabilities at
   // the same path regardless of whether it speaks directly to the daemon or to
   // the gateway (which merges the daemon's own capabilities with remoteControl).
@@ -1943,7 +1943,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     createHeartbeatRoute(bridgeRegistry, audit),
   );
   // Bridge invites: the operator mints a one-time invite (OWNER) so a bridge can
-  // redeem it (BRIDGE) to learn which session to bind — a chat user never names a
+  // redeem it (BRIDGE) to learn which session to bind - a chat user never names a
   // session id directly. `/rc/bridges/invites` is a distinct 3-segment path (no
   // collision with the `:id` routes above), and redeem's `:id` is audit context.
   app.post(
@@ -1991,7 +1991,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // appear in the tree. Honors `?cwd` so a phone can list ANY workspace's
   // history (not just the boot workspace); absent falls back to the trusted
   // boot `workspaceCwd`. `?cwd` is `path.resolve`d (so `/proj` and `/proj/`
-  // hit the same chats dir) but is otherwise untrusted — safe because
+  // hit the same chats dir) but is otherwise untrusted - safe because
   // `resolveChatsDir` only ever uses it as a `sanitizeCwd` project-id segment,
   // never joins it as a literal path.
   app.get(
@@ -2039,7 +2039,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       },
     ),
   );
-  // GET /rc/sessions/live-state — the workspace's live attachment snapshot
+  // GET /rc/sessions/live-state - the workspace's live attachment snapshot
   // (add-capability-parity #111). OWNER-scoped like the listing it decorates:
   // the payload names every live session in a workspace, which is the same
   // class of information as the transcript listing above, so it cannot sit at a
@@ -2093,7 +2093,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     }),
   );
 
-  // GET /workspace/:cwd/sessions — bare-namespace proxy for the transparent-proxy
+  // GET /workspace/:cwd/sessions - bare-namespace proxy for the transparent-proxy
   // topology. The daemon exposes this path; the gateway re-exposes it (OWNER-gated)
   // so remote clients can enumerate sessions at the same URL shape they would use
   // against the daemon directly. `:cwd` is honored the same way as `/rc/sessions`'s
@@ -2117,7 +2117,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   );
   // The "sessions at rest" actions (add-capability-parity #111): batch archive /
   // unarchive / delete over stored transcripts. OWNER-scoped like the listing
-  // they act on — these reach every transcript in a workspace, not one session,
+  // they act on - these reach every transcript in a workspace, not one session,
   // so they carry the same posture as `/rc/sessions` rather than a session's
   // WRITE. Delete is irreversible and the route refuses it without
   // `confirm: true`; that guard lives server-side, so it holds for clients that
@@ -2157,7 +2157,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       deps.promptSilenceMs,
     ),
   );
-  // POST /session/:id/supported-commands/:name — write-scope; runs one of the
+  // POST /session/:id/supported-commands/:name - write-scope; runs one of the
   // watched session's own slash commands by posting `/name args` as that
   // session's prompt text. The name is checked against the daemon's advertised
   // list first, so an unlisted name is refused instead of reaching the model.
@@ -2285,14 +2285,14 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     createAuditQueryRoute(audit),
   );
   // Live owner-only stream of audit records (incl. policy_decision / reload
-  // frames). OWNER-scoped — it surfaces token/scope/session ids across the
+  // frames). OWNER-scoped - it surfaces token/scope/session ids across the
   // whole gateway, never for a session-locked guest.
   app.get(
     '/rc/events',
     requireScope(OWNER, audit),
     createOwnerEventsRoute(ownerEvents),
   );
-  // Guest redemption endpoint — SHARE-scoped, mounted BEFORE the owner-gated
+  // Guest redemption endpoint - SHARE-scoped, mounted BEFORE the owner-gated
   // share router so a share token reaches it (the owner router would 403 it).
   app.get(
     '/rc/share/whoami',
@@ -2304,13 +2304,13 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(OWNER, audit),
     createShareRouter(deps.store, registry, audit, onTokenRevoked),
   );
-  // BM25 ranked search provider (search slice 2) — opt-in `?rank=bm25`. The
+  // BM25 ranked search provider (search slice 2) - opt-in `?rank=bm25`. The
   // native better-sqlite3 is loaded LAZILY via a dynamic import the FIRST time a
   // ranked query arrives (memoized), so the gateway's static graph never pulls
   // it in and a fresh install / failed native build still boots and serves the
   // scanner. Returns null (→ route falls back to the live scan) when the dep is
   // absent, there is no workspace, the index is empty/never-built, or any error
-  // occurs — ranked search is strictly best-effort enrichment over the scan.
+  // occurs - ranked search is strictly best-effort enrichment over the scan.
   let searchIndexMod:
     | typeof import('./search/searchIndex.js')
     | null
@@ -2337,7 +2337,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     try {
       idx = searchIndexMod.SearchIndex.open(dbPath);
       // A never-built (empty) index must not silently return zero hits when the
-      // scan would find matches — fall back instead.
+      // scan would find matches - fall back instead.
       if (idx.count() === 0) return null;
       return idx.query(q, qopts);
     } catch {
@@ -2387,7 +2387,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       endpointPolicy: pushEndpointPolicy,
     });
     // Per-subscription rolling-hour push rate limiter (cycle 46). In-memory:
-    // a restart resets the counters (fail-open — never suppress a notification).
+    // a restart resets the counters (fail-open - never suppress a notification).
     const rateLimiter = new PushRateLimiter();
     // Same-kind coalescing (cycle 63, design D6). DISABLED by default (window 0
     // -> tryPass always true -> no behavior change); an operator opts in via
@@ -2457,7 +2457,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     );
   }
 
-  // POST /session/:id/rewind (add-remote-rewind). OWNER-scoped — a strictly
+  // POST /session/:id/rewind (add-remote-rewind). OWNER-scoped - a strictly
   // stronger gate than the WRITE-scoped fork route, because a rewind
   // destructively truncates the daemon transcript. Mounted HERE (not beside the
   // fork route) because it injects `notifier`, a `let` initialised in the push
@@ -2489,7 +2489,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     ),
   );
 
-  // POST /policy/explain (P4) — gateway-global (no :id), OWNER-scoped,
+  // POST /policy/explain (P4) - gateway-global (no :id), OWNER-scoped,
   // read-only dry-run against the live policy. No session lock (not
   // session-scoped) and no daemon call. In production, cli.ts always
   // supplies a static policyExplain bundle, so this route IS mounted; an
@@ -2504,10 +2504,10 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     );
   }
 
-  // /rc/permission-overlays (issue #33) — gateway-global (no :id),
+  // /rc/permission-overlays (issue #33) - gateway-global (no :id),
   // OWNER-scoped, TTL-bound session-scoped permission overrides. Gateway-
   // local in-memory store: no session lock, no daemon call, nothing
-  // durable (a restart drops all overlays — the file policy stays the
+  // durable (a restart drops all overlays - the file policy stays the
   // only source of truth). Mirrors the /policy/explain mount just above:
   // absent dep → routes not mounted at all (404, not a 503 at request
   // time).
@@ -2533,9 +2533,9 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     );
   }
 
-  // GET /rc/peers — gateway-global (no :id), OWNER-scoped, read-only LAN
+  // GET /rc/peers - gateway-global (no :id), OWNER-scoped, read-only LAN
   // daemon discovery over the optional mDNS browse. No session lock (not
-  // session-scoped) and no daemon call — mirrors the /policy/explain mount
+  // session-scoped) and no daemon call - mirrors the /policy/explain mount
   // just above. Absent dep (bonjour-service optional, or no browse wired) →
   // route not mounted at all (404, not a 503 at request time).
   if (deps.browsePeers) {
@@ -2546,7 +2546,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     );
   }
 
-  // GET /rc/gpu — gateway-global (no :id), OWNER-scoped, read-only GPU
+  // GET /rc/gpu - gateway-global (no :id), OWNER-scoped, read-only GPU
   // status via the optional nvidia-smi probe. Mirrors the /rc/peers mount
   // just above: no session lock, no daemon call. Absent dep (no GPU probe
   // wired) → route not mounted at all (404, not a 503 at request time).
@@ -2558,7 +2558,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     );
   }
 
-  // GET /rc/llama-swap — gateway-global (no :id), OWNER-scoped, read-only
+  // GET /rc/llama-swap - gateway-global (no :id), OWNER-scoped, read-only
   // llama-swap status via the optional llama-swap probe. Mirrors the
   // /rc/gpu mount just above: no session lock, no daemon call. Absent dep
   // (no --llama-swap-url wired) → route not mounted at all (404, not a 503
@@ -2644,11 +2644,11 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     );
   }
 
-  // POST /session/:id/approval-mode — WRITE is the floor (plan/default);
+  // POST /session/:id/approval-mode - WRITE is the floor (plan/default);
   // the in-handler OWNER gate escalates for power modes (auto-edit/auto/
   // yolo) and a durable `persist: true`. Mirrors the fork/rewind mounts'
   // middleware chain exactly (`recordActivity` then `enforceSessionLock`)
-  // so a session-locked share token is confined to its own session — the
+  // so a session-locked share token is confined to its own session - the
   // same integrity guarantee every other session-mutation route provides.
   // A later task (add-remote-approval-mode's approval-mode pump) still
   // owns wiring the `bus`/`notifier` fan-out for the daemon's own
@@ -2664,10 +2664,10 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     createApprovalModeRoute(deps.daemon, { audit }),
   );
 
-  // POST /session/:id/model — WRITE is the mount floor, identical to
+  // POST /session/:id/model - WRITE is the mount floor, identical to
   // approval-mode's middleware chain immediately above (same integrity
   // guarantee: a session-locked share token is confined to its own
-  // session). No in-handler scope escalation — unlike approval-mode,
+  // session). No in-handler scope escalation - unlike approval-mode,
   // switching models has no power-tier concept.
   app.post(
     '/session/:id/model',
@@ -2679,14 +2679,14 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     createModelSwitchRoute(deps.daemon),
   );
 
-  // /rc/workspace/* — workspace-control routes (rc-workspace-permissions).
+  // /rc/workspace/* - workspace-control routes (rc-workspace-permissions).
   // Workspace-scoped (daemon-global, no session id): same middleware chain as
   // the session-mutation routes above MINUS `enforceSessionLock` (there is no
   // session to lock). Scope tiering is at the mount: READS (GET) are the
-  // WRITE floor; MUTATIONS are OWNER — `requireScope` already writes the
+  // WRITE floor; MUTATIONS are OWNER - `requireScope` already writes the
   // `scope_denied` audit row with the required scope, so the handlers stay
   // scope-agnostic.
-  // GET /rc/workspaces — live workspace listing for the UI's target
+  // GET /rc/workspaces - live workspace listing for the UI's target
   // selector (rc-workspace-scoping, #28): the default/boot workspace's cwd
   // (from the daemon's capabilities) plus the non-default cwds the pool
   // currently holds (a pool without a `workspaces()` implementation reads
@@ -2759,7 +2759,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorRateLimit,
     createWorkspaceSettingsRoute(deps.daemon, { audit }),
   );
-  // GET /rc/workspace/env and /rc/workspace/preflight — the two diagnostics
+  // GET /rc/workspace/env and /rc/workspace/preflight - the two diagnostics
   // reads (rc-workspace-diagnostics, #123). WRITE floor, like every other
   // workspace read here, and for the same reason the daemon gives: these cells
   // are host facts, not names. Its own route comment says so
@@ -3103,7 +3103,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   if (deps.review) {
     // Local `const` (not the outer `let reviewLifecycle`): the onEscalate
     // closure below captures this binding, and TS cannot narrow a `let`
-    // through a deferred closure — referencing the outer variable there would
+    // through a deferred closure - referencing the outer variable there would
     // make `.setBlocked` possibly-undefined.
     const lifecycle = new ReviewLifecycle(
       deps.review.registry,

@@ -7,14 +7,14 @@
 /**
  * Telegram bridge healthz endpoint. The bridge exposes `GET /healthz` on a
  * small loopback HTTP server returning `{ ok, daemonReachable,
- * telegramReachable, uptimeSec }` — a liveness/observability probe suitable for
+ * telegramReachable, uptimeSec }` - a liveness/observability probe suitable for
  * a Docker `HEALTHCHECK` or k8s liveness probe.
  *
  * `ok` is the conjunction of `daemonReachable AND telegramReachable`.
  *
  * Bound to 127.0.0.1 (not 0.0.0.0): the report is unauthenticated and
  * loopback matches the sidecar posture and is enough for an in-container probe.
- * Bind failure NEVER crashes the bridge — it logs and continues.
+ * Bind failure NEVER crashes the bridge - it logs and continues.
  */
 
 import { createServer, type Server } from 'node:http';
@@ -33,7 +33,7 @@ export interface TelegramHealthReport {
 /**
  * Resolve the healthz port from an env string. `fallback` is the default when
  * the var is unset. `off`/`none`/`0` (or empty) explicitly disables; a valid
- * 1–65535 wins; anything else → fallback.
+ * 1-65535 wins; anything else → fallback.
  */
 export function parseTelegramHealthzPort(
   value: string | undefined,
@@ -72,7 +72,7 @@ export interface TelegramHealthServer {
 
 /**
  * Start the loopback `GET /healthz` server on `port`. `report()` is invoked
- * per request. Resolves once listening, or — on bind error — logs and resolves
+ * per request. Resolves once listening, or - on bind error - logs and resolves
  * with a no-op handle (NEVER rejects).
  */
 export function startTelegramHealthServer(
@@ -100,7 +100,7 @@ export function startTelegramHealthServer(
       log(
         `telegram healthz: could not bind port ${port} (${
           (err as Error).message ?? err
-        }) — healthz disabled`,
+        }) - healthz disabled`,
       );
       resolve({ close: async () => {}, port: 0 });
     });

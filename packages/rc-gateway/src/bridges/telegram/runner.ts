@@ -58,7 +58,7 @@ const POLL_BACKOFF_MAX_MS = 30_000;
 
 /**
  * The Telegram bridge runner (`add-telegram-bridge`): two cooperating loops over
- * the loopback contract — a Telegram long-poll loop (inbound: /start, prompts,
+ * the loopback contract - a Telegram long-poll loop (inbound: /start, prompts,
  * button votes) and a per-session SSE echo loop (outbound: render
  * permission_request → chat). It holds NO gateway internals; every gateway
  * interaction goes through the injected {@link BridgeClient} (bearer token over
@@ -66,7 +66,7 @@ const POLL_BACKOFF_MAX_MS = 30_000;
  * its config. Local ban cache mirrors gateway 403s.
  *
  * NOTE: the live loops (real `getUpdates` against api.telegram.org) are not
- * CI-exercised — `deliverEvent` and a single poll tick ARE unit-tested; the
+ * CI-exercised - `deliverEvent` and a single poll tick ARE unit-tested; the
  * long-poll orchestration is code-reviewed/structurally verified only.
  */
 /** This bridge's stable id (registration + invite-redeem route path). */
@@ -89,7 +89,7 @@ export class TelegramBridge {
    */
   private readonly sentRequests = new Map<string, SentPermissionMessage[]>();
   /**
-   * Set of requestIds that have been resolved — used by dispatch to short-circuit
+   * Set of requestIds that have been resolved - used by dispatch to short-circuit
    * late callback_query taps without hitting the daemon.
    */
   private readonly resolvedRequests = new Set<string>();

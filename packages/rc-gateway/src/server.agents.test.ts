@@ -45,7 +45,7 @@ async function setup(
   const writeTok = (await store.issue(['write', 'session:read'], 'w')).token;
   const readTok = (await store.issue(['session:read'], 'r')).token;
   const ownerTok = (await store.issue(['owner'], 'o')).token;
-  // Bridge scope materializes to {bridge, session:read, approve, write} —
+  // Bridge scope materializes to {bridge, session:read, approve, write} -
   // the concrete bundle a real bridge redeems (pair.ts/tokens.ts apply
   // expandScopes at issue time; TokenStore.issue itself does not, so it's
   // applied explicitly here to mirror a real bridge token's scope set).
@@ -145,11 +145,11 @@ describe('agent observability wiring', () => {
   });
 });
 
-// Defense-in-depth (latent hardening, not a live exploit — a leaked bridge
+// Defense-in-depth (latent hardening, not a live exploit - a leaked bridge
 // token or a future feature could reach these): every bridge-token-reachable
 // mutation route must enforce the owner's sub-actor ban, not just prompt/vote.
 // /rc/agents (spawn, a resource-creating route) also gets the per-sub-actor
-// rate limiter; /rc/agents/:id/cancel (a stop route) gets ban only — a user
+// rate limiter; /rc/agents/:id/cancel (a stop route) gets ban only - a user
 // must always be able to stop runaway work even under rate pressure.
 describe('sub-actor ban on the agent routes', () => {
   it('403s sub_actor_banned for a banned sub-actor spawning via POST /rc/agents', async () => {
@@ -173,7 +173,7 @@ describe('sub-actor ban on the agent routes', () => {
 
   it('still spawns for a non-banned bridge sub-actor and a plain write token (no regression)', async () => {
     const { url, writeTok, ownerTok, bridgeTok } = await setup();
-    // Ban a DIFFERENT sub-actor — must not affect anyone else.
+    // Ban a DIFFERENT sub-actor - must not affect anyone else.
     await banSubActor(url, ownerTok, 'telegram', 'telegram:evil');
 
     const okBridge = await fetch(`${url}/rc/agents`, {

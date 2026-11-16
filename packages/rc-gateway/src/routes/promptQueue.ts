@@ -16,7 +16,7 @@
  * Promise chain.  `acquire()` appends a new waiter to the tail of the chain
  * and returns a `release` callback the caller MUST invoke (in a `finally`
  * block) when the turn is done.  A `queueWaitMs` deadline races against
- * acquiring the lock — if it fires first the function throws `QueueTimeoutError`
+ * acquiring the lock - if it fires first the function throws `QueueTimeoutError`
  * and the waiter is removed from the chain transparently (the next queued
  * prompt still runs in order).
  */
@@ -60,7 +60,7 @@ export class PromptQueue {
       };
     });
 
-    // Register this waiter as the new tail immediately — before any await — so
+    // Register this waiter as the new tail immediately - before any await - so
     // that a subsequent caller chains off *this* waiter, not the old tail.
     this.sessions.set(sessionId, next);
 
@@ -87,7 +87,7 @@ export class PromptQueue {
       if (timer !== undefined) clearTimeout(timer);
     }
 
-    // We hold the slot — track the holder and return a release that
+    // We hold the slot - track the holder and return a release that
     // untracks it (the caller MUST call it in a `finally` block).
     this.holders.set(sessionId, (this.holders.get(sessionId) ?? 0) + 1);
     return () => {
@@ -98,7 +98,7 @@ export class PromptQueue {
     };
   }
 
-  /** Whether a prompt turn currently holds the session's slot — i.e. a turn
+  /** Whether a prompt turn currently holds the session's slot - i.e. a turn
    * is in flight (add-mid-turn-recovery: the orchestrator snapshots this per
    * affected session BEFORE respawning, while the in-flight prompt has not
    * yet rejected and released its slot). */

@@ -37,7 +37,7 @@ export interface AgentRoutesDeps {
    * ms to wait for an EARLY prompt rejection before accepting the spawn.
    * daemon.prompt() is long-lived (resolves at end of turn), so a bounded
    * race is how "prompt SEND failed" is distinguished from "turn running".
-   * Default 1000; tests inject 10–50 ms.
+   * Default 1000; tests inject 10-50 ms.
    */
   promptAcceptWindowMs?: number;
   /**
@@ -106,9 +106,9 @@ function withCost(
 }
 
 /**
- * POST /rc/agents — spawn saga (design: create session → register → send
+ * POST /rc/agents - spawn saga (design: create session → register → send
  * prompt; a prompt-send failure ends the session and marks the record
- * failed — no half-spawned agents). WRITE scope enforced at the mount.
+ * failed - no half-spawned agents). WRITE scope enforced at the mount.
  */
 export function createSpawnAgentRoute(deps: AgentRoutesDeps): RequestHandler {
   const acceptMs = deps.promptAcceptWindowMs ?? 1000;
@@ -220,15 +220,15 @@ export function createSpawnAgentRoute(deps: AgentRoutesDeps): RequestHandler {
 }
 
 /**
- * GET /rc/agents?status=&parent= — SESSION_READ scope at the mount, which
+ * GET /rc/agents?status=&parent= - SESSION_READ scope at the mount, which
  * admits a session-locked SHARE token (add-link-share: "session-locked" gets
  * `read` on `session_lock_id` ONLY and SHALL NOT access other sessions). This
- * is a workspace-wide list, so — mirroring routes/search.ts's confinement of
- * `sessionId` to `req.rcClient.sessionLockId` — a locked caller's results are
+ * is a workspace-wide list, so - mirroring routes/search.ts's confinement of
+ * `sessionId` to `req.rcClient.sessionLockId` - a locked caller's results are
  * confined here, in-handler, to records tied to its one session: either the
  * agent's OWN session, or a session it was spawned FROM (`parentSessionId`).
  * Fail-closed: a record with neither tie to the lock is excluded. A
- * non-locked (owner/write) token is unaffected — full list, as before.
+ * non-locked (owner/write) token is unaffected - full list, as before.
  */
 export function createListAgentsRoute(deps: AgentRoutesDeps): RequestHandler {
   return (req, res) => {
@@ -260,13 +260,13 @@ export function createListAgentsRoute(deps: AgentRoutesDeps): RequestHandler {
 }
 
 /**
- * GET /rc/agents/:id — SESSION_READ scope at the mount, which admits a
+ * GET /rc/agents/:id - SESSION_READ scope at the mount, which admits a
  * session-locked SHARE token. Mirrors createListAgentsRoute's confinement: a
  * locked caller may only fetch a record tied to its ONE session (own
  * `sessionId`, or spawned FROM it via `parentSessionId`). A record that fails
- * both ties is reported 404 — the SAME shape as a missing id — so a locked
+ * both ties is reported 404 - the SAME shape as a missing id - so a locked
  * token cannot distinguish "exists in another session" from "doesn't exist".
- * A non-locked (owner/write) token is unaffected — full access, as before.
+ * A non-locked (owner/write) token is unaffected - full access, as before.
  */
 export function createGetAgentRoute(deps: AgentRoutesDeps): RequestHandler {
   return (req, res) => {
@@ -286,7 +286,7 @@ export function createGetAgentRoute(deps: AgentRoutesDeps): RequestHandler {
 }
 
 /**
- * POST /rc/agents/:id/message { content } — steer. Proxies content as a
+ * POST /rc/agents/:id/message { content } - steer. Proxies content as a
  * prompt to the agent's own session. WRITE scope at the mount. Content is
  * NEVER audited (mirror prompt_sent).
  */
@@ -330,7 +330,7 @@ export function createAgentMessageRoute(deps: AgentRoutesDeps): RequestHandler {
 }
 
 /**
- * POST /rc/agents/:id/cancel — proxies to the daemon's session end (the
+ * POST /rc/agents/:id/cancel - proxies to the daemon's session end (the
  * same call sessionEnd.ts makes) and marks the record cancelled. WRITE
  * scope at the mount. 409 agent_not_running on terminal records.
  */
@@ -357,7 +357,7 @@ export function createAgentCancelRoute(deps: AgentRoutesDeps): RequestHandler {
     }
     // Atomic terminal transition: two concurrent cancels can both pass the
     // pre-check above and both reach here. setStatus is the single source of
-    // truth for "who won" — only the caller whose transition actually landed
+    // truth for "who won" - only the caller whose transition actually landed
     // (record was non-terminal at the moment of the CAS) audits/emits/200s;
     // the loser gets 409, matching the pre-check's terminal-status response.
     const transitioned = await deps.registry.setStatus(

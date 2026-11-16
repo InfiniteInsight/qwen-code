@@ -81,7 +81,7 @@ export class UiPrefsStore {
    * Set (or clear) the token's stamp zone; persists. `undefined` removes the
    * field so the record reads "use the default" rather than storing a copy of
    * it. Returns false when `zone` is not a usable IANA name, leaving the store
-   * untouched — a rejected write must not be able to blank a saved preference.
+   * untouched - a rejected write must not be able to blank a saved preference.
    */
   async setStampZone(
     tokenId: string,

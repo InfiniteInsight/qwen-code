@@ -1,4 +1,4 @@
-# Multi-workspace client — gateway-side support
+# Multi-workspace client - gateway-side support
 
 `add-multi-workspace-client` is mostly a **client** feature (a terminal/web client
 that talks to several daemons and switches between them). Per the "build
@@ -27,7 +27,7 @@ the web client can render its daemon switcher without hand-copying URLs.
 Spec-faithful behavior (`routes/clientsManifest.ts`):
 
 - The TOML file uses `[[daemon]]` (singular) array-of-tables; the JSON key is
-  `daemons` (plural). Entries pass through **verbatim** — `default` is NOT
+  `daemons` (plural). Entries pass through **verbatim** - `default` is NOT
   synthesized (the client interprets "no explicit default → first entry wins").
 - `generatedAt` is **endpoint-generated** at cache-build time, not read from file.
 - Missing or invalid TOML → `{ "daemons": [], "warning": "<reason>" }` with status
@@ -56,5 +56,5 @@ web header daemon switcher + health-dot polling, per-daemon token storage, and t
 gateway only serves the manifest above.
 
 **Per-daemon webpush labeling** is consciously skipped as client-side: a single
-gateway never needs to know it is one-of-N subscriptions for a client — that
+gateway never needs to know it is one-of-N subscriptions for a client - that
 multiplicity is client-side orchestration across the daemons it has paired with.

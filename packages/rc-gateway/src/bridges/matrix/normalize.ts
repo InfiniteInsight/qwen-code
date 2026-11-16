@@ -15,7 +15,7 @@ import {
  * transport-agnostic shapes (`add-matrix-bridge`). Walks the (deeply nested,
  * loosely-typed) sync JSON and returns the actionable items: rooms to auto-join,
  * rooms detected as encrypted, normalized messages (with the sender's power level
- * resolved from tracked room state), and reactions. No I/O — exercised with plain
+ * resolved from tracked room state), and reactions. No I/O - exercised with plain
  * sync fixtures.
  *
  * Power levels are STATEFUL: `m.room.power_levels` state events update a per-room

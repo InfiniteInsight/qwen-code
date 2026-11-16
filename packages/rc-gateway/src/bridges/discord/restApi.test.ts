@@ -49,7 +49,7 @@ function api(impl: typeof fetch) {
   });
 }
 
-describe('DiscordRestApi — createMessage', () => {
+describe('DiscordRestApi - createMessage', () => {
   it('POSTs content + components with Bot auth and returns the created id', async () => {
     const { impl, calls } = fakeFetch(() => ({
       status: 200,
@@ -82,7 +82,7 @@ describe('DiscordRestApi — createMessage', () => {
 
   it('suppresses all mention parsing (no @everyone/@here/role/user pings)', async () => {
     // Discord parses @everyone/@here/roles by DEFAULT when this field is
-    // absent — relayed agent output containing "@everyone" would otherwise
+    // absent - relayed agent output containing "@everyone" would otherwise
     // ping the whole server using the bot's permissions.
     const { impl, calls } = fakeFetch(() => ({ status: 200, json: {} }));
     await api(impl).createMessage('chan_1', '@everyone hi @here <@&123>');
@@ -113,7 +113,7 @@ describe('DiscordRestApi — createMessage', () => {
   });
 });
 
-describe('DiscordRestApi — editMessage', () => {
+describe('DiscordRestApi - editMessage', () => {
   it('PATCHes the channel message path with content + components', async () => {
     const { impl, calls } = fakeFetch(() => ({ status: 200, json: {} }));
     await api(impl).editMessage('chan_1', 'm_42', 'Resolved', [
@@ -136,7 +136,7 @@ describe('DiscordRestApi — editMessage', () => {
   });
 });
 
-describe('DiscordRestApi — createThread', () => {
+describe('DiscordRestApi - createThread', () => {
   it('POSTs the message threads path and returns the thread id', async () => {
     const { impl, calls } = fakeFetch(() => ({
       status: 201,
@@ -153,7 +153,7 @@ describe('DiscordRestApi — createThread', () => {
   });
 });
 
-describe('DiscordRestApi — interaction responses', () => {
+describe('DiscordRestApi - interaction responses', () => {
   it('deferInteraction acks with a deferred ephemeral callback', async () => {
     const { impl, calls } = fakeFetch(() => ({ status: 204, json: undefined }));
     await api(impl).deferInteraction('int_1', 'tok_abc');

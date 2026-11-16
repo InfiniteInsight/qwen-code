@@ -31,7 +31,7 @@ interface IdleStatusBody {
   /** EFFECTIVE state: `globalEnabled && override !== false`. */
   enabled: boolean;
   /**
-   * The idle.yaml master switch, independent of the per-session override — lets a
+   * The idle.yaml master switch, independent of the per-session override - lets a
    * client show WHY a session is off ("disabled globally, edit idle.yaml" vs "you
    * turned this session off"). Present only when `available`.
    */
@@ -42,7 +42,7 @@ interface IdleStatusBody {
 
 /**
  * Build the EFFECTIVE idle-state body for a session. POST and GET return the
- * SAME shape so a client that toggles then re-reads sees a coherent answer — in
+ * SAME shape so a client that toggles then re-reads sees a coherent answer - in
  * particular, POST `{enabled:true}` under a global-off reports `enabled:false`
  * (the toggle stores the intent but can only NARROW; it never widens past the
  * global egress gate). `available:false` when idle isn't wired (no creds).
@@ -66,19 +66,19 @@ function buildIdleStatusBody(
 }
 
 /**
- * POST /session/:id/idle-suggest-toggle — set a session's idle-suggestion
+ * POST /session/:id/idle-suggest-toggle - set a session's idle-suggestion
  * override (`add-idle-suggestions` spec: "Per-session toggle", write scope). Body
  * `{ enabled: boolean }`. `false` disables idle suggestions for this session;
  * `true` reverts it to the global default (it can NARROW but never widen past the
- * global egress gate — see {@link IdleSessionToggles}). The override lives for the
+ * global egress gate - see {@link IdleSessionToggles}). The override lives for the
  * session lifetime (in-memory).
  *
  * The store keeps the raw INTENT (so `/suggest on` can undo a prior `/suggest
  * off`, and a session lights up if the operator later flips the global switch),
- * but the RESPONSE reports EFFECTIVE state — identical to the GET status body —
+ * but the RESPONSE reports EFFECTIVE state - identical to the GET status body -
  * so a client never sees `{enabled:true}` while no suggestions can actually fire.
  *
- * Synchronous (no IO) — no async-throw surface, so no self-catch wrapper needed.
+ * Synchronous (no IO) - no async-throw surface, so no self-catch wrapper needed.
  */
 export function createIdleToggleRoute(
   toggles: IdleSessionToggles,
@@ -101,7 +101,7 @@ export function createIdleToggleRoute(
       return;
     }
     toggles.set(id, body.enabled);
-    // Count/flag only — never transcript content. Records the stored INTENT.
+    // Count/flag only - never transcript content. Records the stored INTENT.
     void audit?.record({
       action: 'idle_toggle_set',
       actorTokenId: req.rcClient?.id,
@@ -113,10 +113,10 @@ export function createIdleToggleRoute(
 }
 
 /**
- * GET /session/:id/idle-suggest-toggle — report a session's EFFECTIVE idle
+ * GET /session/:id/idle-suggest-toggle - report a session's EFFECTIVE idle
  * state (`add-idle-suggestions` spec: "`/suggest status` reports state"). Returns
  * the same body as the POST route. (The spec's `idleAfterSec` is omitted by
- * design — this fork detects idle via the pump's active-prompt edge, not a
+ * design - this fork detects idle via the pump's active-prompt edge, not a
  * timer.) Read-only, synchronous.
  */
 export function createIdleStatusRoute(

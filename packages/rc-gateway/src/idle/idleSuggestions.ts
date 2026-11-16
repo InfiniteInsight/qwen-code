@@ -16,7 +16,7 @@ import { readRecentTurns, readSessionModel } from './transcriptTail.js';
 /**
  * Explicit opt-in gate for idle suggestions (proposal `add-idle-suggestions`).
  * The feature is OFF by default even when suggestion credentials happen to be
- * present in the environment — so a workstation that merely has `OPENAI_API_KEY`
+ * present in the environment - so a workstation that merely has `OPENAI_API_KEY`
  * set never starts shipping transcript content to the model on every idle edge.
  * The operator must turn it on deliberately. (Slice 3 replaces this env flag with
  * `idle.yaml` + a per-session `/suggest on|off` toggle.)
@@ -35,13 +35,13 @@ export interface IdleSuggestionDeps {
   /** Owner-event bus the `idle_suggestions` frame is published to (cycle 49). */
   bus: OwnerEventBus;
   /**
-   * Live config accessor — read at FIRE TIME, so a hot-reload (later slice) of
+   * Live config accessor - read at FIRE TIME, so a hot-reload (later slice) of
    * `enabled`/`maxSuggestions*` takes effect on the next idle edge with no
    * rebuild. `enabled` is the SOLE egress guard now (the handler is built
    * whenever model creds resolve), so it is checked before any other work.
    */
   getConfig: () => IdleConfig;
-  /** Optional audit sink — count-only `idle_suggested` / `idle_suggest_rate_limited`. */
+  /** Optional audit sink - count-only `idle_suggested` / `idle_suggest_rate_limited`. */
   audit?: AuditRecorder;
   /**
    * Per-session rolling-hour limiter (reuses the push limiter). Cap is read
@@ -111,8 +111,8 @@ const DEFAULT_SUGGESTIONS_TTL_SEC = 1800;
 /**
  * Build the pump's `onSessionIdle` handler: when a session's active prompt
  * finishes (the pump detects the `hasActivePrompt` true→false edge), read its
- * recent turns, ask the gateway's own model for next-step suggestions, and — only
- * if any survive parsing — publish an `idle_suggestions` frame on the owner-event
+ * recent turns, ask the gateway's own model for next-step suggestions, and - only
+ * if any survive parsing - publish an `idle_suggestions` frame on the owner-event
  * bus. NEVER touches the daemon session (option B: no synthetic prompt, no
  * transcript pollution, no viewer noise).
  *
@@ -141,7 +141,7 @@ export function createIdleSuggestionHandler(
   const now = deps.now ?? Date.now;
   const ttlSec = deps.suggestionsTtlSec ?? DEFAULT_SUGGESTIONS_TTL_SEC;
 
-  /** Per-session in-flight AbortController — cancelled on prompt start. */
+  /** Per-session in-flight AbortController - cancelled on prompt start. */
   const inFlight = new Map<string, AbortController>();
 
   function cancelForSession(sessionId: string): void {
@@ -156,10 +156,10 @@ export function createIdleSuggestionHandler(
     // Per-session opt-out (`/suggest off`): an explicit `false` disables this
     // session regardless of the global default. Checked first so a disabled
     // session has ZERO side effects. An override of `true`/undefined falls
-    // through to the global gate — it can NARROW but never widen.
+    // through to the global gate - it can NARROW but never widen.
     if (deps.getSessionEnabled?.(sessionId) === false) return;
     // The ENABLED gate is the sole thing standing between an operator who merely
-    // has model creds in their env and transcript egress — check it FIRST, before
+    // has model creds in their env and transcript egress - check it FIRST, before
     // any disk read or model call, so a disabled feature has ZERO side effects.
     // A per-session `true` override can NEVER bypass this (egress stays operator-
     // gated via idle.yaml; the toggle only narrows).

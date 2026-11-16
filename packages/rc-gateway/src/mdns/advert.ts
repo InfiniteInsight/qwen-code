@@ -8,12 +8,12 @@
  * Pure mDNS advertisement + discovery logic (add-mdns-discovery spec):
  * TXT-record schema, name/workspace validation (path-traversal refusal), the
  * advertise/suppress decision, and browse-result normalize/dedupe/format. No
- * network or fs here — the bonjour wrapper (advertiser.ts / browser.ts) reads
+ * network or fs here - the bonjour wrapper (advertiser.ts / browser.ts) reads
  * the cwd and drives the multicast socket; this module is unit-tested in full.
  *
  * Interaction with the step-1 bind gate (bindSecurity.ts): a non-loopback bind
  * is only reachable in `tls` or `insecure-proxy` mode. We advertise ONLY in
- * `tls` mode — in `insecure-proxy` mode the gateway's own bind is cleartext
+ * `tls` mode - in `insecure-proxy` mode the gateway's own bind is cleartext
  * while the real TLS endpoint is the upstream proxy (whose host:port the gateway
  * does not know), so advertising our own host:port with `tlsRequired=true` would
  * mislead clients. Per design D2 ("the proxy is the better mDNS source") the
@@ -29,7 +29,7 @@ import { basename } from 'node:path';
  * never drift. */
 export const RC_PROTOCOL_VERSION = 1;
 
-/** A bad operator-supplied mDNS option — the cli prints `.message` and exits. */
+/** A bad operator-supplied mDNS option - the cli prints `.message` and exits. */
 export class MdnsConfigError extends Error {
   constructor(message: string) {
     super(message);
@@ -38,7 +38,7 @@ export class MdnsConfigError extends Error {
 }
 
 /**
- * Validate a TXT label (instance name / workspace name): 1–63 printable ASCII
+ * Validate a TXT label (instance name / workspace name): 1-63 printable ASCII
  * characters, no path separators, no `.`/`..` traversal. Returns the trimmed
  * value or throws {@link MdnsConfigError}.
  */
@@ -57,7 +57,7 @@ export function validateMdnsLabel(value: string, field: string): string {
       `--mdns ${field} must not contain a path separator or be a traversal token (got "${v}")`,
     );
   }
-  // Printable ASCII only (0x20–0x7e), and not a leading dot (hidden-ish).
+  // Printable ASCII only (0x20-0x7e), and not a leading dot (hidden-ish).
   if (!/^[\x20-\x7e]+$/.test(v)) {
     throw new MdnsConfigError(
       `--mdns ${field} must be printable ASCII (got "${value}")`,
@@ -227,7 +227,7 @@ export function formatDaemonsTable(
       .map((c, i) => c.padEnd(i === cols.length - 1 ? 0 : widths[i]))
       .join('  ')
       .trimEnd();
-  // No header for an empty result — just the summary line (friendlier for the
+  // No header for an empty result - just the summary line (friendlier for the
   // "nothing advertises" case; the table-format scenario assumes >=1 daemon).
   const lines = records.length ? [fmt(header), ...rows.map(fmt)] : [];
   const noun = records.length === 1 ? 'daemon' : 'daemons';
@@ -235,7 +235,7 @@ export function formatDaemonsTable(
   return lines.join('\n');
 }
 
-/** Render the `--format json` array — no surrounding text, six fields each. */
+/** Render the `--format json` array - no surrounding text, six fields each. */
 export function formatDaemonsJson(records: DaemonRecord[]): string {
   return JSON.stringify(
     records.map((r) => ({

@@ -17,7 +17,7 @@ const SCHEMA_VERSION = 1;
 /**
  * A match highlight: UTF-8 byte offsets into the `snippet` string.
  * `start` is inclusive, `end` is exclusive (like Buffer.slice semantics).
- * No HTML markup is ever emitted — clients apply styling from these offsets.
+ * No HTML markup is ever emitted - clients apply styling from these offsets.
  */
 export interface Highlight {
   start: number;
@@ -175,7 +175,7 @@ interface RawHit {
 interface MetaRow {
   schema_version: number;
 }
-// SessionMetaRow intentionally omitted — session name is joined directly in the query SQL
+// SessionMetaRow intentionally omitted - session name is joined directly in the query SQL
 
 /**
  * A SQLite-backed FTS5 search index for the gateway, with:
@@ -438,7 +438,7 @@ export class SearchDb {
 
     if (effectiveSet !== undefined) {
       if (effectiveSet.size === 0) return { hits: [], truncated: false };
-      // Build IN clause — parameterized
+      // Build IN clause - parameterized
       const placeholders = [...effectiveSet].map(() => '?').join(',');
       where.push(`d.session_id IN (${placeholders})`);
       params.push(...effectiveSet);

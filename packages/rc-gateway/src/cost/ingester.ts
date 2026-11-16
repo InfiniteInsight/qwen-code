@@ -83,7 +83,7 @@ function firstString(...vals: unknown[]): string {
  * frame carries no usage. Reads `data.update._meta.usage` (the runtime shape) and
  * is tolerant of camelCase/snake_case token spellings.
  *
- * Gated to `agent_message_chunk` — the ONE update type the serve demo reads usage
+ * Gated to `agent_message_chunk` - the ONE update type the serve demo reads usage
  * on (at message end). Other frames may ALSO carry a usage block (e.g. a `result`
  * message in protocol.ts), and counting both would double-charge the same turn; so
  * usage is taken only from the confirmed locus, never every frame that happens to

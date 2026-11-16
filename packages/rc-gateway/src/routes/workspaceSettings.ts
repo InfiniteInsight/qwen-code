@@ -36,10 +36,10 @@ function parseWorkspaceTarget(
 }
 
 /**
- * GET /rc/workspace/settings — read the workspace's effective settings
+ * GET /rc/workspace/settings - read the workspace's effective settings
  * (including the normalized `disabledTools` list, when the daemon
  * provides it). Mounted at the WRITE floor (server.ts). The daemon body is
- * passed through unchanged — `mcpServers` values are already redacted by
+ * passed through unchanged - `mcpServers` values are already redacted by
  * the daemon.
  *
  * Accepts an optional `workspace` target (rc-workspace-scoping, #28):

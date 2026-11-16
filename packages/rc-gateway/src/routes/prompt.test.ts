@@ -159,11 +159,11 @@ describe('prompt route', () => {
   // ── Session FIFO / queue-wait timeout (Task 2.4) ─────────────────────────
 
   it('queues a second prompt behind the first and both succeed', async () => {
-    // Slow daemon — first prompt takes 80ms, giving the second time to queue.
+    // Slow daemon - first prompt takes 80ms, giving the second time to queue.
     stub = await startStubDaemon({ promptStatus: 200, promptDelayMs: 80 });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const audit = fakeAudit();
-    // Give both prompts 500ms queue-wait — plenty of time.
+    // Give both prompts 500ms queue-wait - plenty of time.
     const queue = new PromptQueue();
     const url = await mount(daemon, audit, { queueWaitMs: 500, queue });
 
@@ -178,7 +178,7 @@ describe('prompt route', () => {
   });
 
   it('returns 503 queue_timeout when the slot is not free within queueWaitMs', async () => {
-    // Daemon takes 200ms; queue-wait is only 30ms — second prompt times out.
+    // Daemon takes 200ms; queue-wait is only 30ms - second prompt times out.
     stub = await startStubDaemon({ promptStatus: 200, promptDelayMs: 200 });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const audit = fakeAudit();
@@ -386,17 +386,17 @@ describe('prompt route', () => {
       queue,
     });
 
-    // First prompt — will time out during execution.
+    // First prompt - will time out during execution.
     const r1 = await postPrompt(url, { prompt: 'slow' });
     expect(r1.status).toBe(504);
 
     // Now create a new stub that responds fast and point daemon to it.
-    // Actually, we need to swap the stub — instead we just wait for the slot
+    // Actually, we need to swap the stub - instead we just wait for the slot
     // to be free and confirm a second prompt against the same slow daemon
     // would also be served (it will timeout again, but the important thing
     // is that the queue isn't deadlocked).
     const r2 = await postPrompt(url, { prompt: 'second-slow' });
-    // Second prompt also times out (daemon still slow), but it WAS processed —
+    // Second prompt also times out (daemon still slow), but it WAS processed -
     // the queue was not deadlocked.
     expect(r2.status).toBe(504);
   });
@@ -411,7 +411,7 @@ describe('prompt route', () => {
     stub = await startStubDaemon({ promptStatus: 200, promptDelayMs: 200 });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const audit = fakeAudit();
-    // Default promptTimeoutMs (600s) — the execution timeout must NOT be the
+    // Default promptTimeoutMs (600s) - the execution timeout must NOT be the
     // thing that decides this test.
     const queue = new PromptQueue();
     const url = await mount(daemon, audit, { queue });
@@ -431,7 +431,7 @@ describe('prompt route', () => {
 
     // The gateway must keep awaiting the daemon's turn even though the HTTP
     // client is gone. The stub only logs a prompt call when its own socket
-    // stays open to completion — so a completed entry proves the gateway did
+    // stays open to completion - so a completed entry proves the gateway did
     // NOT propagate the client disconnect into the daemon prompt.
     const deadline = Date.now() + 2000;
     while (stub.promptCallLog.length === 0 && Date.now() < deadline) {
@@ -448,14 +448,14 @@ describe('prompt route', () => {
     expect(entry!.target).toBe('sess-1');
     expect(entry!.detail).toMatchObject({ stopReason: 'end_turn' });
 
-    // The client's own fetch rejected on abort — expected, and must not have
+    // The client's own fetch rejected on abort - expected, and must not have
     // turned into a 500 on the gateway side.
     await expect(p).rejects.toThrow();
   });
 
   it('prompt timeout DOES cancel the daemon prompt (the only remaining abort, #38)', async () => {
     // Daemon takes 300ms; the execution budget is 50ms. The gateway must
-    // abort the daemon turn on timeout — the stub observes the socket close
+    // abort the daemon turn on timeout - the stub observes the socket close
     // and never logs a completed call.
     stub = await startStubDaemon({ promptStatus: 200, promptDelayMs: 300 });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
@@ -468,7 +468,7 @@ describe('prompt route', () => {
 
     // Give the stub a moment to observe the socket close.
     await new Promise((r) => setTimeout(r, 50));
-    // The daemon turn was cancelled — the stub never completed it.
+    // The daemon turn was cancelled - the stub never completed it.
     expect(stub.promptCallLog).toHaveLength(0);
     // No audit record for a turn that never finished.
     expect(audit.calls.find((c) => c.action === 'prompt_sent')).toBeUndefined();

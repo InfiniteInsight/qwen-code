@@ -2,7 +2,7 @@
  * The ONLY module that understands the `permission_request` wire shape.
  *
  * The daemon emits the ACP ToolCall verbatim: `{ toolCallId, title, kind,
- * rawInput, ... }`. It carries NO tool name and NO `input`/`args` — reading
+ * rawInput, ... }`. It carries NO tool name and NO `input`/`args` - reading
  * those (as the enforcer historically did) silently yields the humanized
  * `title` as the tool and the whole toolCall as the args, which is why every
  * `tool:`/`pathGlob:` rule has been dead. Keep that knowledge here so the
@@ -23,7 +23,7 @@ export type PolicyOperation = 'read' | 'write' | 'execute';
  * `notebook_path`, etc.). NOTE: `cwd` is a path candidate here (a call whose
  * own `rawInput.cwd` names a target counts it), AND it is separately read as
  * `rawInput.directory`/`rawInput.cwd` below to resolve the working-directory
- * context — the two uses are not mutually exclusive. Single source of truth
+ * context - the two uses are not mutually exclusive. Single source of truth
  * so the list cannot drift.
  */
 export const PATH_PARAM_KEYS = [
@@ -139,7 +139,7 @@ function parseCdTarget(simple: string): string | undefined {
 
 /**
  * Applies a parsed `cd` target to the running cwd. A bare `cd`, `cd -`
- * (previous directory) and `cd ~` (home) are left UNCHANGED — we have no
+ * (previous directory) and `cd ~` (home) are left UNCHANGED - we have no
  * honest value for $OLDPWD or $HOME here, and guessing could put a path
  * candidate somewhere bash never touched. An absolute target replaces the
  * cwd outright; a relative target resolves against it (`node:path`'s
@@ -162,7 +162,7 @@ function applyCd(target: string, runningCwd: string): string {
  * secrets/x` reads `<cwd>/config/secrets/x`, not `<cwd>/secrets/x`).
  * Without this, every subcommand resolved against the SAME static `cwd`
  * regardless of an earlier `cd`, so the candidate path for anything after a
- * `cd` was simply wrong — and a `pathGlob` deny anchored on the real
+ * `cd` was simply wrong - and a `pathGlob` deny anchored on the real
  * (post-`cd`) location would silently fail to match even though bash truly
  * touches that path. See frameContext.test.ts's "tracks a `cd` across
  * compound subcommands" case for the exploit this closes.
@@ -172,8 +172,8 @@ function applyCd(target: string, runningCwd: string): string {
  * correct for the common sequential `cd X && <cmd> <relpath>` shape this
  * fix targets, AND the original static `cwd`, which stays a candidate as a
  * fail-closed fallback. That fallback matters because `applyCd` can't
- * always compute the real post-`cd` directory (an unresolvable target —
- * `cd $DIR`, `cd "$(pwd)"` — makes `runningCwd` a best-effort guess, and
+ * always compute the real post-`cd` directory (an unresolvable target -
+ * `cd $DIR`, `cd "$(pwd)"` - makes `runningCwd` a best-effort guess, and
  * `splitCompoundCommand` also splits on `|`, which runs its left side in a
  * subshell whose `cd` never actually affects the rest of the pipeline).
  * Keeping the static-cwd candidate too means this enrichment can only ever
@@ -183,7 +183,7 @@ function applyCd(target: string, runningCwd: string): string {
  * RESIDUAL: the daemon's own local enforcement
  * (`packages/core/src/permissions/permission-manager.ts`,
  * `evaluateCompoundCommand`/`evaluateSingle`) has this SAME single-static-cwd
- * limitation and is intentionally NOT touched here (out of scope — no
+ * limitation and is intentionally NOT touched here (out of scope - no
  * core/daemon changes). This fix closes the gap only for the remote
  * gateway's auto-vote enforcement path built from this frame; the
  * daemon-local enforcement path retains it.

@@ -5,7 +5,7 @@
  */
 
 /**
- * Synapse shared-secret registration helper — INTEGRATION-TEST SUPPORT ONLY
+ * Synapse shared-secret registration helper - INTEGRATION-TEST SUPPORT ONLY
  * (used by the E2EE crypto round-trip test to provision throwaway accounts).
  * Implements the `/_synapse/admin/v1/register` nonce+HMAC flow: GET a nonce, then
  * POST `{nonce, username, password, admin, mac}` where `mac` is

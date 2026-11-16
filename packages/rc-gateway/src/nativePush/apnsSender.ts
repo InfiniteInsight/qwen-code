@@ -6,13 +6,13 @@
 
 /**
  * APNs delivery (add-native-mobile-shells "APNs delivery pipeline"). The HTTP/2
- * call to Apple is INJECTED ({@link ApnsTransport}) so all the routing logic —
+ * call to Apple is INJECTED ({@link ApnsTransport}) so all the routing logic -
  * success audit, 410 / 400 BadDeviceToken subscription removal, audited
  * rejection of every other 4xx, 429/5xx backoff-retry, dead-token
- * orphan safety — is unit-tested against a fake. The live transport
+ * orphan safety - is unit-tested against a fake. The live transport
  * ({@link createHttp2ApnsTransport}) is the runtime ceiling (needs real Apple
  * credentials + a device + HTTP/2 reachability to Apple) and is NOT exercised in
- * CI — same posture as the matrix-E2EE adapter.
+ * CI - same posture as the matrix-E2EE adapter.
  */
 
 import { connect, constants as H2 } from 'node:http2';
@@ -219,7 +219,7 @@ export class ApnsSender {
  * `connectOptions` is an ESCAPE HATCH FOR TESTS ONLY: it defaults to `undefined`,
  * so production gets node's strict TLS verification against the public Apple CA
  * chain. The integration test passes its self-signed CA (or `rejectUnauthorized:
- * false`) here to point the REAL transport at an in-process HTTP/2 server — there
+ * false`) here to point the REAL transport at an in-process HTTP/2 server - there
  * is no code path by which production silently skips cert verification.
  *
  * Every request has a hard deadline (`opts.timeoutMs`, default

@@ -8,12 +8,12 @@
  * A bridge's client of the gateway over the PUBLIC loopback contract
  * (`add-bridge-protocol`). This is the seam that keeps an in-process bridge
  * extractable to a separate-process sidecar: it talks ONLY HTTP+SSE to a
- * configured `baseUrl` with a configured bridge `token` — it never imports or
+ * configured `baseUrl` with a configured bridge `token` - it never imports or
  * calls a gateway internal (no TokenStore, no daemon client, no OwnerEventBus).
  * To move the bridge to its own process you change only `baseUrl`/`token`.
  *
  * The token is OPERATOR-PROVIDED (minted once via `POST /rc/tokens {scopes:
- * ['bridge']}` and passed as config/env) — the gateway never auto-mints and
+ * ['bridge']}` and passed as config/env) - the gateway never auto-mints and
  * hands one over, preserving the owner-explicit-grant property of the scope.
  */
 
@@ -69,13 +69,13 @@ export class BridgeClient {
     id: string;
     displayName: string;
     supportsActions?: boolean;
-    /** 'full' | 'limited' | 'none' — how richly the service renders markdown. */
+    /** 'full' | 'limited' | 'none' - how richly the service renders markdown. */
     supportsMarkdown?: BridgeMarkdownSupport;
     supportsThreads?: boolean;
     supportsEdits?: boolean;
     /** Byte limit (legacy; prefer maxMessageChars). */
     maxMessageBytes?: number;
-    /** Character limit — the preferred alternative to maxMessageBytes. */
+    /** Character limit - the preferred alternative to maxMessageBytes. */
     maxMessageChars?: number;
   }): Promise<WriteResult> {
     return this.postJson('/rc/bridges', reg);
@@ -85,7 +85,7 @@ export class BridgeClient {
    * Redeem a one-time invite token (POST /rc/bridges/:id/invite/redeem). On a
    * `200` the bridge learns the `sessionId` to bind; on a non-2xx the gateway's
    * `error` text ("Invalid or expired invite token") is relayed to the chat. This
-   * is the SOLE bind path — a chat user never names a session id directly.
+   * is the SOLE bind path - a chat user never names a session id directly.
    */
   async redeemInvite(
     bridgeId: string,
@@ -169,7 +169,7 @@ export class BridgeClient {
    *
    * Pass `lastEventId` (the highest frame id already delivered) on a RECONNECT so
    * the gateway/daemon replays only frames with `id > lastEventId` from its bounded
-   * ring — closing the no-cursor gap where a permission_request or stream chunk
+   * ring - closing the no-cursor gap where a permission_request or stream chunk
    * arriving during a blip was silently lost. The daemon skips `id <= cursor`, so
    * this never re-delivers an already-seen frame. Omit it on the FIRST subscribe
    * (and after a full gateway restart, when the caller's cursor map is empty) to

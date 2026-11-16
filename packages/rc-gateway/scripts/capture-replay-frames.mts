@@ -5,7 +5,7 @@
  */
 
 /**
- * Phase-2 Slice-3 ground-truth capture for REPLAY (NOT a CI test — needs a real
+ * Phase-2 Slice-3 ground-truth capture for REPLAY (NOT a CI test - needs a real
  * `qwen serve` + a reachable model). The terminal↔mobile pick-up handoff replays a
  * session's history on attach; this records what the 0.17.x daemon actually emits
  * so the `useDaemonStream` replay wiring is built against real frames, not guesses
@@ -14,17 +14,17 @@
  * It seeds a session with two short turns (client A), then captures TWO replay
  * paths the way the TUI would use them:
  *   - RING replay: a SECOND client attaches to the SAME live session (single-scope
- *     reuse) and subscribes with `lastEventId: 0` — what a re-launched TUI sees.
+ *     reuse) and subscribes with `lastEventId: 0` - what a re-launched TUI sees.
  *   - TRANSCRIPT replay: `DaemonSessionClient.load(...)` (HistoryReplayer). Logged
- *     best-effort — if `load` rejects on a live session, THAT is the finding.
+ *     best-effort - if `load` rejects on a live session, THAT is the finding.
  *
  * For each, we record every frame's `type`, `id`, `originatorClientId`, and
- * `sessionUpdate` kind — the exact facts the reducer/hook design needs: are there
+ * `sessionUpdate` kind - the exact facts the reducer/hook design needs: are there
  * `turn_complete` / `replay_complete` boundaries? what `originatorClientId` do
  * replayed user messages carry (must not be dropped as our self-echo)? do ids
  * increase monotonically?
  *
- * Usage (attach to a running daemon — preferred, avoids `spawn qwen` issues):
+ * Usage (attach to a running daemon - preferred, avoids `spawn qwen` issues):
  *   CAPTURE_ATTACH_URL=http://127.0.0.1:4180 CAPTURE_ATTACH_TOKEN=<token> \
  *     npx tsx scripts/capture-replay-frames.mts
  * Or spawn a throwaway daemon (set CAPTURE_QWEN_BIN if `qwen` isn't on PATH):
@@ -204,7 +204,7 @@ try {
   writeFileSync(OUT_RING, JSON.stringify(ringFrames, null, 2));
   await b.close().catch(() => {});
 
-  // 3. TRANSCRIPT replay: load() (HistoryReplayer). Best-effort — a rejection on a
+  // 3. TRANSCRIPT replay: load() (HistoryReplayer). Best-effort - a rejection on a
   //    live session is itself the finding.
   let transcriptFrames: CapturedFrame[] = [];
   try {
@@ -217,7 +217,7 @@ try {
     await c.close().catch(() => {});
   } catch (e) {
     console.error(
-      `[replay] load() failed (this is a finding — transcript path may need resume() or differs on a live session): ${(e as Error)?.message ?? e}`,
+      `[replay] load() failed (this is a finding - transcript path may need resume() or differs on a live session): ${(e as Error)?.message ?? e}`,
     );
     writeFileSync(
       OUT_TRANSCRIPT,

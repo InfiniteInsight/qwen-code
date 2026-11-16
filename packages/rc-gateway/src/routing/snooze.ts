@@ -95,7 +95,7 @@ export class SnoozeStore {
   }
 
   /**
-   * Clear one scope (when `scope` is given) or ALL snoozes (when omitted —
+   * Clear one scope (when `scope` is given) or ALL snoozes (when omitted -
    * back-compat with the cycle-15 `clear()`). Awaits persist.
    */
   async clear(scope?: string): Promise<void> {

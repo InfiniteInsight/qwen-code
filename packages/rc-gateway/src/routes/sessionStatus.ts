@@ -10,13 +10,13 @@ import { isSessionLevelGone } from '../daemonHttpError.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
 
 /**
- * GET /session/:id/status — relay the daemon's per-session status summary so
+ * GET /session/:id/status - relay the daemon's per-session status summary so
  * a remote client (the web UI's pending-card recovery) can reconstruct
  * question/permission cards that a dropped event stream lost. The payload is
  * the daemon's `DaemonSessionSummary`; its `pendingInteractions` array (when
  * present) holds the interactions still awaiting an answer, render-ready.
  *
- * Read-scoped, bare namespace (transparent-proxy topology — 1:1 with the
+ * Read-scoped, bare namespace (transparent-proxy topology - 1:1 with the
  * daemon's own `GET /session/:id/status`). The gateway holds the daemon token;
  * the daemon does the work. Not audited: a status read is a poll (like the
  * event stream's own idle polling) with no mutation.
@@ -26,7 +26,7 @@ export function createSessionStatusRoute(
 ): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;
-    // Reject a malformed/path-traversal-shaped id before any daemon call —
+    // Reject a malformed/path-traversal-shaped id before any daemon call -
     // mirrors the sibling session routes (events, fork, rewind, context).
     if (!isValidSessionId(sessionId)) {
       res

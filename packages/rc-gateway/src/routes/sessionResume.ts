@@ -19,21 +19,21 @@ import {
 } from '../daemonHttpError.js';
 
 /**
- * POST /session/:id/resume — reactivate a past (ended) conversation on its
+ * POST /session/:id/resume - reactivate a past (ended) conversation on its
  * workspace's daemon so a phone can pick it back up (add-resume-conversations).
  *
- * Body: `{ cwd: string }` — the workspace the session originally ran in.
+ * Body: `{ cwd: string }` - the workspace the session originally ran in.
  * Unlike `POST /session` (create), `cwd` is REQUIRED here: a resumed session
  * was never in this process's memory (the gateway may have restarted since
- * it ended), so there is no default workspace to fall back to — the caller
+ * it ended), so there is no default workspace to fall back to - the caller
  * must supply the one the session's transcript lives under.
  *
  * `cwd` MUST name an existing directory (checked here, before any daemon
- * call) or the request is rejected `400 invalid_workspace` — mirrors
+ * call) or the request is rejected `400 invalid_workspace` - mirrors
  * `sessionCreate.ts`'s cwd validation exactly.
  *
  * On success, `daemon.resumeSession(sessionId, { workspaceCwd: cwd })` (a
- * `SessionDaemon` — either a single `DaemonClient` or the multi-workspace
+ * `SessionDaemon` - either a single `DaemonClient` or the multi-workspace
  * `DaemonPool`, add-workspace-pool) spawns/reuses the daemon bound to `cwd`
  * and restores the session there, returning `200 { sessionId, workspaceCwd, … }`
  * so the caller can immediately attach/watch it. The `DaemonPool` implements
@@ -46,7 +46,7 @@ import {
  * `lastEventId`, from which only live events follow (no-history bug, #37 →
  * #39).
  *
- * Audit carries only the session id (`target`) — never the `cwd` path (audit
+ * Audit carries only the session id (`target`) - never the `cwd` path (audit
  * records stay free of paths/args per the gateway's data contract).
  */
 export function createSessionResumeRoute(
@@ -55,7 +55,7 @@ export function createSessionResumeRoute(
 ): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;
-    // Reject a malformed/path-traversal-shaped id BEFORE any work — mirrors
+    // Reject a malformed/path-traversal-shaped id BEFORE any work - mirrors
     // every sibling session route (sessionEvents.ts, sessionContext.ts,
     // fork.ts, rewind.ts).
     if (!isValidSessionId(sessionId)) {
@@ -72,10 +72,10 @@ export function createSessionResumeRoute(
         : undefined;
     const actorTokenId = req.rcClient?.id;
 
-    // A resumed session's workspace was never in this process's memory —
+    // A resumed session's workspace was never in this process's memory -
     // require a non-empty cwd naming an existing directory BEFORE any daemon
     // call. Any stat failure (ENOENT, EACCES, not-a-dir, …) or a missing cwd
-    // collapses to the same 400 — the error message never echoes the path
+    // collapses to the same 400 - the error message never echoes the path
     // (audit/error-hygiene invariant, see the module doc above).
     let isDir = false;
     if (workspaceCwd !== undefined) {
@@ -98,7 +98,7 @@ export function createSessionResumeRoute(
       restored = await daemon.resumeSession(sessionId, { workspaceCwd });
     } catch (err) {
       // A full workspace daemon pool (max concurrent workspace daemons, all
-      // busy) is a distinct, RETRYABLE condition — surface it as its own 503
+      // busy) is a distinct, RETRYABLE condition - surface it as its own 503
       // rather than collapsing it into the generic 502 below (mirrors
       // sessionCreate.ts).
       if (err instanceof WorkspacePoolFullError) {
@@ -126,7 +126,7 @@ export function createSessionResumeRoute(
     // Forward the in-band replay (see doc above): the daemon's load action
     // returns the transcript in the response and the bus ring is cleared
     // after seeding, so the history MUST travel in this body. All fields are
-    // additive — older clients that only read {sessionId, workspaceCwd} are
+    // additive - older clients that only read {sessionId, workspaceCwd} are
     // unaffected.
     res.status(200).json({
       sessionId,
@@ -160,7 +160,7 @@ export function createSessionResumeRoute(
 
 /**
  * Whether `err` indicates the daemon couldn't find the session's transcript
- * on disk (as opposed to being unreachable or erroring some other way) — a
+ * on disk (as opposed to being unreachable or erroring some other way) - a
  * distinct `404 session_not_found` rather than the generic `502
  * daemon_unavailable`. `DaemonHttpError` (thrown by `DaemonClient`) carries a
  * numeric `status`; a plain 404 there is unambiguous. Otherwise fall back to

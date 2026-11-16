@@ -15,8 +15,8 @@ import type { GatewayController, GatewayHandlers } from './runner.js';
 
 /**
  * The thin discord.js connection shell (`add-discord-bridge`). Per the operator's
- * choice (spec design D2), discord.js owns the stateful gateway protocol —
- * HELLO/heartbeat, IDENTIFY, RESUME/reconnect, sequence tracking — that would be
+ * choice (spec design D2), discord.js owns the stateful gateway protocol -
+ * HELLO/heartbeat, IDENTIFY, RESUME/reconnect, sequence tracking - that would be
  * error-prone to hand-roll and that cannot be verified in this environment. This
  * module does NOTHING but: register the `/qwen` slash command, log in, and hand
  * each inbound discord.js event to the pure {@link normalizeMessage} /
@@ -24,7 +24,7 @@ import type { GatewayController, GatewayHandlers } from './runner.js';
  * result to the runner's handlers. All event callbacks self-catch so one bad
  * event can't tear down the connection.
  *
- * VERIFICATION CEILING: this is the one module that is NOT unit-tested — it is a
+ * VERIFICATION CEILING: this is the one module that is NOT unit-tested - it is a
  * straight-line adapter over discord.js, exercised only by a live connection
  * (no real Discord here). Everything it routes TO (normalize, dispatch, render,
  * the runner) IS tested.

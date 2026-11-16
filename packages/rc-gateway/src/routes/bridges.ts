@@ -127,10 +127,10 @@ function parseRegistration(
 }
 
 /**
- * POST /rc/bridges — register or heartbeat a bridge (`add-bridge-protocol`,
+ * POST /rc/bridges - register or heartbeat a bridge (`add-bridge-protocol`,
  * BRIDGE scope). Idempotent on the bridge's stable `id`: a re-POST updates the
  * capability advertisement and refreshes `registeredAt` (so POST subsumes the
- * spec's separate PATCH — a full idempotent upsert leaves nothing for a partial
+ * spec's separate PATCH - a full idempotent upsert leaves nothing for a partial
  * update to add). A different token claiming an `id` already held by another
  * token is rejected 409 (no cross-bridge clobber/impersonation of presence).
  * Synchronous; no async-throw surface.
@@ -168,7 +168,7 @@ export function createRegisterBridgeRoute(
       registeredAt: now(),
     };
     registry.register(reg);
-    // Audit the display name + capability flags (no secrets — tokenId is an id).
+    // Audit the display name + capability flags (no secrets - tokenId is an id).
     void audit?.record({
       action: 'bridge_registered',
       actorTokenId: tokenId,
@@ -192,10 +192,10 @@ export function createRegisterBridgeRoute(
 }
 
 /**
- * POST /rc/bridges/:id/heartbeat — a registered bridge refreshes its liveness so
+ * POST /rc/bridges/:id/heartbeat - a registered bridge refreshes its liveness so
  * the staleness reaper doesn't drop it. Owner-or-self (same authz as deregister).
  * 404 when the id is unknown (e.g. it was already reaped) so the bridge knows to
- * re-register — re-registration needs no re-pairing. Returns the refreshed
+ * re-register - re-registration needs no re-pairing. Returns the refreshed
  * `{ id, registeredAt, heartbeatIntervalSec }`.
  */
 export function createHeartbeatRoute(
@@ -254,7 +254,7 @@ export function pruneStaleBridges(
   return removed;
 }
 
-/** GET /rc/bridges — owner lists registered bridges. */
+/** GET /rc/bridges - owner lists registered bridges. */
 export function createListBridgesRoute(
   registry: BridgeRegistry,
 ): RequestHandler {
@@ -264,7 +264,7 @@ export function createListBridgesRoute(
 }
 
 /**
- * DELETE /rc/bridges/:id — deregister a bridge. Allowed for an OWNER token OR the
+ * DELETE /rc/bridges/:id - deregister a bridge. Allowed for an OWNER token OR the
  * registering bridge itself (self). A token that is neither → 403 (so one bridge
  * can't deregister another). 404 when the id is unknown. Mounted with a low scope
  * gate; the real authz is the owner-or-self check here.
@@ -302,7 +302,7 @@ export function createDeregisterBridgeRoute(
 }
 
 /**
- * POST /rc/bridges/:id/ban { subActor } — owner bans one chat user from a bridge
+ * POST /rc/bridges/:id/ban { subActor } - owner bans one chat user from a bridge
  * WITHOUT revoking the bridge's token (every other user keeps working). The
  * banned sub-actor's subsequent writes are rejected by `enforceSubActorBan`. The
  * bridge `:id` is audit context; the ban is keyed by the (service-namespaced)
@@ -337,7 +337,7 @@ export function createBanSubActorRoute(
 }
 
 /**
- * DELETE /rc/bridges/:id/ban/:subActor — owner lifts a ban. 404 when the
+ * DELETE /rc/bridges/:id/ban/:subActor - owner lifts a ban. 404 when the
  * sub-actor wasn't banned. The `:id` is audit context (the ban is keyed by
  * sub-actor). The `:subActor` path segment is validated to the same charset.
  */
@@ -361,7 +361,7 @@ export function createLiftBanRoute(
   };
 }
 
-/** GET /rc/bridges/bans — owner lists currently-banned sub-actors. */
+/** GET /rc/bridges/bans - owner lists currently-banned sub-actors. */
 export function createListBansRoute(bans: SubActorBanStore): RequestHandler {
   return (_req, res) => {
     res.status(200).json({ banned: bans.list() });
@@ -369,14 +369,14 @@ export function createListBansRoute(bans: SubActorBanStore): RequestHandler {
 }
 
 /**
- * POST /rc/bridges/invites { kind, sessionId } — OWNER mints a one-time invite
+ * POST /rc/bridges/invites { kind, sessionId } - OWNER mints a one-time invite
  * token (the gateway analog of the spec's `qwen rc bridges invite --kind <kind>
  * --session <id>` CLI). A bridge later redeems it to learn which session to bind,
- * so a chat user NEVER names a session id directly — the operator decides every
+ * so a chat user NEVER names a session id directly - the operator decides every
  * chat→session binding. Returns `{ token, expiresAt, kind, sessionId }`.
  *
  * `kind` is recorded for audit but is NOT enforced at redeem (a deliberate
- * non-gate — see {@link InviteStore.redeem}); it is still validated here so a
+ * non-gate - see {@link InviteStore.redeem}); it is still validated here so a
  * typo'd invite fails fast at mint rather than confusing the operator later.
  */
 export function createMintInviteRoute(
@@ -405,7 +405,7 @@ export function createMintInviteRoute(
       return;
     }
     const { token, expiresAt } = invites.mint(kind, sessionId);
-    // Audit the kind + target session (no secret — the token itself is NEVER
+    // Audit the kind + target session (no secret - the token itself is NEVER
     // logged; it is the one-time secret handed back only in the response body).
     void audit?.record({
       action: 'bridge_invite_minted',
@@ -418,13 +418,13 @@ export function createMintInviteRoute(
 }
 
 /**
- * POST /rc/bridges/:id/invite/redeem { token } — BRIDGE scope. A bridge redeems
+ * POST /rc/bridges/:id/invite/redeem { token } - BRIDGE scope. A bridge redeems
  * a one-time invite, learning the `sessionId` to bind. Returns `200 { sessionId,
  * kind }` on success or `400 { error: "Invalid or expired invite token" }` which
  * the bridge relays verbatim to the chat. Single-use: a redeem always burns the
  * token.
  *
- * `:id` is the bridge's stable id, carried for AUDIT CONTEXT ONLY — it is NOT
+ * `:id` is the bridge's stable id, carried for AUDIT CONTEXT ONLY - it is NOT
  * validated against the registry (that would couple redeem to register-ordering
  * and the in-memory registry drops on restart). The bridge-scope token + the
  * one-time invite are the real controls.

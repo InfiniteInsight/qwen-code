@@ -263,7 +263,7 @@ describe('fork route', () => {
     expect(first.cwd).toBe(CWD); // cwd untouched
 
     // The workspace was known (trusted cwd hit), so the restore went through
-    // resumeSession (which registers the fresh id with the pool) — the plain
+    // resumeSession (which registers the fresh id with the pool) - the plain
     // loadSession, unroutable for a fresh id under a DaemonPool, was not used.
     expect(resumeCalls).toEqual([{ id: NEW_ID, workspaceCwd: CWD }]);
     expect(loadCalls).toHaveLength(0);
@@ -322,7 +322,7 @@ describe('fork route', () => {
     const res = await postFork(url, {});
     expect(res.status).toBe(200);
     const written = await readFile(join(chatsDir, `${NEW_ID}.jsonl`), 'utf8');
-    // Fork header + the single copied record — no title record appended.
+    // Fork header + the single copied record - no title record appended.
     expect(written.split('\n').filter((l) => l.length > 0)).toHaveLength(2);
     expect(written).not.toContain('custom_title');
     const entry = audit.calls.find((c) => c.action === 'session_forked');
@@ -467,7 +467,7 @@ describe('fork route', () => {
     const { daemon } = fakeDaemon(async () => ({}));
     const audit = fakeAudit();
     const url = await mount({ daemon, audit, randomId: () => NEW_ID });
-    // fromEventId=0 means include records up to (but not beyond) event 0 — empty slice
+    // fromEventId=0 means include records up to (but not beyond) event 0 - empty slice
     const res = await postFork(url, { fromEventId: 0 });
     expect(res.status).toBe(200);
     const written = await readFile(join(chatsDir, `${NEW_ID}.jsonl`), 'utf8');
@@ -623,7 +623,7 @@ describe('fork route', () => {
       await writeParent();
       const { daemon } = fakeDaemon(async () => ({}));
       const audit = fakeAudit();
-      // No bus, no walDir — should still fork successfully with no side effects.
+      // No bus, no walDir - should still fork successfully with no side effects.
       const url = await mount({ daemon, audit, randomId: () => NEW_ID });
       const res = await postFork(url, {});
       expect(res.status).toBe(200);
@@ -729,7 +729,7 @@ describe('fork route', () => {
     const CWD2 = '/fork-test/ws2';
 
     it('scan fallback: parent under a second workspace is forked (200); restore falls back to loadSession (workspace unknown)', async () => {
-      // The session ran in CWD2, but the gateway's trusted workspace is CWD —
+      // The session ran in CWD2, but the gateway's trusted workspace is CWD -
       // exactly the production shape. No request cwd is supplied.
       await writeParent(resolveChatsDir(CWD2));
       const { daemon, loadCalls, resumeCalls } = fakeDaemon(async () => ({}));
@@ -748,7 +748,7 @@ describe('fork route', () => {
       );
 
       // A scan hit names the FILE, not the workspace: the restore uses the
-      // plain loadSession fallback (unroutable under a live pool — the 502
+      // plain loadSession fallback (unroutable under a live pool - the 502
       // rollback covers that) and never a guessed-workspace resume.
       expect(resumeCalls).toHaveLength(0);
       expect(loadCalls).toEqual([NEW_ID]);

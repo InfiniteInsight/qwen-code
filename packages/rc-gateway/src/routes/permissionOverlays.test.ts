@@ -36,7 +36,7 @@ beforeEach(async () => {
   overlays = new PermissionOverlayStore();
 });
 
-/** Mounts the three routes behind requireScope(OWNER) — the production posture. */
+/** Mounts the three routes behind requireScope(OWNER) - the production posture. */
 async function mount(): Promise<string> {
   const app = express();
   app.use(express.json());

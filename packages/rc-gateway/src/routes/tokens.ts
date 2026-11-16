@@ -46,7 +46,7 @@ export function createMintTokenRoute(
     }
     const callerScopes = req.rcClient?.scopes ?? [];
     // Normal rule: you can only grant a scope you hold. Exception: `bridge` is
-    // grantable by an OWNER caller even though owner does NOT hold `bridge` —
+    // grantable by an OWNER caller even though owner does NOT hold `bridge` -
     // the spec requires bridge be EXPLICIT (the caller must put it in the body)
     // and NOT implied by owner (an owner token never silently gains the subActor-
     // assertion capability). The route is owner-gated, so the owner check below
@@ -143,11 +143,11 @@ export function createRevokeTokenRoute(
 /**
  * POST /rc/tokens/revoke-all → batch-revoke all tokens (owner-scoped).
  *
- * Body: `{ "except": "self" }` (optional) — when present, spares the calling
+ * Body: `{ "except": "self" }` (optional) - when present, spares the calling
  * token from revocation so the owner retains access. Without this field, ALL
  * tokens (including the caller's) are revoked.
  *
- * Response 200: `{ revokedIds: string[] }` — ids of every newly-revoked token.
+ * Response 200: `{ revokedIds: string[] }` - ids of every newly-revoked token.
  * One `token_revoked` audit entry is written per revoked id (with its cascade
  * counts). Live SSE/WS streams are evicted for every revoked token, and
  * `onTokenRevoked(revokedIds)` runs once for the whole batch.

@@ -109,12 +109,12 @@ type FirstFrame<T> =
  * Await the first daemon frame, but never hang on a reachable-but-idle session.
  *
  * The daemon sends SSE headers + `retry:` on connect but no *frame* until the
- * session has activity — so a freshly-created idle session yields nothing, and
+ * session has activity - so a freshly-created idle session yields nothing, and
  * gating `res.writeHead(200)` on the first frame leaves a watcher stuck at
  * "connecting" forever (the composer never opens). This resolves:
- *  - `{ first }` when a frame (or `{done:true}`) arrives first — normal path;
+ *  - `{ first }` when a frame (or `{done:true}`) arrives first - normal path;
  *  - `{ pending }` (the still-live `next()`) when neither a frame nor an error
- *    arrives within `idleMs` — the caller sends headers now and writes that
+ *    arrives within `idleMs` - the caller sends headers now and writes that
  *    frame if/when it lands, dropping nothing;
  * and REJECTS (rethrows) on a real connection error, so the caller still sends
  * a pre-header `502` when the daemon is genuinely unreachable.
@@ -146,7 +146,7 @@ export function firstFrameOrIdle<T>(
  *
  * A session the daemon no longer knows must be a 404, not the generic 502:
  * the web UI treats only 401/403/404 as terminal, so a masked 404 leaves it
- * re-subscribing to a dead id indefinitely (#59 — 9.4k 404s/hour on the live
+ * re-subscribing to a dead id indefinitely (#59 - 9.4k 404s/hour on the live
  * gateway after a restart, which kills every session id). Same mapping as the
  * sibling GET /session/:id/status; the gone-vs-transient test itself lives in
  * `isGoneSessionError` so the push pump cannot drift from it.
@@ -876,7 +876,7 @@ export function createSessionEventsRoute(
   return async (req, res) => {
     const sessionId = req.params.id;
     // Reject a malformed/path-traversal-shaped id BEFORE any WAL path join
-    // (getWal/SessionWal joins the raw id into a file path) or daemon call —
+    // (getWal/SessionWal joins the raw id into a file path) or daemon call -
     // mirrors every sibling session route (fork.ts, rewind.ts, lineage.ts,
     // idleToggle.ts). Unconditional (not gated on walDir being set) so this
     // stays correct if a future deploy wires walDir where it's undefined today.
@@ -902,8 +902,8 @@ export function createSessionEventsRoute(
 
     // Recovery-pending attach (add-mid-turn-recovery §3): while a recovery
     // saga is in flight for this session the pool cannot resolve it (the dead
-    // entry is gone, ownerOf was scrubbed), so hold the connection — no 404,
-    // no 502, no headers yet — until the saga settles or the deadline hits.
+    // entry is gone, ownerOf was scrubbed), so hold the connection - no 404,
+    // no 502, no headers yet - until the saga settles or the deadline hits.
     // The outcome is sticky (recovered / unrecoverable), so a late reconnect
     // lands on the right branch instead of re-holding.
     const recoveryProbe = daemon.recoveryState?.bind(daemon);
@@ -1003,7 +1003,7 @@ export function createSessionEventsRoute(
           writeGatewayEvent(res, ev),
         ) ?? (() => {});
       // Emit synthetic client_joined as the first SSE frame on this stream.
-      // No id: line — synthetic frames must not advance the Last-Event-ID cursor.
+      // No id: line - synthetic frames must not advance the Last-Event-ID cursor.
       writePresenceJoined(res, actorTokenId, req.rcClient?.scopes ?? []);
       return () => {
         stopHeartbeat();
@@ -1130,7 +1130,7 @@ export function createSessionEventsRoute(
       // error rejects here → the outer catch sends a pre-header 502.
       const attach = await firstFrameOrIdle(iterator.next(), idleAttachMs);
       closeStream = openStream();
-      // The first live frame: the one already peeked, or — on an idle attach —
+      // The first live frame: the one already peeked, or - on an idle attach -
       // the one that eventually arrives on the still-pending next() (headers are
       // already out, so the watcher's composer opens immediately either way).
       const first = 'first' in attach ? attach.first : await attach.pending;
@@ -1341,7 +1341,7 @@ function writeFrame(
 }
 
 /**
- * Write a synthetic `usage_tick` frame (no `id:` — it is gateway-injected, not a
+ * Write a synthetic `usage_tick` frame (no `id:` - it is gateway-injected, not a
  * daemon event, so it must never advance the client's Last-Event-ID cursor). A
  * single write; fired only on the coalescer's timer, never mid-daemon-frame.
  */
@@ -1355,7 +1355,7 @@ function writeUsageTick(res: Response, tick: UsageTick): void {
 }
 
 /**
- * Write a gateway-injected event (no `id:` line — synthetic frames must not
+ * Write a gateway-injected event (no `id:` line - synthetic frames must not
  * advance the Last-Event-ID cursor) to the SSE stream. Used to deliver events
  * such as `stream_error` with `{ code: "prompt_timeout" }` that originate from
  * the gateway rather than the daemon. Guards against writing after stream end.
@@ -1420,7 +1420,7 @@ function writePresenceLeft(
 /**
  * Gateway-side enrichment of a `permission_request` frame with `bridgeHints`
  * (add-bridge-protocol): whether the tool-call args are safe to inline into a
- * chat message. Computed here (not in the daemon — zero-edit) on the proxy path
+ * chat message. Computed here (not in the daemon - zero-edit) on the proxy path
  * so every subscriber, bridge or not, sees it; non-bridge clients ignore the
  * extra field. Other frame types pass through untouched. Returns a shallow copy
  * for permission_request so the daemon's parsed object isn't mutated.

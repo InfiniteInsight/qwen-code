@@ -15,9 +15,9 @@ import { relayDaemonAuthFailure } from './daemonAuth.js';
 export type ModelSwitchDaemon = Pick<DaemonClient, 'setSessionModel'>;
 
 /**
- * POST /session/:id/model — switch the active model for a session.
- * Proxies to the daemon's `setSessionModel`. WRITE is the mount floor —
- * see server.ts — enforced at the mount, not in this handler.
+ * POST /session/:id/model - switch the active model for a session.
+ * Proxies to the daemon's `setSessionModel`. WRITE is the mount floor -
+ * see server.ts - enforced at the mount, not in this handler.
  *
  * Error mapping: a session the pool or daemon does not know → 404
  * `session_not_found`; any other 404 from the daemon → 502

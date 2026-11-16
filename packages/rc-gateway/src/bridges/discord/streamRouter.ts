@@ -17,16 +17,16 @@ import {
  * (`add-discord-bridge`: "session_update rendering" + "Threads on long
  * streams"). It owns the three concerns the runner must not get wrong:
  *
- * 1. BUFFERING — chunks accumulate and flush when a paragraph break / fence
+ * 1. BUFFERING - chunks accumulate and flush when a paragraph break / fence
  *    close is reached, OR the buffer hits 1800 chars, OR 1500 ms pass since the
  *    last chunk (the idle timer). Each flush is split to ≤2000 by the splitter.
  *
- * 2. ORDERED, SERIALIZED POSTING — chunk *append* is synchronous (string
+ * 2. ORDERED, SERIALIZED POSTING - chunk *append* is synchronous (string
  *    concat); every async post for a channel runs through a single per-channel
  *    promise chain. Two rapid chunks therefore can't interleave their `await`s
  *    into out-of-order messages, and the per-turn message count stays exact.
  *
- * 3. TURNS & THREADS — a turn is SESSION-scoped (one stream fans out to N
+ * 3. TURNS & THREADS - a turn is SESSION-scoped (one stream fans out to N
  *    channels); the message count and thread are CHANNEL-scoped. After 6
  *    messages POSTED to a channel within one turn, the 7th and later go into a
  *    public thread opened off the turn's first message. A turn ends at the event
@@ -45,7 +45,7 @@ import {
  *
  * KNOWN LIMITATION (cosmetic): if turn N ends (resolve / new prompt) while a
  * sub-trigger tail is still buffered (no paragraph break, < cap, idle timer not
- * yet fired), that tail is not force-flushed at the boundary — the next chunk
+ * yet fired), that tail is not force-flushed at the boundary - the next chunk
  * appends to the same buffer and the combined text flushes as turn N+1's first
  * message. Content and fence balance are preserved; only the turn attribution of
  * a trailing partial line is off. A correct fix must capture the turn id at
@@ -121,7 +121,7 @@ interface ChannelState {
   channelId: string;
   sessionId: string;
   buffer: StreamBuffer;
-  /** Serialized flush chain — every async post runs here, in order. */
+  /** Serialized flush chain - every async post runs here, in order. */
   chain: Promise<void>;
   cancelTimer?: () => void;
   /** Turn-scoped counters; reset lazily when the session's turn id advances. */

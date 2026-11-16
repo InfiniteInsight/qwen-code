@@ -109,7 +109,7 @@ export const KIND_SCOPE: Record<string, RcScope> = {
   'session.approval_mode_changed': SESSION_READ,
   // add-mid-turn-recovery §6: recovery markers are visible to any read-scoped
   // client (session.interrupted additionally serves write-scoped clients per
-  // the spec table — SESSION_READ is the floor both kinds must clear).
+  // the spec table - SESSION_READ is the floor both kinds must clear).
   'session.interrupted': SESSION_READ,
   'session.recovered': SESSION_READ,
   // Turn endings (#40): visible to any read-scoped client, same floor as the
@@ -157,15 +157,15 @@ export class PushNotifier {
     private readonly apns?: { store: ApnsStore; sender: ApnsNotifier },
     /**
      * Owner event bus for `routing_decision` SSE events. When present, the
-     * notifier emits one `routing_decision` frame per evaluated event — before
-     * any send — so an operator can observe routing behavior in real time.
+     * notifier emits one `routing_decision` frame per evaluated event - before
+     * any send - so an operator can observe routing behavior in real time.
      * Absent → no SSE emission (no behavioral change).
      */
     private readonly ownerBus?: OwnerEventBus,
     /**
      * Live-watch presence probe (#40). When present and it reports the event's
      * session as watched, `WATCHED_SUPPRESS_KINDS` payloads are dropped
-     * event-globally — audited `push_suppressed`, reason `session_watched` —
+     * event-globally - audited `push_suppressed`, reason `session_watched` -
      * before any send. Other kinds are unaffected. Absent → no suppression.
      */
     private readonly isWatched?: (sessionId: string) => boolean,
@@ -199,7 +199,7 @@ export class PushNotifier {
    * digest must bypass the QUIET gate (else it would suppress itself at the
    * boundary), and it is one low-frequency edge push so it intentionally does
    * not consume the rate-limit budget, coalesce, or honour an active snooze
-   * (see the cycle-75 design). No cross-session leak — the counts only exist for
+   * (see the cycle-75 design). No cross-session leak - the counts only exist for
    * pushes that already passed the scope + session-lock gates when recorded.
    *
    * The scope gate is re-checked at SEND time (#169): the counts were recorded
@@ -236,7 +236,7 @@ export class PushNotifier {
   }
 
   /**
-   * Forget a subscription's rolling-hour rate-limit window — called when the
+   * Forget a subscription's rolling-hour rate-limit window - called when the
    * subscription is deleted so its in-memory counter doesn't linger for the
    * process lifetime as subscriptions churn. A no-op when no limiter is
    * configured. The limiter is private to the notifier, so the DELETE route
@@ -279,7 +279,7 @@ export class PushNotifier {
       });
     }
     // Watched-session gate (#40): turn endings are redundant while someone is
-    // watching the session live — suppress the whole fan-out once, before any
+    // watching the session live - suppress the whole fan-out once, before any
     // send, like snooze. Other kinds (e.g. permission.required) still push to
     // a watched session: they need action, not just visibility.
     if (
@@ -295,7 +295,7 @@ export class PushNotifier {
     }
     // Capture the routing matcher ONCE: a hot-reload (setRouting) landing mid
     // fan-out must not swap the rules an in-flight event evaluates under
-    // (per-event atomicity — spec "an in-flight event begun before reload
+    // (per-event atomicity - spec "an in-flight event begun before reload
     // completes under the rules it began with").
     const routing = this.routing;
     // Routing gate: a snooze suppresses the WHOLE fan-out once, before any
@@ -315,7 +315,7 @@ export class PushNotifier {
     }
     // Routing drop gate (cycle 25): an operator routing.yaml `drop` rule
     // matching this event's kind/sessionTag suppresses the WHOLE fan-out, like
-    // snooze — event-global, before any per-subscription work. Suppress-only:
+    // snooze - event-global, before any per-subscription work. Suppress-only:
     // a rule can never cause a push the gates below would have blocked. The
     // /test path (notifyToken) is NOT gated.
     const routingEv: RoutingEvent = {
@@ -407,7 +407,7 @@ export class PushNotifier {
           return;
         }
         // Quiet-hours skip (cycle 29): if `now` falls inside this
-        // subscription's own quiet window, suppress (any kind — quiet hours
+        // subscription's own quiet window, suppress (any kind - quiet hours
         // silences the device entirely). Runs after prefs, before
         // working-device. Fail-OPEN: an unparseable stored window (shouldn't
         // occur post-validation) is treated as "no quiet hours" → send.
@@ -418,7 +418,7 @@ export class PushNotifier {
         // a device is in a quiet window (spec: add-webpush-notifications §3).
         // add-mid-turn-recovery §6: session.interrupted joins the bypass set
         // (a crashed turn is as urgent as session.died) while
-        // session.recovered respects quiet hours — hence the wider
+        // session.recovered respects quiet hours - hence the wider
         // QUIET_HOURS_BYPASS_KINDS set (snooze still uses isCriticalKind).
         if (!QUIET_HOURS_BYPASS_KINDS.has(payload.kind) && r.quietHours) {
           const window = parseTimeOfDay(r.quietHours);
@@ -439,7 +439,7 @@ export class PushNotifier {
           }
         }
         // Working-device skip (this cycle): a permission.required push to a
-        // subscription whose own token posted recently is redundant — you're
+        // subscription whose own token posted recently is redundant - you're
         // already on that device. permission.required-ONLY (completions et al.
         // are unaffected). Audited (so "why no push" is visible in the feed).
         if (
@@ -489,14 +489,14 @@ export class PushNotifier {
           }
         }
         // Per-subscription rate limit (cycle 46): cap actual sends to maxPerHour
-        // within a rolling hour (default 30). Runs LAST — only pushes that
+        // within a rolling hour (default 30). Runs LAST - only pushes that
         // survived every other gate count. tryConsume is pure/total (never
         // throws → no try/catch needed to keep the gate fail-open). Audit ONLY
         // the transition into the rate-limited state (firstDrop) so a storm
         // produces one row, not thousands. No limiter wired → no cap.
         if (this.rateLimiter) {
           // Defensive clamp upholds the FAIL-OPEN invariant: a stored cap that
-          // is absent/0/negative/NaN (only reachable via a hand-edited store —
+          // is absent/0/negative/NaN (only reachable via a hand-edited store -
           // the route validates [1,240]) must fall back to the default, never
           // become a 0-cap that silently drops EVERY push.
           const cap =
@@ -547,21 +547,21 @@ export class PushNotifier {
    * carry NO per-subscription prefs/quiet/maxPerHour (the registration captures
    * none), so only the applicable gates run:
    *
-   *  - **scope + session-lock** — confinement, MUST apply (a share token locked to
+   *  - **scope + session-lock** - confinement, MUST apply (a share token locked to
    *    one session must never receive another session's metadata via APNs);
    *  - **per-subscription routing drop**: an operator rule by token scopes/id
    *    (including an explicit `suppressIfWorkingDevice` rule, which is the
    *    operator's own opt-in and gets the real working-device state);
-   *  - **coalescing (D6)** — reuse the shared coalescer keyed by the APNs sub id.
+   *  - **coalescing (D6)** - reuse the shared coalescer keyed by the APNs sub id.
    *
    * Intentionally NOT applied:
-   *  - **prefs / quiet-hours** — no such field on an APNs record (nothing to read);
-   *  - **working-device** — it keys on tokenId (so it *could* run), but its meaning
+   *  - **prefs / quiet-hours** - no such field on an APNs record (nothing to read);
+   *  - **working-device** - it keys on tokenId (so it *could* run), but its meaning
    *    ("you're looking at this device right now") doesn't transfer: a phone whose
    *    token merely polled recently is NOT foregrounded, and that is exactly when a
-   *    `permission.required` push must still arrive — so suppressing here would
+   *    `permission.required` push must still arrive - so suppressing here would
    *    defeat the point of mobile push;
-   *  - **rate-limit** — a deliberate choice, not an oversight: the spec names only
+   *  - **rate-limit** - a deliberate choice, not an oversight: the spec names only
    *    coalescing, and coalescing + the sender's 429 backoff cover bursts/abuse;
    *    the default-cap path exists if symmetry is wanted later.
    *
@@ -625,7 +625,7 @@ export class PushNotifier {
           }
         }
         // Best-effort, like the web-push sender: the LIVE APNs transport REJECTS
-        // on a connection/TLS/DNS error (Apple unreachable — not a 429/5xx, so the
+        // on a connection/TLS/DNS error (Apple unreachable - not a 429/5xx, so the
         // sender's retry loop never sees it). Swallow it here so a transient Apple
         // outage can never reject `notify()` (web-push already sent above) or
         // surface as an unhandled rejection. Audited as push_send_failed.

@@ -50,7 +50,7 @@ function hasCookie(header: string | undefined, name: string): boolean {
 /**
  * Owner-gated share mint/list/revoke routes. A share token is a normal
  * `TokenStore` token carrying `[SHARE, session:read(, approve)]` plus a session
- * lock and a TTL — never `write` or `owner`. Mount at `/rc/share` behind
+ * lock and a TTL - never `write` or `owner`. Mount at `/rc/share` behind
  * `requireScope(OWNER)`.
  */
 export function createShareRouter(
@@ -161,7 +161,7 @@ export function createShareRouter(
  * first redemption of a browser session, consumes one use.
  *
  * A use is counted once per browser session, deduped by an httpOnly
- * `rc_share_<id>` cookie — so an SSE reconnect or a tab refresh does NOT burn a
+ * `rc_share_<id>` cookie - so an SSE reconnect or a tab refresh does NOT burn a
  * use. Because consumption lives here (an authenticated XHR) and never in
  * `resolve()`, a link-unfurl/prefetch of the public bootstrap URL cannot consume
  * a use, and an already-redeemed session keeps working until TTL/revoke even
@@ -194,7 +194,7 @@ export function createShareWhoamiHandler(
 
       const cookieName = 'rc_share_' + id;
       if (hasCookie(req.headers.cookie, cookieName)) {
-        // Already redeemed this browser session — return metadata, no bump.
+        // Already redeemed this browser session - return metadata, no bump.
         res.status(200).json(meta(info.usesRemaining));
         return;
       }

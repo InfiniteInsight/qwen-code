@@ -45,7 +45,7 @@ function api(impl: typeof fetch, txn = 'TXN1') {
   });
 }
 
-describe('MatrixRestApi — whoami', () => {
+describe('MatrixRestApi - whoami', () => {
   it('GETs the whoami endpoint with bearer auth and returns the user_id', async () => {
     const { impl, calls } = fakeFetch(() => ({
       status: 200,
@@ -61,7 +61,7 @@ describe('MatrixRestApi — whoami', () => {
   });
 });
 
-describe('MatrixRestApi — sync', () => {
+describe('MatrixRestApi - sync', () => {
   it('GETs /sync with the since + timeout query and returns the body', async () => {
     const { impl, calls } = fakeFetch(() => ({
       status: 200,
@@ -84,7 +84,7 @@ describe('MatrixRestApi — sync', () => {
   });
 });
 
-describe('MatrixRestApi — joinRoom', () => {
+describe('MatrixRestApi - joinRoom', () => {
   it('POSTs the URL-encoded join path', async () => {
     const { impl, calls } = fakeFetch(() => ({
       status: 200,
@@ -100,7 +100,7 @@ describe('MatrixRestApi — joinRoom', () => {
   });
 });
 
-describe('MatrixRestApi — sendMessage', () => {
+describe('MatrixRestApi - sendMessage', () => {
   it('PUTs to the txn-scoped send path and returns the event id', async () => {
     const { impl, calls } = fakeFetch(() => ({
       status: 200,

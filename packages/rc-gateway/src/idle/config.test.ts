@@ -35,7 +35,7 @@ describe('parseIdleConfig', () => {
     expect(parseIdleConfig('maxSuggestions: 3').enabled).toBe(false);
   });
 
-  it('IGNORES unknown / spec-only fields (idleAfterSec, syntheticPrompt) — lenient', () => {
+  it('IGNORES unknown / spec-only fields (idleAfterSec, syntheticPrompt) - lenient', () => {
     const cfg = parseIdleConfig(
       'enabled: true\nidleAfterSec: 60\nsyntheticPrompt: "do x"\n',
     );

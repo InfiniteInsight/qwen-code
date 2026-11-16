@@ -1,11 +1,11 @@
 # Matrix bridge
 
 The Matrix bridge lets a team approve tool calls and send prompts to a qwen
-session from a Matrix room — voting with 👍/👎 **reactions** (Matrix has no
+session from a Matrix room - voting with 👍/👎 **reactions** (Matrix has no
 inline buttons). It is the third conformant consumer of the `add-bridge-protocol`
 contract (after Telegram and Discord) and runs **in-process** inside the gateway,
 talking the gateway only over the loopback HTTP+SSE contract with an
-operator-minted bridge-scope token — so it can be promoted to a separate-process
+operator-minted bridge-scope token - so it can be promoted to a separate-process
 sidecar later by changing only its configuration.
 
 > **Placement note.** The change spec proposes a standalone
@@ -40,7 +40,7 @@ sidecar later by changing only its configuration.
 ### 1. Create a bot user + access token
 
 1. Create a regular Matrix user for the bot on your homeserver (e.g.
-   `@qwenbot:home.example.com`) — manual registration or the Synapse admin API.
+   `@qwenbot:home.example.com`) - manual registration or the Synapse admin API.
 2. Log in once (e.g. via Element, or a `POST /_matrix/client/v3/login`) and copy
    the **access token** (`MATRIX_ACCESS_TOKEN`).
 
@@ -87,7 +87,7 @@ curl -s -X POST http://127.0.0.1:4170/rc/bridges/invites \
 
 Then:
 
-1. Invite the bot (`@qwenbot:…`) to an **unencrypted** room — it auto-joins.
+1. Invite the bot (`@qwenbot:…`) to an **unencrypted** room - it auto-joins.
 2. A room member with **power level ≥ 50** (Moderator) posts:
 
    ```
@@ -95,14 +95,14 @@ Then:
    ```
 
 The bridge redeems the token via `POST /rc/bridges/:id/invite/redeem` and binds
-the room to the session the token names — a member never types a session id. An
+the room to the session the token names - a member never types a session id. An
 invalid or expired token is refused with the gateway's error text (no binding).
 `!qwen detach` (also power ≥ 50) unbinds; `!qwen status` reports the binding. A
 non-moderator attach is refused ("Permission denied: attach requires power level
 ≥ 50") **before** any redeem; an attach in an encrypted room is refused with the
 E2EE notice, also before redeem.
 
-Invites are one-time and short-lived (20 min), held in gateway memory — a restart
+Invites are one-time and short-lived (20 min), held in gateway memory - a restart
 drops any unredeemed invite, so just mint a fresh one.
 
 ### Sending prompts and voting
@@ -116,7 +116,7 @@ reactions.
 ### Sub-actor identity
 
 Every prompt and vote carries `X-RC-SubActor: matrix:<fully-qualified-mxid>` (the
-homeserver suffix is preserved — federation makes `@a:x` and `@a:y` distinct
+homeserver suffix is preserved - federation makes `@a:x` and `@a:y` distinct
 users). This is what the gateway's per-sub-actor rate limit and bans key on.
 
 ## Bans
@@ -148,7 +148,7 @@ at 16384 bytes, or 1500 ms after the last chunk. Each flush is sent as an
 `m.room.message` with `msgtype: "m.text"`, the raw Markdown as `body`, and a
 rendered HTML `formatted_body` (`format: "org.matrix.custom.html"`) produced by a
 small built-in Markdown converter (bold, italic, inline/fenced code, links, line
-breaks — everything else HTML-escaped; no CommonMark dependency). Matrix's
+breaks - everything else HTML-escaped; no CommonMark dependency). Matrix's
 65536-byte event limit is ~4× the flush threshold, so a flush is a single event
 (no splitting). After 6 messages in one agent turn, the 7th and later carry an
 `m.relates_to { rel_type: "m.thread", event_id: <first message> }` relation,
@@ -164,11 +164,11 @@ never destabilize the working unencrypted bridge.
 **The subsume model.** When the flag is on and the adapter builds, `startBridge`
 makes the `@vector-im/matrix-bot-sdk` crypto client the bridge's transport: it
 owns the single `/sync` and the runner's fetch `/sync` is **subsumed**
-(`runInbound` replaces `syncLoop`). This is not a style choice — two `/sync` loops on one access
+(`runInbound` replaces `syncLoop`). This is not a style choice - two `/sync` loops on one access
 token/device would race for the device-global **to-device** events that carry the
 megolm room keys, so a second syncer starves the crypto client and decrypts fail
 intermittently. The SDK client also becomes the **outbound** transport
-(`sendMessage` → `sendEvent`), which encrypts iff the room is encrypted — so no
+(`sendMessage` → `sendEvent`), which encrypts iff the room is encrypted - so no
 permission prompt, command reply, or streamed prose ever lands as plaintext in an
 encrypted room. With the flag off, the fetch loop runs unchanged and still
 detect-and-refuses encrypted rooms.
@@ -176,7 +176,7 @@ detect-and-refuses encrypted rooms.
 **Pure layer (unit-tested):** the flag (`parseE2eeEnabled`), the olm-store
 convention (`$QWEN_BRIDGE_STATE_DIR/olm/`), `olmStorePresent` (a real fs check),
 the truthful first-boot `olm_store_missing` re-key decision (`shouldWarnOlmMissing`
-— warns only when E2EE is on AND no store exists), and the per-room transport
+- warns only when E2EE is on AND no store exists), and the per-room transport
 decision (`decideMatrixTransport`, used by the fetch dispatch).
 
 **Seams (unit-tested against a fake):** `MatrixBridge.dispatchDecryptedMessage`
@@ -195,11 +195,11 @@ from `m.room.power_levels`, and implements `MatrixInbound` (`sendMessage`/
 (`onMessage`) and reactions (`onReaction`).
 `@vector-im/matrix-bot-sdk` is an `optionalDependency`, dynamically imported
 (absent → adapter returns `null`, E2EE stays off, plain bridge unaffected). The construction is typed
-against the **real** SDK — the ctor calls are signature-checked by tsc (proven via
+against the **real** SDK - the ctor calls are signature-checked by tsc (proven via
 a deliberate-wrong-argument test that makes the build go red), **not** hand-rolled
 `*Like` shapes.
 
-**Live round-trip — verified against a real Synapse (env-gated).**
+**Live round-trip - verified against a real Synapse (env-gated).**
 `crypto.integration.test.ts` provisions two throwaway crypto users on a real
 Synapse, has the SENDER create an encrypted room, and asserts the FULL wired path:
 the bot decrypts an inbound message; a decrypted message reaches a **bound session**
@@ -207,7 +207,7 @@ through dispatch; the bot's reply is real ciphertext the **sender decrypts** (no
 plaintext leak); and a 👍 reaction on the bot's tracked message **registers a
 vote**. It **skips** in the default suite and runs only when `QWEN_MATRIX_IT_HS_URL`
 
-- `QWEN_MATRIX_IT_REG_SECRET` point at a homeserver — stand one up with
+- `QWEN_MATRIX_IT_REG_SECRET` point at a homeserver - stand one up with
   `integration/matrix/docker-compose.yml` (see that README; mind the key-share
   **ordering** and **unverified-device** gotchas). Both tests have been **run green**
   against a self-hosted Synapse container. The provisioning HMAC
@@ -219,23 +219,23 @@ Running it earlier surfaced a real bug the compile-checked path could not:
 `RustSdkCryptoStoreType.Sqlite` threw at construction and the adapter silently
 degraded to `null` (E2EE off) on every real run. Fixed by sourcing the store-type value from the native
 `@matrix-org/matrix-sdk-crypto-nodejs` `StoreType` (a real runtime object), which is
-both type-correct and present at runtime — a reminder that "compile-checked" can
+both type-correct and present at runtime - a reminder that "compile-checked" can
 hide runtime-erased const enums.
 
 ## Healthz
 
 The Matrix bridge exposes `GET /healthz` on a small loopback HTTP server,
 returning `{ ok, daemonReachable, homeserverReachable, olmStorePresent,
-registeredId, uptimeSec }` — a liveness/observability probe (e.g. a Docker
+registeredId, uptimeSec }` - a liveness/observability probe (e.g. a Docker
 `HEALTHCHECK`). It is the surface that reflects olm-store status.
 
 - **Port.** The standalone sidecar defaults to **9100** (the spec default);
   override or disable via `QWEN_BRIDGE_HEALTHZ_PORT` (a port number, or
-  `off`/`none`/`0`). In-process it is **opt-in** — set `QWEN_BRIDGE_HEALTHZ_PORT`
+  `off`/`none`/`0`). In-process it is **opt-in** - set `QWEN_BRIDGE_HEALTHZ_PORT`
   to enable it, so the gateway process never binds a surprise port.
 - **Loopback only** (`127.0.0.1`): the report is unauthenticated and exposes
   internal reachability + the registered id, so it is not bound to `0.0.0.0`. A
-  bind failure (port taken) logs and disables healthz — it never crashes the
+  bind failure (port taken) logs and disables healthz - it never crashes the
   bridge.
 - **Fields.** `olmStorePresent` is a live fs check of `<stateDir>/olm/`.
   `registeredId`/`daemonReachable` come from a successful gateway registration;
@@ -245,7 +245,7 @@ registeredId, uptimeSec }` — a liveness/observability probe (e.g. a Docker
 
 ## Deferred
 
-- **`MATRIX_ENABLE_E2EE` works on both paths** — the standalone `qwen-rc-bridge
+- **`MATRIX_ENABLE_E2EE` works on both paths** - the standalone `qwen-rc-bridge
 matrix` sidecar and the in-process bridge both honor the flag via the shared
   `startBridge` (`cli.ts` resolves which bridges to start via the unit-tested
   `resolveInProcessBridges`, then hands each to `startBridge`).
@@ -259,7 +259,7 @@ matrix` sidecar and the in-process bridge both honor the flag via the shared
   tool-call chunks are skipped to keep rooms readable.
 - A fenced code block that spans a flush boundary (split by the idle timer or the
   16384-byte cap mid-fence) renders as two separate messages, the first with an
-  unterminated fence — its HTML may look garbled. The paragraph/fence-close flush
+  unterminated fence - its HTML may look garbled. The paragraph/fence-close flush
   triggers avoid this for well-formed prose; only an oversized or stalled single
   fence hits it. Link targets are restricted to `http`/`https`/`mailto`; any other
   scheme (`javascript:`, `data:`, …) is rendered as plain text, never a live href.
@@ -280,8 +280,8 @@ matrix` sidecar and the in-process bridge both honor the flag via the shared
 
 ## Verification ceiling
 
-The pure layers — render (incl. reaction-key normalization), sync extraction,
-the room store, the REST client, and the dispatcher — are unit-tested, as is the
+The pure layers - render (incl. reaction-key normalization), sync extraction,
+the room store, the REST client, and the dispatcher - are unit-tested, as is the
 runner's outbound delivery and the sync-loop wiring (with an injected `/sync`).
 The **live `/sync` long-poll against a real homeserver** is not CI-exercised
 (there is no Matrix homeserver in this environment). A boot-smoke confirms the

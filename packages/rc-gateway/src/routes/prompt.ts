@@ -22,13 +22,13 @@ import {
 import { createTurnProgressMeter } from './turnProgress.js';
 
 /**
- * POST /session/:id/prompt — proxy the SDK's daemon.prompt(). Accepts either
+ * POST /session/:id/prompt - proxy the SDK's daemon.prompt(). Accepts either
  * `{ prompt: string }` (turned into a single text block) or
  * `{ blocks: PromptContentBlock[] }` (forwarded verbatim). Long-lived: awaits
  * the daemon's turn and returns its stopReason. A client disconnect does NOT
  * abort the daemon prompt (#38): mobile clients get backgrounded routinely
  * (screen off, app switch) and the OS kills their sockets, but the turn must
- * keep running in the daemon — its events keep landing in the per-session
+ * keep running in the daemon - its events keep landing in the per-session
  * event bus ring, so when the client returns it resumes + watches from the
  * event watermark and the live turn streams to completion. When the client is
  * gone the 200 response is simply skipped; the audit record is written
@@ -75,8 +75,8 @@ export interface PromptRouteOptions {
    */
   queue?: PromptQueue;
   /**
-   * Fired exactly once at the turn's terminal point — success, timeout, or
-   * daemon error — with the outcome (#40). server.ts wires it to the push
+   * Fired exactly once at the turn's terminal point - success, timeout, or
+   * daemon error - with the outcome (#40). server.ts wires it to the push
    * notifier so a backgrounded client hears that the turn ended. Must be
    * sync-safe and never throw: it is called with the queue slot still held.
    */
@@ -129,7 +129,7 @@ export function createPromptRoute(
       return;
     }
 
-    // ── We hold the slot — run the daemon turn ───────────────────────────────
+    // ── We hold the slot - run the daemon turn ───────────────────────────────
     try {
       // Capture attribution BEFORE the turn: the usage events the ingester
       // prices arrive WHILE daemon.prompt() is awaited, so the session→(tokenId,
@@ -142,7 +142,7 @@ export function createPromptRoute(
       }
 
       // Prompt-execution timeout: cancel the daemon turn if it takes too long.
-      // This is the ONLY abort signal passed to the daemon — a client
+      // This is the ONLY abort signal passed to the daemon - a client
       // disconnect deliberately does NOT cancel the turn (see the module doc
       // above, #38): the route keeps awaiting daemon.prompt() after the
       // response closes, and the queue slot below is held until the turn
@@ -259,7 +259,7 @@ export function createPromptRoute(
         },
       });
 
-      // #40: the turn completed — notify backgrounded clients (the push is
+      // #40: the turn completed - notify backgrounded clients (the push is
       // suppressed in the notifier when the session is live-watched).
       opts.onTurnEnd?.(sessionId, {
         ok: true,

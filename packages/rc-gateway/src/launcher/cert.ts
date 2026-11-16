@@ -20,8 +20,8 @@ export type CertOutcome =
 
 /**
  * Obtain a Tailscale TLS cert for `host` into `dir` (`<host>.crt` / `<host>.key`).
- * `tailscale cert` itself is idempotent — it reuses a valid cert and renews when
- * near expiry — so we always invoke it and let it decide.
+ * `tailscale cert` itself is idempotent - it reuses a valid cert and renews when
+ * near expiry - so we always invoke it and let it decide.
  */
 export async function ensureCert(
   run: RunCommand,

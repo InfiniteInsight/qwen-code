@@ -103,7 +103,7 @@ describe('GET /rc/sessions across workspaces (#82)', () => {
   });
 });
 
-describe('GET /rc/sessions across workspaces (#82) — confinement', () => {
+describe('GET /rc/sessions across workspaces (#82) - confinement', () => {
   // The other half of the contract: a named `?cwd` means "that workspace only",
   // which is what the per-workspace views in the UI rely on. Without this the
   // union would silently widen every scoped fetch.
@@ -119,7 +119,7 @@ describe('GET /rc/sessions across workspaces (#82) — confinement', () => {
   });
 });
 
-describe('GET /rc/sessions across workspaces (#82) — set semantics', () => {
+describe('GET /rc/sessions across workspaces (#82) - set semantics', () => {
   // A workspace this gateway worked in but that holds no transcripts must not
   // become a phantom row.
   it('a workspace with no transcripts contributes nothing', async () => {

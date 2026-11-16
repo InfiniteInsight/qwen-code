@@ -23,7 +23,7 @@ import {
   type HasMdnsSocket,
 } from './advertiser.js';
 
-/** A browser handle from `find` — we only need to stop it. */
+/** A browser handle from `find` - we only need to stop it. */
 export interface BrowserHandleLike {
   on(event: 'up', listener: (service: RawBrowseService) => void): void;
   stop?(): void;

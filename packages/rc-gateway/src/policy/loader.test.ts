@@ -104,7 +104,7 @@ rules:
   });
 });
 
-describe('loadPolicy — tool alias normalization and match.operation', () => {
+describe('loadPolicy - tool alias normalization and match.operation', () => {
   it('normalizes a tool-name alias to its ACP kind', () => {
     const p = loadPolicy(`
 rules:
@@ -186,7 +186,7 @@ defaults: { action: prompt }
   });
 });
 
-describe('loadPolicy — aliasedTool contract', () => {
+describe('loadPolicy - aliasedTool contract', () => {
   it('sets aliasedTool to the original name when tool was written as a tool-name alias', () => {
     const p = loadPolicy(`
 rules:
@@ -344,7 +344,7 @@ describe('loadPolicyFile', () => {
   });
 });
 
-describe('loadLayeredPolicy — policy_permissions_warning', () => {
+describe('loadLayeredPolicy - policy_permissions_warning', () => {
   let dir: string | undefined;
 
   afterEach(async () => {

@@ -10,23 +10,23 @@ import { parse } from 'yaml';
 /**
  * Operator config for idle suggestions (`~/.qwen/rc/idle.yaml`).
  *
- * SPEC DEVIATIONS (deliberate, traceable — `add-idle-suggestions`):
+ * SPEC DEVIATIONS (deliberate, traceable - `add-idle-suggestions`):
  *  - `enabled` DEFAULTS TO `false`, NOT the spec's `true`. The spec's "default
  *    shipped config is valid → enabled is true" assumes the in-process DAEMON
  *    design where a synthetic prompt never leaves the workstation. This fork uses
- *    OPTION B — the gateway makes its OWN call to an external model, shipping
- *    recent transcript content off-box — so default-OFF is required: a
+ *    OPTION B - the gateway makes its OWN call to an external model, shipping
+ *    recent transcript content off-box - so default-OFF is required: a
  *    workstation that merely has model creds in its env must never start egressing
  *    transcripts without the operator opting in.
  *  - The spec's `idleAfterSec` (debounce timer) and `syntheticPrompt`
  *    (operator-injected prompt) DO NOT APPLY to option B: idle is detected via the
  *    pump's `hasActivePrompt` true→false poll-tick edge (no timer), and the
  *    gateway builds its own prompt. Those keys are accepted-but-ignored (lenient
- *    parse) so a spec-shaped file still loads — we never ship dead knobs that
+ *    parse) so a spec-shaped file still loads - we never ship dead knobs that
  *    silently do nothing AND we never reject a file for carrying them.
  */
 export interface IdleConfig {
-  /** Master switch — fire-time gate; OFF by default (see deviation note). */
+  /** Master switch - fire-time gate; OFF by default (see deviation note). */
   enabled: boolean;
   /** Per-session rolling-hour cap on suggestion generations (token-bucket ≈). */
   maxSuggestionsPerHour: number;
@@ -55,8 +55,8 @@ function clampInt(n: number, lo: number, hi: number): number {
 /**
  * Parse + validate an idle.yaml document into an {@link IdleConfig}. PURE; throws
  * {@link IdleConfigError} on a wrong-TYPE known field (so an operator typo like
- * `enabled: "yes"` surfaces — the reload path audits it). Unknown fields are
- * IGNORED (lenient — a spec-shaped file with `idleAfterSec`/`syntheticPrompt`
+ * `enabled: "yes"` surfaces - the reload path audits it). Unknown fields are
+ * IGNORED (lenient - a spec-shaped file with `idleAfterSec`/`syntheticPrompt`
  * still loads). Out-of-range numbers are CLAMPED, not rejected. An empty/`null`
  * document yields the defaults.
  */
@@ -106,7 +106,7 @@ export function parseIdleConfig(text: string): IdleConfig {
 /**
  * Apply a hot-reload of idle.yaml text: parse it (may THROW {@link IdleConfigError}
  * for the caller to audit + retain the previous config) and then re-apply the
- * boot precedence — the `QWEN_RC_IDLE_SUGGESTIONS` env override forces
+ * boot precedence - the `QWEN_RC_IDLE_SUGGESTIONS` env override forces
  * `enabled: true` regardless of the file, so a reload can never silently disable
  * a feature the operator turned on via the env. Pure.
  */
@@ -121,7 +121,7 @@ export function applyIdleReload(
 
 /**
  * Boot loader: read `path` and parse it, FAIL-OPEN to {@link DEFAULT_IDLE_CONFIG}
- * on a missing file (ENOENT) OR a malformed one (logged via `warn`) — idle
+ * on a missing file (ENOENT) OR a malformed one (logged via `warn`) - idle
  * suggestions are enrichment, so a bad config must never crash boot. (The
  * hot-reload path, added in a later slice, calls {@link parseIdleConfig} directly
  * so it can audit a parse failure while RETAINING the previously good config.)

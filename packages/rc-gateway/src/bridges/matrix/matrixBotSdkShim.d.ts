@@ -11,14 +11,14 @@
  *
  * Why the shim exists at all:
  * 1. Both packages declare `engines: node >= 24`; on Node 22 (this repo's
- *    CI runtime) npm SILENTLY SKIPS these optionalDependencies (no error —
+ *    CI runtime) npm SILENTLY SKIPS these optionalDependencies (no error -
  *    empty scope dirs left behind), so `@vector-im/matrix-bot-sdk` is not
  *    on disk for tsc to resolve and the dynamic import fails with TS2307.
  *    The shim lets the build pass there, matching the runtime reality the
  *    adapter's try/catch already handles (missing module → degrade to the
  *    plain bridge, E2EE off).
  * 2. On Node ≥ 24 the packages install and the vector fork's own
- *    declarations (`typings: ./lib/index.d.ts`) would apply — the surface
+ *    declarations (`typings: ./lib/index.d.ts`) would apply - the surface
  *    below mirrors them (verified against 0.10.0-element.0), so the same
  *    call sites typecheck identically on both runtimes. If the SDK is
  *    bumped, re-verify the surface and update the shim.
@@ -84,7 +84,7 @@ declare module '@vector-im/matrix-bot-sdk' {
 declare module '@matrix-org/matrix-sdk-crypto-nodejs' {
   /**
    * Store-type selector. The real package declares it as a `const enum`
-   * (`Sqlite = 0`) in its index.d.ts — a plain object here mirrors the
+   * (`Sqlite = 0`) in its index.d.ts - a plain object here mirrors the
    * runtime shape (the adapter sources the runtime value from this
    * package, see the comment at the call site in cryptoAdapter.ts).
    */

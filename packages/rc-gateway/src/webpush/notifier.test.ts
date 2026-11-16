@@ -135,7 +135,7 @@ describe('PushNotifier', () => {
       keys: { p256dh: 'p', auth: 'a' },
     });
     const notifier = new PushNotifier(tokens, store, sender);
-    // Event for a DIFFERENT session s2 — the s1-locked guest must not receive it.
+    // Event for a DIFFERENT session s2 - the s1-locked guest must not receive it.
     await notifier.notify(
       {
         type: 'permission_request',
@@ -237,7 +237,7 @@ describe('PushNotifier', () => {
     expect(sent.map((s) => s.endpoint)).toEqual(['https://push.example.com/a']);
     // B and C are suppressed by their prefs filter, each AUDITED (cycle 53): a
     // prefs mute is a suppression DECISION ("why no push"), not a silent
-    // boundary — in fan-out order (A sent, then B, then C suppressed).
+    // boundary - in fan-out order (A sent, then B, then C suppressed).
     const prefsSkips = notifierAudit.calls.filter(
       (c) => c.action === 'push_suppressed',
     );
@@ -622,7 +622,7 @@ describe('PushNotifier', () => {
       },
       { sessionId: 's1', sessionName: 'demo' },
     );
-    expect(sent).toHaveLength(1); // unchanged — the 2nd was dropped
+    expect(sent).toHaveLength(1); // unchanged - the 2nd was dropped
 
     // Swap back to undefined → delivery resumes.
     notifier.setRouting(undefined);
@@ -649,7 +649,7 @@ describe('PushNotifier', () => {
     const snooze = await SnoozeStore.open(join(snoozeDir, 'snooze.state'));
     await snooze.snooze(60, 'all');
     const notifierAudit = fakeAudit();
-    // A matcher that WOULD drop — but snooze fires first, so the recorded
+    // A matcher that WOULD drop - but snooze fires first, so the recorded
     // reason must be 'snoozed', proving the routing gate sits after snooze.
     const routing = { firstDrop: () => 'would-drop' };
 
@@ -741,7 +741,7 @@ describe('PushNotifier', () => {
   });
 
   it('scopeIn:[share] drops a real share token via a compiled matcher (end-to-end)', async () => {
-    // A share issued the way routes/share.ts mints them — carrying SHARE — so
+    // A share issued the way routes/share.ts mints them - carrying SHARE - so
     // scopesFor surfaces 'share' to the matcher's scopeIn check. Proves the
     // headline "mute guest shares" path through the REAL compiled matcher.
     const share = await tokens.issueShare({
@@ -1004,7 +1004,7 @@ rules:
     expect(audit.calls.some((c) => c.action === 'push_suppressed')).toBe(false);
   });
 
-  it('handles a midnight-wrapping quiet window (23:00–07:00) at 02:00', async () => {
+  it('handles a midnight-wrapping quiet window (23:00-07:00) at 02:00', async () => {
     const subId = await approverWithSub();
     await store.setQuietHours(subId, {
       from: '23:00',
@@ -1601,7 +1601,7 @@ describe('PushNotifier.flushQuietDigests (D4 end-of-quiet digest)', () => {
   });
 });
 
-describe('PushNotifier — APNs fan-out', () => {
+describe('PushNotifier - APNs fan-out', () => {
   const PERM = {
     type: 'permission_request',
     data: { toolCall: { kind: 'execute', title: 'bash' }, requestId: 'r1' },
@@ -1636,7 +1636,7 @@ describe('PushNotifier — APNs fan-out', () => {
       undefined,
       { store: apnsStore, sender: apns },
     );
-    // Event for a DIFFERENT session — the s1-locked guest's device must not get it.
+    // Event for a DIFFERENT session - the s1-locked guest's device must not get it.
     await notifier.notify(PERM, { sessionId: 's2' });
     expect(apns.sends).toHaveLength(0);
     // Its OWN session's event IS delivered.
@@ -2069,7 +2069,7 @@ describe('PushNotifier watched-session suppression (#40)', () => {
     const watched = new Map([['s1', true]]);
     const { notifier } = await setup(watched);
     // session.recovered is scope-gated at session:read like the turn kinds
-    // but is NOT in WATCHED_SUPPRESS_KINDS — a live watch must not gate it.
+    // but is NOT in WATCHED_SUPPRESS_KINDS - a live watch must not gate it.
     await notifier.notify(
       { type: 'session_recovered', data: { sessionId: 's1', tookMs: 42 } },
       { sessionId: 's1' },

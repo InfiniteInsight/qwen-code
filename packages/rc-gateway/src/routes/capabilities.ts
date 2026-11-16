@@ -133,7 +133,7 @@ async function readDaemonStatus(
 }
 
 /**
- * GET /rc/capabilities — the gateway's capability surface. The daemon's own
+ * GET /rc/capabilities - the gateway's capability surface. The daemon's own
  * `/capabilities` is un-editable under the fork boundary, so the gateway serves
  * its own `remoteControl` block. Always mounted (mDNS reports here even when cost
  * tracking is off); any authenticated token; no secrets. What a token sees is
@@ -142,8 +142,8 @@ async function readDaemonStatus(
  * guest gets only the flags the page needs for its one conversation.
  *
  * Composes optional sub-blocks from deps:
- *  - `costTracking` — only when a usage store is wired (`add-cost-tracking`).
- *  - `mdns` — `{ advertising, instanceName? }` (`add-mdns-discovery`); the spec's
+ *  - `costTracking` - only when a usage store is wired (`add-cost-tracking`).
+ *  - `mdns` - `{ advertising, instanceName? }` (`add-mdns-discovery`); the spec's
  *    `version` is sourced from {@link RC_PROTOCOL_VERSION}, the same constant the
  *    mDNS TXT record advertises, so the two never drift.
  *
@@ -164,7 +164,7 @@ async function readDaemonStatus(
  * older UI refuses to render without, so a daemon that is down or slow must
  * cost the daemon's list and nothing else. Absence of the list is reported as
  * `daemon: { available: false }` rather than by omitting the key, so a UI can
- * tell "the daemon supports nothing" apart from "we could not ask" — the
+ * tell "the daemon supports nothing" apart from "we could not ask" - the
  * second must not hide the sections that only the gateway serves.
  */
 export function createCapabilityRoute(deps: {

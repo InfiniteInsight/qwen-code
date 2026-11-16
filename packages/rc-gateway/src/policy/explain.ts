@@ -34,24 +34,24 @@ export class ExplainArgsError extends Error {}
  * - `--args=V`: if `V` parses as a JSON object/array → that value; otherwise the
  *   RAW string. NOTE: real enforcement sees `args` as the tool INPUT OBJECT, so
  *   a structure-sensitive `argsGlob` matches against the JSON encoding; a
- *   bare-string `--args` is a convenience that can diverge from that — pass the
+ *   bare-string `--args` is a convenience that can diverge from that - pass the
  *   JSON input object for an exact match.
  * - `--path=V`: sets `ctx.paths = [V]` directly, so a `pathGlob` rule can match
  *   the simulated call. If `args` is a plain object, also sets its `.path`
  *   (when absent, purely for display/argsGlob purposes); otherwise `--path`
  *   WINS → `args = { path: V }` (a bare-string `--args` is dropped for path
- *   purposes — the single `args` field cannot be both a clean match string
+ *   purposes - the single `args` field cannot be both a clean match string
  *   and a path-bearing object).
  * - `--operation=V`: populates `ctx.operations`, for `match.operation` rules.
  *   Repeatable (`--operation=read --operation=write`) and/or comma-separated
  *   (`--operation=read,write`); values are validated against
- *   `read | write | execute` — an invalid value throws {@link ExplainArgsError}
+ *   `read | write | execute` - an invalid value throws {@link ExplainArgsError}
  *   (previously `ctx.operations` was never set by this CLI, so an
  *   `operation`-matching rule could never be shown matching).
  * - `--scope=V` → `originScope`; `--tag=V` → `sessionTag`.
  * - `--project-root=V` → overrides the `process.cwd()` default for both
  *   `ctx.projectRoot` and `ctx.cwd` (real enforcement anchors `pathGlob` to the
- *   daemon's own workspace, not wherever `policy explain` happens to run —
+ *   daemon's own workspace, not wherever `policy explain` happens to run -
  *   without this flag, running `explain` outside that workspace can report a
  *   verdict that diverges from what the running gateway would actually do).
  */
@@ -135,7 +135,7 @@ export function parseExplainArgs(argv: string[]): ParsedExplain {
  * Render a {@link PolicyExplanation} as human-readable lines: each rule in
  * evaluation order with a MATCHED / SKIPPED / not-reached annotation, then the
  * authoritative decision and its source. When the matched winner carries a
- * `maxPerWindow` whose quota was not consulted (the dry run has no live store —
+ * `maxPerWindow` whose quota was not consulted (the dry run has no live store -
  * `trace[].quotaNotEvaluated`), a caveat notes the runtime result could differ.
  */
 export function formatExplanation(exp: PolicyExplanation): string {
@@ -176,7 +176,7 @@ export function formatExplanation(exp: PolicyExplanation): string {
       'note: maxPerWindow is not evaluated in this dry run (no live quota ' +
         'store); at runtime the matched rule applies with its real action ' +
         'while it has quota room, or is skipped once exhausted (a later rule ' +
-        'or the default then decides) — so the live result may differ from ' +
+        'or the default then decides) - so the live result may differ from ' +
         'what is shown here.',
     );
   }

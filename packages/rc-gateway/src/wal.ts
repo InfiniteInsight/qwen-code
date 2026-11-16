@@ -62,7 +62,7 @@ export interface WalFrame {
   [extra: string]: unknown;
 }
 
-/** Result of a replay request — discriminated on `truncated`. */
+/** Result of a replay request - discriminated on `truncated`. */
 export type ReplayResult =
   | { truncated: false; events: WalFrame[] }
   | {
@@ -815,7 +815,7 @@ export class SessionWal {
  * recovery marker frames) MUST obtain its instance from here. `latestId()` is
  * in-memory per instance: two instances on the same segments diverge, and the
  * id-continuity renumbering (add-mid-turn-recovery §4) anchors a new epoch's
- * offset to the shared instance's `latestId()` — a stale duplicate instance
+ * offset to the shared instance's `latestId()` - a stale duplicate instance
  * would re-anchor too low and write a colliding WAL id.
  */
 /**
@@ -1027,7 +1027,7 @@ export function encodeFrame(frame: WalFrame): Buffer {
  * Forward-scan a buffer yielding decoded frames with byte sizes. A torn
  * trailing frame (the length prefix promises more bytes than remain, or the
  * prefix itself is partial) is treated as a truncated tail and silently
- * ignored — we stop the scan rather than crash.
+ * ignored - we stop the scan rather than crash.
  */
 function* decodeBuffer(
   buf: Buffer,

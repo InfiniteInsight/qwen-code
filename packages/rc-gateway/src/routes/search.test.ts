@@ -256,7 +256,7 @@ describe('search route', () => {
     expect(((await res.json()) as { code: string }).code).toBe(
       'search_timeout',
     );
-    // Audited as a timeout — count-free, and never the query text.
+    // Audited as a timeout - count-free, and never the query text.
     const a = audit.calls.find((c) => c.action === 'search_performed');
     expect(a!.detail).toEqual({ kind: 'all', timedOut: true });
     expect(JSON.stringify(audit.calls)).not.toContain('oauth');
@@ -379,7 +379,7 @@ describe('search route', () => {
       shareLabel: 'guest',
     };
     const url = await mount(async () => dir);
-    // Attempt to read the OTHER session via ?sessionId — must be ignored.
+    // Attempt to read the OTHER session via ?sessionId - must be ignored.
     const res = await fetch(`${url}/rc/search?q=oauth&sessionId=sess-2`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { hits: Array<{ eventId: string }> };

@@ -18,7 +18,7 @@ describe('InviteStore', () => {
     });
   });
 
-  it('is single-use — a second redeem of the same token fails', () => {
+  it('is single-use - a second redeem of the same token fails', () => {
     const store = new InviteStore();
     const { token } = store.mint('discord', 'sess_1');
     expect(store.redeem(token)).not.toBeNull();

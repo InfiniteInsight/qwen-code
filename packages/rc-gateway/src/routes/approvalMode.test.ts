@@ -130,7 +130,7 @@ describe('POST /session/:id/approval-mode', () => {
   it('a session-locked write share token is 403d on a DIFFERENT session (session_locked, no daemon call)', async () => {
     // Guards against a session-locked share token (write scope, locked to
     // "other-session") reaching an approval-mode change on SESSION_ID
-    // ("s1") — cross-session integrity: enforceSessionLock must run on this
+    // ("s1") - cross-session integrity: enforceSessionLock must run on this
     // mount exactly as it does on the sibling fork/rewind mounts.
     const ctx = await setup();
     const share = await ctx.store.issueShare({

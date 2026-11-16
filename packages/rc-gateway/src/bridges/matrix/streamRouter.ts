@@ -8,17 +8,17 @@
  * Routes streamed `session_update` text into bound Matrix rooms
  * (`add-matrix-bridge`: "session_update rendering with full Markdown" + "Threads
  * on long streams via m.thread"). Mirrors the Discord stream router's three
- * concerns — buffering, ordered serialized posting, and session-scoped turns with
- * room-scoped counts — but adapted to Matrix:
+ * concerns - buffering, ordered serialized posting, and session-scoped turns with
+ * room-scoped counts - but adapted to Matrix:
  *
  * - FLUSH triggers: a paragraph break / fenced-code close, OR the buffer reaches
  *   16384 bytes, OR 1500 ms idle. Matrix's per-event limit is 65536 bytes, ~4× the
- *   flush threshold, so a flush is sent as a SINGLE event — no 2000-char-style
+ *   flush threshold, so a flush is sent as a SINGLE event - no 2000-char-style
  *   splitter (a pathological single chunk > 65536 is not split; the threshold
  *   makes that effectively impossible for streamed agent prose).
  * - THREADS: after 6 messages posted to a room within one turn, the 7th and later
  *   carry an `m.relates_to { rel_type: "m.thread", event_id: <first msg> }`
- *   relation — no separate create-thread call (unlike Discord); the relation IS
+ *   relation - no separate create-thread call (unlike Discord); the relation IS
  *   the thread.
  * - A turn is SESSION-scoped (one stream fans out to N rooms); the count + anchor
  *   are ROOM-scoped (lazy reset when the session's turn advances). A turn ends at

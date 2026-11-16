@@ -26,7 +26,7 @@ const ok = (stdout = ''): CommandResult => ({ code: 0, stdout, stderr: '' });
 
 // A short static self-signed EC cert fixture (10-year validity), used only to
 // exercise the real `X509Certificate(...).validTo` parse path in
-// `readCertExpiry` — generated once via:
+// `readCertExpiry` - generated once via:
 //   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
 //     -keyout /dev/null -out fixture.crt -days 3650 -nodes -subj "/CN=test.ts.net"
 const FIXTURE_CERT = `-----BEGIN CERTIFICATE-----
@@ -41,7 +41,7 @@ BgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0gAMEUCIBMkIA5rkPP1ObJJzo1w
 cukmM3E=
 -----END CERTIFICATE-----
 `;
-// Expected ISO expiry, derived the same way `readCertExpiry` does — proves
+// Expected ISO expiry, derived the same way `readCertExpiry` does - proves
 // the orchestrator's parse matches reality without hardcoding a date string
 // that would drift if the fixture is ever regenerated.
 const FIXTURE_CERT_EXPIRY_ISO = new Date(
@@ -73,7 +73,7 @@ const DEPS = (d: string, run: RunCommand) => ({
 });
 
 // tailnet Running + cert ok; the is-active answer is read live from `active()`,
-// and `onStart` fires when the gateway unit is launched — so a test can model
+// and `onStart` fires when the gateway unit is launched - so a test can model
 // "inactive until started" (exercises the start path + idempotency). `onStop`
 // fires with the unit name systemctl was asked to stop, so a test can assert
 // which unit was actually recorded/stopped rather than just that stop ran.
@@ -125,7 +125,7 @@ describe('up', () => {
     expect(res.qr!.length).toBeGreaterThan(0);
   });
 
-  it('is idempotent — a second up does not start a second unit', async () => {
+  it('is idempotent - a second up does not start a second unit', async () => {
     const d = mkdir();
     let starts = 0;
     const run = base(
@@ -209,7 +209,7 @@ describe('up', () => {
 });
 
 describe('upJson', () => {
-  it('never includes bootstrapCode — the --json payload must not leak the one-time OWNER credential', () => {
+  it('never includes bootstrapCode - the --json payload must not leak the one-time OWNER credential', () => {
     const r = {
       ok: true,
       url: 'https://laptop-wsl.tn.ts.net:8443/ui/',
@@ -251,7 +251,7 @@ describe('renderQr', () => {
 
 describe('certExpiry', () => {
   // `tailscale cert` here actually writes the fixture cert to the requested
-  // `--cert-file` path, so `up`'s `readCertExpiry` reads a real file — this
+  // `--cert-file` path, so `up`'s `readCertExpiry` reads a real file - this
   // exercises the X509Certificate parse itself, not just the wiring.
   function withRealCert(
     active: () => boolean,
@@ -308,7 +308,7 @@ describe('certExpiry', () => {
 });
 
 describe('bootstrap code polling', () => {
-  // `up`'s step 4 no longer reads owner-bootstrap.code synchronously — it
+  // `up`'s step 4 no longer reads owner-bootstrap.code synchronously - it
   // polls, because the gateway unit writes that file from its own process
   // well after `systemd-run` returns. These three cases pin the poll's
   // observable behavior; the shared `DEPS` helper already sets
@@ -340,7 +340,7 @@ describe('bootstrap code polling', () => {
         starts++;
       },
     );
-    // The gateway "finishes booting" a few poll intervals in — write the
+    // The gateway "finishes booting" a few poll intervals in - write the
     // file from a timer, not synchronously, so the poll loop actually has
     // to retry rather than seeing it on the first check.
     setTimeout(() => {
@@ -375,7 +375,7 @@ describe('bootstrap code polling', () => {
     expect(res.bootstrapCode).toBeUndefined();
     expect(res.hint).toMatch(/starting|status/i);
     // The note must actually reach the --json surface (upJson passes `hint`
-    // through unconditionally) — that's the mechanism this finding relies on
+    // through unconditionally) - that's the mechanism this finding relies on
     // to let a machine caller learn "still starting, retry/poll status".
     expect(upJson(res)['hint']).toMatch(/starting|status/i);
   });

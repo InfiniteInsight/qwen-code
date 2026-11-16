@@ -7,7 +7,7 @@
 import type { TgButton } from './render.js';
 
 /**
- * Thin Telegram Bot API client over `fetch` — NO SDK dependency (the Bot API is
+ * Thin Telegram Bot API client over `fetch` - NO SDK dependency (the Bot API is
  * plain HTTPS JSON), so no new supply-chain surface enters the gateway process
  * (the hybrid tradeoff: the chat dep stays a stdlib `fetch`, not a package). Only
  * the three methods the bridge needs: long-poll `getUpdates`, `sendMessage`,
@@ -113,7 +113,7 @@ export class TelegramBotApi {
   }
 
   /**
-   * Edit an existing message in place — used to clear the inline keyboard and
+   * Edit an existing message in place - used to clear the inline keyboard and
    * append the outcome when a `permission_resolved` event arrives.
    */
   async editMessageText(

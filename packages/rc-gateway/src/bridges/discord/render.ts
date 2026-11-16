@@ -9,14 +9,14 @@ import type { BridgeHints } from '../hints.js';
 /**
  * Pure Discord translation (`add-discord-bridge`): daemon `permission_request`
  * frames → a Discord message with message components (an ActionRow of buttons),
- * and button clicks ↔ gateway votes. No I/O, no SDK — just the wire shapes Discord
+ * and button clicks ↔ gateway votes. No I/O, no SDK - just the wire shapes Discord
  * expects on `POST /channels/:id/messages` and the `custom_id` round-trip. Kept
  * pure so the rendering contract is unit-testable without a bot token or a live
  * gateway connection.
  *
  * Discord differs from Telegram in three ways that matter here, all reflected
- * below: ids are SNOWFLAKES (64-bit, carried as STRINGS — never `Number()`, which
- * rounds past 2^53 for the 17–19 digit ids Discord uses); the actionable surface
+ * below: ids are SNOWFLAKES (64-bit, carried as STRINGS - never `Number()`, which
+ * rounds past 2^53 for the 17-19 digit ids Discord uses); the actionable surface
  * is message components (ActionRow → Buttons), not an inline keyboard; and the
  * per-component `custom_id` is capped at 100 CHARACTERS (not Telegram's 64 bytes).
  */
@@ -61,7 +61,7 @@ const CUSTOM_ID_MAX = 100;
 /**
  * The per-sender sub-actor id for a Discord user snowflake. Snowflakes are
  * immutable and globally unique (usernames are mutable, discriminators
- * deprecated) — carried verbatim as a STRING, never coerced to a number.
+ * deprecated) - carried verbatim as a STRING, never coerced to a number.
  */
 export function subActorOf(snowflake: string): string {
   return `discord:${snowflake}`;
@@ -99,7 +99,7 @@ export function parseCustomId(
  *    (Danger) buttons whose custom_id carries the vote.
  *  - `deeplink`→ argsSummaryShort + a single Link button "Open in web client";
  *    NEVER includes argsSummaryFull (so a sensitive/large call isn't dumped to
- *    the channel — the user opens the web client to see full args and approve).
+ *    the channel - the user opens the web client to see full args and approve).
  * `baseUrl` is the gateway URL the deeplink points at.
  */
 export function renderPermissionRequest(
@@ -135,7 +135,7 @@ export function renderPermissionRequest(
     };
   }
 
-  // inline (default): Approve/Deny. custom_id is bounded at 100 chars — request
+  // inline (default): Approve/Deny. custom_id is bounded at 100 chars - request
   // ids are short in practice; an over-long id is clamped to inert (a production
   // bridge would map it to a short token).
   return {

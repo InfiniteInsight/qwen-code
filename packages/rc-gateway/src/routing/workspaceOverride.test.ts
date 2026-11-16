@@ -122,7 +122,7 @@ describe('loadLayeredRoutingMatcher', () => {
     expect(r.ruleCount).toBe(1);
     expect(r.matcher?.firstDrop(EV)).toBe('w');
     // The user-layer label is 'ignoring routing.yaml:'; the workspace label is
-    // 'ignoring workspace routing.yaml:' — assert the user one specifically.
+    // 'ignoring workspace routing.yaml:' - assert the user one specifically.
     expect(warnings.some((w) => w.includes('ignoring routing.yaml'))).toBe(
       true,
     );

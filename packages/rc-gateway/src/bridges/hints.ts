@@ -34,13 +34,13 @@ function truncateSummary(s: string): string {
 }
 
 /**
- * Secret-looking content in tool-call args — a key or value that smells like a
+ * Secret-looking content in tool-call args - a key or value that smells like a
  * credential. Conservative (false-positives just downgrade to a deeplink).
  *
  * Beyond the keyword matches, this also matches specific high-signal formats
  * that carry NO adjacent keyword at all:
  *  - PEM key headers (`-----BEGIN PRIVATE KEY-----`, `-----BEGIN RSA PRIVATE
- *    KEY-----`, etc.) — the keyword alternative `private[_-]?key` only matches
+ *    KEY-----`, etc.) - the keyword alternative `private[_-]?key` only matches
  *    an underscore/hyphen form and never matches the PEM header's literal
  *    space + ALL-CAPS text.
  *  - Bare vendor token prefixes: GitHub (`ghp_`, `github_pat_`, `gho_`,
@@ -53,7 +53,7 @@ function truncateSummary(s: string): string {
  * bounded/near-linear in practice: the `[A-Z ]*` class inside the PEM
  * alternative is only entered after the literal `-----BEGIN ` prefix has
  * matched, so it cannot chain with another quantifier to blow up. Note this
- * regex runs (below) on the RAW, uncapped `rawFull` string — the
+ * regex runs (below) on the RAW, uncapped `rawFull` string - the
  * `MAX_FULL_BYTES` length cap is applied afterward, only to the value stored
  * in `argsSummaryFull`.
  */
@@ -72,7 +72,7 @@ export type BridgeSurface = 'inline' | 'deeplink';
  * contract (the field vocabulary discord/matrix bridges also consume). A bridge
  * uses `recommendedSurface` to decide between inlining args into the chat message
  * (`inline`) and showing a short summary + "open in web client" deeplink
- * (`deeplink`) — so secrets aren't echoed into a group chat and a huge diff isn't
+ * (`deeplink`) - so secrets aren't echoed into a group chat and a huge diff isn't
  * dumped into Telegram.
  */
 export interface BridgeHints {
@@ -167,7 +167,7 @@ function summariseAcp(tc: Record<string, unknown>): {
 }
 
 /**
- * Compute {@link BridgeHints} for a tool call. PURE + total (never throws — a
+ * Compute {@link BridgeHints} for a tool call. PURE + total (never throws - a
  * weird/unserializable shape degrades to a safe deeplink). The classification is
  * DETERMINISTIC given the tool name + args (spec requirement): a secret-looking
  * key/value → `high`; a mutating tool → at least `medium`; else `low`.

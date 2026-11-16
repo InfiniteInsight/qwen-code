@@ -15,7 +15,7 @@ export interface DigestSummary {
 
 /**
  * Tracks pushes suppressed during a subscription's quiet hours, per
- * `(subscriptionId, kind)` — the "what you missed while away" accumulation
+ * `(subscriptionId, kind)` - the "what you missed while away" accumulation
  * behind design D4. PURE in-memory bookkeeping: `record` only counts, it never
  * suppresses anything (the suppression already happened in the notifier), so
  * unlike the coalescer this is ALWAYS-ON with no fail-closed risk. Every method

@@ -98,7 +98,7 @@ export interface StubDaemon {
   /** Body of the most recent POST /workspace/trust/request request. */
   lastTrustRequestBody: unknown;
   /**
-   * Body of the most recent POST /workspace/settings request — captures
+   * Body of the most recent POST /workspace/settings request - captures
    * `mcpServerMutation` so MCP server tests can assert the operation/name
    * without inspecting the raw value.
    */
@@ -361,7 +361,7 @@ export interface StubDaemonOptions {
    * for tests that want to script permission-request notifications a
    * `subscribeEvents` consumer (e.g. the review permission bridge, which
    * subscribes with `lastEventId: 0` and expects a full replay) will see.
-   * Ids are assigned sequentially continuing on from `frames` — so with the
+   * Ids are assigned sequentially continuing on from `frames` - so with the
    * default two `frames`, the first `permissionFrames` entry lands at id 3.
    * Pass `frames: []` alongside this if a test needs the replay to contain
    * only the scripted permission frames.
@@ -414,8 +414,8 @@ export interface StubDaemonOptions {
   capabilitiesStatus?: number;
   /**
    * The `features` list GET /capabilities advertises (default: none). The page
-   * gates whole panels on these tags — index.html reads `workspace_file_read`
-   * before it will even show the file browser — so a scenario that drives such
+   * gates whole panels on these tags - index.html reads `workspace_file_read`
+   * before it will even show the file browser - so a scenario that drives such
    * a panel has to advertise the tag. Left empty, the panel stays hidden and
    * the scenario would assert against markup no user can reach.
    */
@@ -670,7 +670,7 @@ export interface StubDaemonOptions {
    */
   workspaceTrustResult?: unknown;
   /**
-   * Status for POST /workspace/trust/request (default 202 — the daemon
+   * Status for POST /workspace/trust/request (default 202 - the daemon
    * accepts the request and reconciles asynchronously). Non-202 →
    * `trustRequestErrorBody ?? { error }`.
    */
@@ -1367,7 +1367,7 @@ export async function startStubDaemon(
     // (:3063): every cell is a DaemonStatusCell ({ kind, status, error?,
     // errorKind?, hint? }) plus kind/name/present?/value?.
     // The env_var cell deliberately carries NO value, because the type says a
-    // value is ALWAYS omitted for that kind (:3067) — a stub that sent one
+    // value is ALWAYS omitted for that kind (:3067) - a stub that sent one
     // would let a page pass by printing a secret the real daemon never puts on
     // the wire. Presence is the whole fact about an env var.
     res.json(
@@ -1410,9 +1410,9 @@ export async function startStubDaemon(
     }
     // Shaped off DaemonWorkspacePreflightStatus (types.ts:3100) and
     // DaemonPreflightCell (:3094): a DaemonStatusCell plus kind/locality/
-    // detail?. The three states below are on purpose — a passing check, a
+    // detail?. The three states below are on purpose - a passing check, a
     // degraded one carrying the daemon's own hint, and a hard failure with an
-    // errorKind from the closed taxonomy — because the panel's job is to draw
+    // errorKind from the closed taxonomy - because the panel's job is to draw
     // all three in the daemon's words, and a fixture where everything is ok
     // proves only the happy path.
     res.json(
@@ -4170,7 +4170,7 @@ export async function startStubDaemon(
       }
     };
     if (opts.promptDelayMs) {
-      // Detect real client disconnection via the socket — NOT req, which emits
+      // Detect real client disconnection via the socket - NOT req, which emits
       // 'close' immediately after the POST body is consumed by express.json(),
       // even though the TCP connection is still open.
       let settled = false;

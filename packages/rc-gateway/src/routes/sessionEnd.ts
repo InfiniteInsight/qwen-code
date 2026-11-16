@@ -9,13 +9,13 @@ import type { SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 
 /**
- * POST /session/:id/end — tell the daemon to end (terminate) the named session.
+ * POST /session/:id/end - tell the daemon to end (terminate) the named session.
  *
  * Write-scoped. On success the daemon emits `session_died` with
  * `reason: "ended_by_client"` on the session's event stream (spec:
  * remote-session-host "Requirement: Explicit session termination").
  *
- * The gateway does not need to fan-out anything itself here — the daemon's
+ * The gateway does not need to fan-out anything itself here - the daemon's
  * `session_died` event flows naturally through the live SSE relay.
  */
 export function createSessionEndRoute(

@@ -11,7 +11,7 @@ import type { AuditRecorder } from '../auditLog.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
 
 /**
- * GET /session/:id/transcript — relay one page of the daemon's STORED
+ * GET /session/:id/transcript - relay one page of the daemon's STORED
  * transcript. The viewer already holds a transcript, but only the one the live
  * watch stream has handed it since the page opened. This route is the stored
  * form: what the session actually persisted, readable from the first record,
@@ -20,7 +20,7 @@ import { isValidSessionId } from '../sessions/chatsPath.js';
  * The query is RELAYED, never re-implemented. The daemon owns the paging
  * vocabulary (`cursor`, `beforeRecordId`, `atRecordId` + `snapshot`,
  * `direction`, `limit`, `compactedReplayMode`) and it owns the rules about
- * which of them may appear together — `atRecordId` needs `snapshot`,
+ * which of them may appear together - `atRecordId` needs `snapshot`,
  * `direction` excludes every other anchor, and a cursor and a record boundary
  * are mutually exclusive. Answering 400 `invalid_transcript_cursor` is that
  * validator's job. A copy of those combination rules in this file would read as
@@ -45,7 +45,7 @@ export function createSessionTranscriptRoute(
 ): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;
-    // Reject a malformed/path-traversal-shaped id before any daemon call —
+    // Reject a malformed/path-traversal-shaped id before any daemon call -
     // mirrors the sibling session routes (events, fork, rewind, export).
     if (!isValidSessionId(sessionId)) {
       res
@@ -100,7 +100,7 @@ export function createSessionTranscriptRoute(
       });
       res.status(200).json(page);
     } catch (err) {
-      // Three failures, three answers, none of them a laundered 502 — the same
+      // Three failures, three answers, none of them a laundered 502 - the same
       // discipline as the export route.
       //
       // The daemon's 400 is a bad paging combination. Flattening it into a

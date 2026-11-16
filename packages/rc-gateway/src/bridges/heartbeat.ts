@@ -10,7 +10,7 @@
  * `/rc/bridges/:id/heartbeat` or the gateway's reaper drops it after ~3 missed
  * beats. Every bridge runner runs this loop so a live bridge stays listed.
  *
- * On a `404` the gateway no longer knows this bridge — it was reaped (a transient
+ * On a `404` the gateway no longer knows this bridge - it was reaped (a transient
  * stall) OR the gateway restarted and lost its in-memory registry. Either way the
  * loop calls `reRegister` (re-registration needs no re-pairing, per spec), which
  * also recovers the post-gateway-restart case the one-shot start() register
@@ -59,7 +59,7 @@ const DEFAULT_HEARTBEAT_MS = 60_000;
 
 /**
  * The heartbeat cadence (ms) a bridge should use, read from its register
- * response body's `heartbeatIntervalSec` (contract-driven — the gateway dictates
+ * response body's `heartbeatIntervalSec` (contract-driven - the gateway dictates
  * the cadence). Falls back to 60 s for a missing/invalid value.
  */
 export function heartbeatIntervalMsOf(body: unknown): number {

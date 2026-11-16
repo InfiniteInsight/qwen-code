@@ -27,22 +27,22 @@ import {
 
 // NOTE ON ISOLATION: this is the ONLY module that imports the NATIVE
 // `better-sqlite3`. It is imported solely from the `reindex` / `search --rank`
-// CLI branches — never from the barrel (`index.ts`), the gateway app, or the
-// e2e — so `qwen serve`, the running gateway, and the test suite never load the
+// CLI branches - never from the barrel (`index.ts`), the gateway app, or the
+// e2e - so `qwen serve`, the running gateway, and the test suite never load the
 // native addon, and a native-load failure can never take down the gateway.
 
 /**
  * Turn a raw user query into a SAFE FTS5 MATCH string. Each whitespace-separated
  * term is stripped of `"` and double-quoted, so it is matched as a literal
  * string (FTS5 operators like `OR`/`NOT`/`NEAR`, and syntax chars like `*`/`(`,
- * are inert inside quotes) — this is the injection guard: a raw user string is
- * NEVER passed to MATCH. Terms with no LETTER-OR-NUMBER content (any script —
+ * are inert inside quotes) - this is the injection guard: a raw user string is
+ * NEVER passed to MATCH. Terms with no LETTER-OR-NUMBER content (any script -
  * the `trigram` tokenizer that indexes the body handles CJK/Cyrillic/etc., so
  * the keep-predicate must too) are dropped; an all-empty query yields `null`
  * (→ no results, never an FTS5 syntax error).
  *
  * With the `trigram` tokenizer each quoted term matches as a case-insensitive
- * SUBSTRING (like the live scanner), AND-ed across terms — but the `--rank` mode
+ * SUBSTRING (like the live scanner), AND-ed across terms - but the `--rank` mode
  * drops the scanner's boolean/phrase/prefix operators, and a term shorter than 3
  * chars can't match via the index (a trigram floor, uniform across scripts). So
  * it is a complementary BM25-ranked mode, not a reproduction of `parseQuery`.
@@ -107,11 +107,11 @@ export class SearchIndex {
       /* best-effort */
     }
     // The `trigram` tokenizer gives case-insensitive SUBSTRING matching (like
-    // the live scanner) AND indexes any script incl. CJK — unlike the default
+    // the live scanner) AND indexes any script incl. CJK - unlike the default
     // `unicode61`, which treats a space-less CJK run as one token so a substring
     // like 令牌 inside 令牌然后重试 would never match. Trigram's one limitation:
     // a query TERM shorter than 3 chars cannot match via the index (it has no
-    // trigram), uniform across scripts — the CLI hints to use the default scan.
+    // trigram), uniform across scripts - the CLI hints to use the default scan.
     db.exec(
       `CREATE VIRTUAL TABLE IF NOT EXISTS records USING fts5(
          body,
@@ -126,7 +126,7 @@ export class SearchIndex {
     );
     // Per-file mtime sidecar for incremental reindex (cycle 93). A plain table
     // (not FTS5) keyed by transcript filename. CREATE IF NOT EXISTS so reopening
-    // an index.db built before this column migrates cleanly — an empty file_meta
+    // an index.db built before this column migrates cleanly - an empty file_meta
     // just makes the first incremental pass treat every file as new (re-indexed
     // once), after which it tracks mtimes normally.
     db.exec(
@@ -231,7 +231,7 @@ export class SearchIndex {
 
   /**
    * Rebuild the index from the JSONL transcripts under `chatsDir` (full
-   * drop+rebuild in a single transaction — incremental mtime reindex is a
+   * drop+rebuild in a single transaction - incremental mtime reindex is a
    * deferred follow-up). Indexes the EXACT text the live scanner searches via
    * the shared {@link recordText}; records with empty searchable text (e.g.
    * `custom_title` system records) are skipped (they can never match). Missing
@@ -281,14 +281,14 @@ export class SearchIndex {
   /**
    * Incrementally reconcile the index to the JSONL transcripts under `chatsDir`,
    * re-indexing ONLY files whose mtime changed (or are new) and dropping files
-   * that vanished — far cheaper than a full rebuild on a large workspace with
+   * that vanished - far cheaper than a full rebuild on a large workspace with
    * one freshly-appended transcript. Returns the work done: `scanned` (.jsonl on
    * disk), `updated` (new/changed files re-indexed), `removed` (gone files
    * dropped), and `records` (rows (re)inserted this pass).
    *
    * Removed-file detection unions `file_meta` with the DISTINCT files actually in
    * `records`, so a legacy index.db built before the mtime sidecar (empty
-   * file_meta, populated records) still has vanished files pruned — and every
+   * file_meta, populated records) still has vanished files pruned - and every
    * surviving file looks "new" so it is re-indexed once, seeding file_meta. All
    * in one transaction; missing dir / unreadable file / corrupt line never throw.
    */
@@ -466,7 +466,7 @@ export class SearchIndex {
     return { hits, truncated };
   }
 
-  /** Number of indexed records — lets the CLI hint when `--rank` runs against
+  /** Number of indexed records - lets the CLI hint when `--rank` runs against
    * an index that was never built (0 rows) vs. a genuine no-match. */
   count(): number {
     return (
