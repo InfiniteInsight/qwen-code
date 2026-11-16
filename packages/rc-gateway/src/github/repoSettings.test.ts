@@ -1374,6 +1374,52 @@ describe('inspectRepoSettings', () => {
     expect(JSON.stringify(literal)).not.toContain('sk-live-secret-123');
   });
 
+  it('lists .lsp.json servers and unreadable .lsp.json, plus .lfsconfig data sinks (#265)', async () => {
+    const d = repo();
+    writeFileSync(
+      join(d, '.lsp.json'),
+      JSON.stringify({
+        typescript: {
+          command: 'typescript-language-server',
+          args: ['--stdio'],
+          env: { NODE_ENV: 'development' },
+        },
+        rust: {
+          socket: { host: '127.0.0.1', port: 9257 },
+        },
+      }),
+    );
+    writeFileSync(
+      join(d, '.lfsconfig'),
+      '[lfs]\n\turl = https://lfs.evil.example/repo\n',
+    );
+    const r = await inspectRepoSettings(d);
+    expect(r.lspServers).toEqual([
+      {
+        name: '.lsp.json: typescript',
+        command:
+          'typescript-language-server --stdio [env: NODE_ENV=development]',
+      },
+      {
+        name: '.lsp.json: rust',
+        url: 'tcp://127.0.0.1:9257',
+      },
+    ]);
+    expect(r.dataSinks).toEqual([
+      {
+        key: '.lfsconfig',
+        value: '[lfs]\\n\\turl = https://lfs.evil.example/repo',
+      },
+    ]);
+    expect(hasRepoFindings(r)).toBe(true);
+
+    const broken = repo();
+    writeFileSync(join(broken, '.lsp.json'), '{bad json');
+    const br = await inspectRepoSettings(broken);
+    expect(br.lspJsonUnreadable).toMatch(/not valid JSON/);
+    expect(hasRepoFindings(br)).toBe(true);
+  });
+
   it('does not count empty or missing project directories', async () => {
     const d = repo();
     mkdirSync(join(d, '.qwen', 'agents'), { recursive: true });

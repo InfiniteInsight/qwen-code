@@ -17,9 +17,10 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
-import { lstat } from 'node:fs/promises';
-import { isAbsolute, resolve, sep } from 'node:path';
+import { execFile, spawn } from 'node:child_process';
+import { constants as fsConstants } from 'node:fs';
+import { lstat, open as openFile } from 'node:fs/promises';
+import { isAbsolute, join, resolve, sep } from 'node:path';
 import type { Readable } from 'node:stream';
 import type { GitHubAccountId } from './credentials.js';
 import { GH_FALLBACK_DIRS, locateProgram } from './credentials.js';
@@ -56,6 +57,8 @@ const MASK = '***';
 const TOKEN_HELPER =
   '!f() { echo username=x-access-token; echo "password=$QWEN_RC_GIT_TOKEN"; }; f';
 
+const NULL_HOOKS_PATH = process.platform === 'win32' ? 'NUL' : '/dev/null';
+
 /**
  * The `-c` options before `clone`, for the URL being cloned.
  *
@@ -75,6 +78,10 @@ const TOKEN_HELPER =
  * - An empty `core.askPass` stops git from running the owner's askpass (or
  *   `SSH_ASKPASS`) when no helper answers, which could otherwise hold the
  *   clone on a prompt nobody sees.
+ * - `core.hooksPath=/dev/null` (`NUL` on Windows) prevents owner-configured
+ *   or template hooks (`post-checkout`, `reference-transaction`, etc.) from
+ *   running during the clone with `QWEN_RC_GIT_TOKEN` in their environment
+ *   (#265), without writing `core.hooksPath` into `.git/config`.
  */
 export function cloneGitConfigArgs(url: string): string[] {
   return [
@@ -86,6 +93,8 @@ export function cloneGitConfigArgs(url: string): string[] {
     `http.${url}.followRedirects=false`,
     '-c',
     'core.askPass=',
+    '-c',
+    `core.hooksPath=${NULL_HOOKS_PATH}`,
     '-c',
     `http.${url}.sslVerify=true`,
   ];
@@ -120,17 +129,27 @@ function droppedEnvKey(key: string): boolean {
   );
 }
 
-/** The child's environment: `base` minus the dropped keys, plus the token. */
+/**
+ * Scrubbed git environment without `QWEN_RC_GIT_TOKEN`, used for local
+ * `git ls-remote --get-url` checks before handing the token to `git clone`.
+ */
+function cloneCheckEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(base)) {
+    if (!droppedEnvKey(k) && k !== 'QWEN_RC_GIT_TOKEN') env[k] = v;
+  }
+  env['GIT_TERMINAL_PROMPT'] = '0';
+  env['GIT_LFS_SKIP_SMUDGE'] = '1';
+  return env;
+}
+
+/** The child's environment: `base` minus the dropped keys, plus the token and `GIT_LFS_SKIP_SMUDGE=1`. */
 export function cloneEnv(
   base: NodeJS.ProcessEnv,
   token: string,
 ): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const [k, v] of Object.entries(base)) {
-    if (!droppedEnvKey(k)) env[k] = v;
-  }
+  const env = cloneCheckEnv(base);
   env['QWEN_RC_GIT_TOKEN'] = token;
-  env['GIT_TERMINAL_PROMPT'] = '0';
   return env;
 }
 
@@ -229,6 +248,12 @@ export interface CloneJobStatus {
    * `hasRepoFindings(findings)`, or true when the inspection itself failed.
    */
   hasFindings?: boolean;
+  /**
+   * True when the repo declares Git LFS tracking (`filter=lfs` in
+   * `.gitattributes` or `.lfsconfig`), so LFS files were left as pointers
+   * because `GIT_LFS_SKIP_SMUDGE=1` is enforced during clone (#265).
+   */
+  gitLfsSkipped?: boolean;
 }
 
 export type CloneStartResult =
@@ -255,6 +280,12 @@ export interface CloneJobsDeps {
   env?: NodeJS.ProcessEnv;
   /** Test only: the clone URL for a ref. Never read from a request. */
   urlFor?: (ref: RepoRef) => string;
+  /** Test only: resolves git's effective remote URL (`git ls-remote --get-url`). */
+  resolveRemoteUrl?: (
+    program: string,
+    url: string,
+    baseEnv: NodeJS.ProcessEnv,
+  ) => Promise<string>;
   /** Test only: the settings inspection. */
   inspect?: (dir: string) => Promise<RepoSettingsFindings>;
 }
@@ -361,6 +392,11 @@ export class CloneJobs {
   private readonly maxConcurrent: number;
   private readonly env: NodeJS.ProcessEnv | undefined;
   private readonly urlFor: (ref: RepoRef) => string;
+  private readonly resolveRemoteUrl: (
+    program: string,
+    url: string,
+    baseEnv: NodeJS.ProcessEnv,
+  ) => Promise<string>;
   private readonly inspect: (dir: string) => Promise<RepoSettingsFindings>;
   private readonly jobs = new Map<string, Job>();
   private readonly finished: string[] = [];
@@ -382,6 +418,9 @@ export class CloneJobs {
     this.maxConcurrent = deps.maxConcurrent ?? CLONE_MAX_CONCURRENT;
     this.env = deps.env;
     this.urlFor = deps.urlFor ?? repoUrl;
+    this.resolveRemoteUrl =
+      deps.resolveRemoteUrl ??
+      (deps.spawn ? async (_p, u) => u : defaultResolveRemoteUrl);
     this.inspect = deps.inspect ?? inspectRepoSettings;
   }
 
@@ -536,6 +575,36 @@ export class CloneJobs {
       return;
     }
 
+    // Refuse `url.*.insteadOf` rewrites before handing `QWEN_RC_GIT_TOKEN` to
+    // `git clone`: a same-host rewrite dodges the exact-URL `sslVerify` and
+    // `followRedirects` scope, and an SSH rewrite (`git@github.com:`) clones
+    // over the owner's SSH keys instead of the selected account (#265).
+    try {
+      const resolvedUrl = (
+        await this.resolveRemoteUrl(program, url, base)
+      ).trim();
+      if (resolvedUrl !== url) {
+        job.status.state = 'failed';
+        job.status.error = scrubSecrets(
+          `Refused to clone: git config rewrites ${url} to ${resolvedUrl} (url.*.insteadOf), which would bypass the clone URL's TLS, redirect, or account scope.`,
+          [token],
+        );
+        return;
+      }
+    } catch (e) {
+      job.status.state = 'failed';
+      job.status.error = scrubSecrets(
+        `Could not verify git remote URL before cloning: ${errText(e)}`,
+        [token],
+      );
+      return;
+    }
+    if (job.stopRequested) {
+      job.status.state = 'failed';
+      job.status.error = 'gateway stopped';
+      return;
+    }
+
     const lines = job.status.lines;
     let lastErr: string | undefined;
     const keep = (fromStderr: boolean) => (line: string) => {
@@ -670,6 +739,9 @@ export class CloneJobs {
           [token],
         );
       }
+      if (await detectGitLfsUsage(dest)) {
+        job.status.gitLfsSkipped = true;
+      }
       job.status.state = 'done';
       return;
     }
@@ -694,6 +766,63 @@ export class CloneJobs {
     }
     job.status.state = 'failed';
     job.status.error = scrubSecrets(error, [token]);
+  }
+}
+
+async function defaultResolveRemoteUrl(
+  program: string,
+  url: string,
+  baseEnv: NodeJS.ProcessEnv,
+): Promise<string> {
+  return new Promise<string>((resolvePromise, rejectPromise) => {
+    execFile(
+      program,
+      [
+        '-c',
+        `core.hooksPath=${NULL_HOOKS_PATH}`,
+        'ls-remote',
+        '--get-url',
+        '--',
+        url,
+      ],
+      {
+        env: cloneCheckEnv(baseEnv),
+        encoding: 'utf8',
+        timeout: 10_000,
+        windowsHide: true,
+      },
+      (err, stdout) => {
+        if (err) {
+          rejectPromise(err);
+          return;
+        }
+        resolvePromise(stdout);
+      },
+    );
+  });
+}
+
+async function detectGitLfsUsage(dest: string): Promise<boolean> {
+  try {
+    const lfsCfg = await lstat(join(dest, '.lfsconfig')).catch(() => null);
+    if (lfsCfg !== null) return true;
+    const st = await lstat(join(dest, '.gitattributes')).catch(() => null);
+    if (!st || st.isSymbolicLink() || !st.isFile() || st.size > 1024 * 1024) {
+      return false;
+    }
+    const flags =
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+    const fh = await openFile(join(dest, '.gitattributes'), flags);
+    try {
+      const buf = Buffer.alloc(Math.min(st.size, 1024 * 1024));
+      const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+      const text = buf.subarray(0, bytesRead).toString('utf8');
+      return /(?:^|\s)filter=lfs(?:\s|$)/m.test(text);
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    return false;
   }
 }
 

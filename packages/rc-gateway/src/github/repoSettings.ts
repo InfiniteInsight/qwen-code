@@ -62,6 +62,12 @@ export interface RepoSettingsFindings {
   /** Why `.mcp.json` could not be inspected, when it is there. */
   mcpJsonUnreadable?: string;
   /**
+   * `.lsp.json` language servers (`--experimental-lsp`), named `.lsp.json: <language>` (#265).
+   */
+  lspServers?: Array<{ name: string; command?: string; url?: string }>;
+  /** Why `.lsp.json` could not be inspected, when it is there. */
+  lspJsonUnreadable?: string;
+  /**
    * `.qwen/.env` and `.env` when present, with the variable names each sets
    * (never the values).
    */
@@ -1705,17 +1711,112 @@ async function inspectProjectExtensions(
 }
 
 /**
+ * `<dir>/.lsp.json` (`packages/core/src/lsp/LspConfigLoader.ts` loadUserConfigs),
+ * loaded when `--experimental-lsp` is active (#265). Listed whenever present so
+ * the owner sees repo-supplied language server commands or sockets before
+ * starting in the folder.
+ */
+async function inspectLspJson(dir: string): Promise<{
+  servers: NonNullable<RepoSettingsFindings['lspServers']>;
+  unreadable?: string;
+}> {
+  try {
+    const read = await readRepoFile(dir, ['.lsp.json']);
+    if (read.kind === 'none') return { servers: [] };
+    if (read.kind === 'unreadable') {
+      return { servers: [], unreadable: visible(read.reason) };
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(stripUtf8Bom(read.text));
+    } catch (e) {
+      return {
+        servers: [],
+        unreadable: visible(`not valid JSON: ${errorText(e)}`),
+      };
+    }
+    if (!isRecord(parsed)) {
+      return { servers: [], unreadable: 'it is not a JSON object' };
+    }
+    const servers: NonNullable<RepoSettingsFindings['lspServers']> = [];
+    for (const [lang, spec] of Object.entries(parsed)) {
+      const name = visible(`.lsp.json: ${lang}`);
+      if (!isRecord(spec)) {
+        servers.push({ name, command: visible(setText(spec)) });
+        continue;
+      }
+      if (present(spec['command'])) {
+        const args = Array.isArray(spec['args']) ? spec['args'] : [];
+        const cmd = [spec['command'], ...args]
+          .map((p) => quoteArg(valueText(p)))
+          .join(' ');
+        servers.push({
+          name,
+          command: visible(
+            withDetails(cmd, [
+              ['cwd', present(spec['cwd']) ? valueText(spec['cwd']) : undefined],
+              ['env', pairsText(spec['env'])],
+            ]),
+          ),
+        });
+      } else if (isRecord(spec['socket'])) {
+        const host = present(spec['socket']['host'])
+          ? valueText(spec['socket']['host'])
+          : '127.0.0.1';
+        const port = valueText(spec['socket']['port']);
+        servers.push({ name, url: visible(`tcp://${host}:${port}`) });
+      } else {
+        servers.push({ name, command: visible(setText(spec)) });
+      }
+    }
+    return { servers };
+  } catch (e) {
+    return {
+      servers: [],
+      unreadable: visible(`it could not be inspected: ${errorText(e)}`),
+    };
+  }
+}
+
+/**
+ * `<dir>/.lfsconfig`: if a cloned repo overrides `lfs.url` (or any LFS setting),
+ * a subsequent `git lfs pull` sends requests to that repo-chosen endpoint (#265).
+ */
+async function inspectLfsConfig(
+  dir: string,
+): Promise<RepoSettingsFindings['dataSinks']> {
+  try {
+    const read = await readRepoFile(dir, ['.lfsconfig']);
+    if (read.kind === 'none') return [];
+    if (read.kind === 'unreadable') {
+      return [{ key: '.lfsconfig', value: visible(`cannot be read: ${read.reason}`) }];
+    }
+    return [{ key: '.lfsconfig', value: visible(capped(setText(read.text.trim()))) }];
+  } catch (e) {
+    return [
+      {
+        key: '.lfsconfig',
+        value: visible(`it could not be inspected: ${errorText(e)}`),
+      },
+    ];
+  }
+}
+
+/**
  * Reads what `<dir>` brings: `.qwen/settings.json` (hooks, MCP servers,
- * command, approval, credential and data-sink settings), `.mcp.json` servers, and the
- * variable names of `.qwen/.env` and `.env`, then every other settings leaf
- * and the names of the project's agent, skill, command and workflow files. Never throws: a file it cannot
- * read, parse or walk is reported as unreadable.
+ * command, approval, credential and data-sink settings), `.mcp.json` and
+ * `.lsp.json` servers, `.lfsconfig`, and the variable names of `.qwen/.env`
+ * and `.env`, then every other settings leaf and the project's agent, skill,
+ * command and workflow files. Never throws: a file it cannot read, parse or
+ * walk is reported as unreadable.
  */
 export async function inspectRepoSettings(
   dir: string,
 ): Promise<RepoSettingsFindings> {
   const settings = await inspectSettingsFile(dir);
   const mcpJson = await inspectMcpJson(dir);
+  const lspJson = await inspectLspJson(dir);
+  const lfsSinks = await inspectLfsConfig(dir);
   const envFiles = await inspectEnvFiles(dir);
   let projectExtensions: RepoSettingsFindings['projectExtensions'];
   try {
@@ -1730,9 +1831,14 @@ export async function inspectRepoSettings(
   }
   return {
     ...settings,
+    dataSinks: [...settings.dataSinks, ...lfsSinks],
     mcpServers: [...settings.mcpServers, ...mcpJson.servers],
     ...(mcpJson.unreadable !== undefined
       ? { mcpJsonUnreadable: mcpJson.unreadable }
+      : {}),
+    ...(lspJson.servers.length > 0 ? { lspServers: lspJson.servers } : {}),
+    ...(lspJson.unreadable !== undefined
+      ? { lspJsonUnreadable: lspJson.unreadable }
       : {}),
     envFiles,
     projectExtensions,
@@ -1748,8 +1854,10 @@ export function hasRepoFindings(findings: RepoSettingsFindings): boolean {
   return (
     findings.unreadable !== undefined ||
     findings.mcpJsonUnreadable !== undefined ||
+    findings.lspJsonUnreadable !== undefined ||
     findings.hooks.length > 0 ||
     findings.mcpServers.length > 0 ||
+    (findings.lspServers?.length ?? 0) > 0 ||
     findings.commands.length > 0 ||
     findings.approval.length > 0 ||
     findings.credentials.length > 0 ||

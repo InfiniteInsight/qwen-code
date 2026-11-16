@@ -25764,7 +25764,7 @@
         // Only a plain "nothing to ask" starts at once: an error (the
         // inspection failed) asks too, whatever hasFindings says.
         if (st.hasFindings === false && !st.error) {
-          void ghcStartIn(st.repo, st.dest);
+          void ghcStartIn(st.repo, st.dest, st.gitLfsSkipped === true);
           return;
         }
         ghcShowAsk(st);
@@ -25775,6 +25775,7 @@
       const GH_FINDING_CATS = [
         ['hooks', 'Hooks', (i) => [i.event, i.command]],
         ['mcpServers', 'MCP servers', (i) => [i.name, i.command || i.url]],
+        ['lspServers', 'LSP servers (.lsp.json)', (i) => [i.name, i.command || i.url]],
         ['commands', 'Commands', (i) => [i.key, i.value]],
         ['approval', 'Approval settings', (i) => [i.key, i.value]],
         ['credentials', 'Credentials and model endpoints', (i) => [i.key, i.value]],
@@ -25829,6 +25830,9 @@
         if (typeof f.mcpJsonUnreadable === 'string') {
           line('.mcp.json could not be read: ' + f.mcpJsonUnreadable);
         }
+        if (typeof f.lspJsonUnreadable === 'string') {
+          line('.lsp.json could not be read: ' + f.lspJsonUnreadable);
+        }
         const cat = (heading, items) => {
           const sec = document.createElement('section');
           sec.className = 'ghc-cat';
@@ -25852,7 +25856,12 @@
           sec.append(h, ul);
           out.push(sec);
         };
-        const known = new Set(['file', 'unreadable', 'mcpJsonUnreadable']);
+        const known = new Set([
+          'file',
+          'unreadable',
+          'mcpJsonUnreadable',
+          'lspJsonUnreadable',
+        ]);
         for (const [key, heading, read] of GH_FINDING_CATS) {
           known.add(key);
           if (Array.isArray(f[key]) && f[key].length) {
@@ -25887,6 +25896,12 @@
           'It brings settings that can run commands, send data or loosen approval on the host. They take effect when a conversation starts in this folder. Nothing has started yet.',
         );
         if (typeof st.error === 'string' && st.error) p(st.error, 'ghc-warn');
+        if (st.gitLfsSkipped === true) {
+          p(
+            'Git LFS smudge was skipped during clone; run git lfs pull in the folder if needed.',
+            'ghc-warn',
+          );
+        }
         const nodes = ghcFindingNodes(st.findings);
         for (const n of nodes) box.append(n);
         if (!nodes.length && !st.error) {
@@ -25898,7 +25913,7 @@
         go.type = 'button';
         go.id = 'gh-start';
         go.textContent = 'Start a conversation here';
-        go.onclick = () => void ghcStartIn(repo, dest);
+        go.onclick = () => void ghcStartIn(repo, dest, st.gitLfsSkipped === true);
         const no = document.createElement('button');
         no.type = 'button';
         no.id = 'gh-cancel';
@@ -25946,7 +25961,7 @@
       // (startConversationIn): when it works, the page moves onto the new
       // conversation and the list shuts, which closes this screen; when it does
       // not, this screen is still up and says so.
-      async function ghcStartIn(repo, dest) {
+      async function ghcStartIn(repo, dest, lfsSkipped) {
         // Start was pressed (or the repo brings nothing): answered.
         ghcClearPending();
         const gen = ++ghc.gen;
@@ -25954,7 +25969,15 @@
         ghcRenderRun('Cloned ' + repo + ' into ' + dest + '. Starting a conversation there…', '');
         ghcView('starting');
         await startConversationIn(dest);
-        if (gen !== ghc.gen || $('gh-clone').hidden) return;
+        if (gen !== ghc.gen || $('gh-clone').hidden) {
+          if (lfsSkipped && $('gh-clone').hidden) {
+            $('status').textContent =
+              'Git LFS smudge was skipped during clone; run git lfs pull in ' +
+              dest +
+              ' if needed.';
+          }
+          return;
+        }
         const why = ($('status').textContent || '').trim();
         ghcEnd(
           [
