@@ -2360,6 +2360,7 @@ const SESSION_RECAP_TIMEOUT_MS = 60_000;
 const SESSION_GENERATION_TIMEOUT_MS = 65_000;
 const GENERATION_STREAM_QUEUE_CAPACITY = 128;
 const SESSION_BTW_TIMEOUT_MS = 60_000;
+const SESSION_TASK_RESUME_TIMEOUT_MS = 60_000;
 const SESSION_TRANSCRIPT_TIMEOUT_MS = 60_000;
 const MAX_EMPTY_TRANSCRIPT_PAGES = 20;
 const SHELL_COMMAND_TIMEOUT_MS = 120_000;
@@ -14199,10 +14200,15 @@ export function createSessionControlPlane(
           reason?: string;
           code?: string;
           detail?: string;
-        }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionTaskMessage, {
-          taskId,
-          message,
-        });
+        }>(
+          sessionId,
+          SERVE_CONTROL_EXT_METHODS.sessionTaskMessage,
+          {
+            taskId,
+            message,
+          },
+          SESSION_TASK_RESUME_TIMEOUT_MS,
+        );
       } finally {
         endSideRequest();
       }
@@ -14235,6 +14241,7 @@ export function createSessionControlPlane(
           sessionId,
           SERVE_CONTROL_EXT_METHODS.sessionTaskResume,
           message === undefined ? { taskId } : { taskId, message },
+          SESSION_TASK_RESUME_TIMEOUT_MS,
         );
       } finally {
         endSideRequest();

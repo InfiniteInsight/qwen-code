@@ -3543,6 +3543,41 @@ describe('DaemonClient', () => {
       ]);
       expect(JSON.parse(calls[1]!.body!)).toEqual({ message: 'go on' });
     });
+
+    it('gives resumeSubagentSession and messageSubagentSession a 65s timeout past the 30s default (#261)', async () => {
+      vi.useFakeTimers();
+      try {
+        const slowFetch = vi.fn(
+          () =>
+            new Promise<Response>((resolve) => {
+              setTimeout(
+                () =>
+                  resolve(
+                    jsonResponse(200, {
+                      outcome: 'resumed',
+                      delivered: true,
+                      status: 'running',
+                    }),
+                  ),
+                45_000,
+              );
+            }),
+        );
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          fetch: slowFetch,
+        });
+
+        const r1 = client.resumeSubagentSession('s-1', 'agent-1');
+        const r2 = client.messageSubagentSession('s-1', 'agent-1', 'hi');
+        await vi.advanceTimersByTimeAsync(45_000);
+
+        await expect(r1).resolves.toMatchObject({ outcome: 'resumed' });
+        await expect(r2).resolves.toMatchObject({ delivered: true });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe('session rewind transport', () => {

@@ -3588,6 +3588,43 @@ describe('BackgroundAgentResumeService', () => {
         '<status>completed</status>',
       );
     });
+
+    it('records abandoned tombstones on cold sidecar load and cold sidecar abandon (#261)', async () => {
+      const sessionId = 'session-1';
+      seedSidecar(sessionId, 'agent-already-abandoned', 'Discarded earlier', {
+        status: 'cancelled',
+        isBackgrounded: true,
+        abandonedAt: '2026-04-17T00:05:00.000Z',
+        toolUseId: 'tool-already-abandoned',
+      });
+      seedSidecar(sessionId, 'agent-cold-paused', 'Cold paused sidecar', {
+        status: 'paused',
+        isBackgrounded: true,
+        toolUseId: 'tool-cold-paused',
+      });
+
+      const { service } = createService();
+      // Abandon the cold paused sidecar before loading into registry.
+      expect(service.abandonBackgroundAgent('agent-cold-paused')).toBe(true);
+      expect(registry.isAbandoned('agent-cold-paused')).toBe(true);
+      expect(registry.isAbandoned('tool-cold-paused')).toBe(true);
+
+      // Simulate a fresh process registry, then reload sidecars from disk and verify
+      // both abandoned sidecars are omitted from restored tasks while their tombstones
+      // (both agentId and toolUseId) are recorded on the new registry.
+      registry = new BackgroundTaskRegistry();
+      const { service: reloadedService } = createService();
+      expect(registry.isAbandoned('agent-already-abandoned')).toBe(false);
+      expect(registry.isAbandoned('agent-cold-paused')).toBe(false);
+
+      const restored =
+        await reloadedService.loadPausedBackgroundAgents(sessionId);
+      expect(restored).toEqual([]);
+      expect(registry.isAbandoned('agent-already-abandoned')).toBe(true);
+      expect(registry.isAbandoned('tool-already-abandoned')).toBe(true);
+      expect(registry.isAbandoned('agent-cold-paused')).toBe(true);
+      expect(registry.isAbandoned('tool-cold-paused')).toBe(true);
+    });
   });
 });
 

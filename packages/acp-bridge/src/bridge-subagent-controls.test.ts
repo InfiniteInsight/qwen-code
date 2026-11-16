@@ -182,4 +182,47 @@ describe('subagent resume and abandon through the bridge', () => {
       await bridge.shutdown();
     }
   });
+
+  it('gives resumeSessionTask and messageSessionTask a 60s budget past the 10s initTimeoutMs default (#261)', async () => {
+    vi.useFakeTimers();
+    const resumed: ServeSubagentResumeResult = {
+      outcome: 'resumed',
+      status: 'running',
+    };
+    const delivered = {
+      delivered: true,
+      action: 'resumed' as const,
+      status: 'running',
+    };
+    const { bridge, session } = await setup((method) => {
+      if (method === RESUME) {
+        return new Promise((resolve) =>
+          setTimeout(() => resolve(resumed as unknown as Record<string, unknown>), 15_000),
+        );
+      }
+      if (method === SERVE_CONTROL_EXT_METHODS.sessionTaskMessage) {
+        return new Promise((resolve) =>
+          setTimeout(() => resolve(delivered), 15_000),
+        );
+      }
+      return {};
+    });
+    try {
+      const resumePending = bridge.resumeSessionTask!(
+        session.sessionId,
+        'agent-slow',
+      );
+      const msgPending = bridge.messageSessionTask!(
+        session.sessionId,
+        'agent-slow-2',
+        'continue carefully',
+      );
+      await vi.advanceTimersByTimeAsync(15_000);
+      await expect(resumePending).resolves.toEqual(resumed);
+      await expect(msgPending).resolves.toEqual(delivered);
+    } finally {
+      vi.useRealTimers();
+      await bridge.shutdown();
+    }
+  });
 });
