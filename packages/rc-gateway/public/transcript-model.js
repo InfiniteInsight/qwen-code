@@ -581,37 +581,68 @@
 
     // Parent tool_call always precedes child frames: a parent the model has
     // not seen yields null and the child frame is dropped.
-    function newSub(parentId) {
+    function newSub(parentId, time) {
+      var stamp = validStamp(time);
       var sub = {
         startedAt: now(),
+        time: stamp,
         endedAt: null,
         done: false,
         failed: false,
         settledBySweep: false,
+        thinking: false,
         type: subagentTypes.get(parentId) || '',
         text: '',
+        thoughts: [],
+        textSpans: [],
         tools: [],
       };
       subToolIndex.set(sub, new Map());
       return sub;
     }
-    function subagentOf(parentId) {
+    function closeSubThought(sub) {
+      if (!sub) return;
+      sub.thinking = false;
+      var list = sub.thoughts;
+      if (list && list.length && list[list.length - 1].streaming) {
+        list[list.length - 1].streaming = false;
+      }
+    }
+    function subagentOf(parentId, time) {
       var tool = toolIndex.get(parentId);
       if (!tool) return null;
-      if (!tool.sub) tool.sub = newSub(parentId);
+      if (!tool.sub) {
+        tool.sub = newSub(parentId, time);
+      } else {
+        var stamp = validStamp(time);
+        if (
+          stamp !== undefined &&
+          (typeof tool.sub.time !== 'number' || stamp < tool.sub.time)
+        ) {
+          tool.sub.time = stamp;
+        }
+      }
       return tool;
     }
     // Where a child frame's text and tools go: the parent's row, or (for a page
     // reducer) a sub held aside for a parent that has not been seen. null when
     // the frame has nowhere to go. `tool` is null for a held-aside sub.
-    function holderOf(parentId) {
-      var tool = subagentOf(parentId);
+    function holderOf(parentId, time) {
+      var tool = subagentOf(parentId, time);
       if (tool) return { tool: tool, sub: tool.sub };
       if (!keepOrphans || !parentId) return null;
       var sub = orphanSubs.get(parentId);
       if (!sub) {
-        sub = newSub(parentId);
+        sub = newSub(parentId, time);
         orphanSubs.set(parentId, sub);
+      } else {
+        var stamp = validStamp(time);
+        if (
+          stamp !== undefined &&
+          (typeof sub.time !== 'number' || stamp < sub.time)
+        ) {
+          sub.time = stamp;
+        }
       }
       return { tool: null, sub: sub };
     }
@@ -621,6 +652,7 @@
       var tool = toolIndex.get(parentId);
       var s = tool && tool.sub;
       if (!s || s.done) return null;
+      closeSubThought(s);
       s.done = true;
       s.failed = status === 'failed';
       s.endedAt = now();
@@ -654,16 +686,81 @@
       if (held && !held.type) held.type = t;
     }
 
-    function appendSubagentText(parentId, text) {
-      var h = holderOf(parentId);
+    function appendSubagentThought(parentId, text, time) {
+      var h = holderOf(parentId, time);
       if (!h) return;
-      h.sub.text += clean(text);
+      var c = clean(text);
+      if (!c) return;
+      var stamp = validStamp(time);
+      h.sub.thinking = true;
+      var list = h.sub.thoughts;
+      var last = list.length ? list[list.length - 1] : null;
+      if (
+        last &&
+        last.streaming &&
+        last.textAt === h.sub.text.length &&
+        last.toolIdx === h.sub.tools.length
+      ) {
+        last.text += c;
+        if (
+          stamp !== undefined &&
+          (typeof last.time !== 'number' || stamp < last.time)
+        ) {
+          last.time = stamp;
+        }
+      } else {
+        list.push({
+          text: c,
+          textAt: h.sub.text.length,
+          toolIdx: h.sub.tools.length,
+          time: stamp,
+          streaming: true,
+        });
+      }
       if (h.tool) emitUpdate(h.tool);
     }
 
-    function upsertSubagentTool(u, parentId) {
-      var h = holderOf(parentId);
+    function appendSubagentText(parentId, text, time) {
+      var h = holderOf(parentId, time);
       if (!h) return;
+      var c = clean(text);
+      if (!c) return;
+      closeSubThought(h.sub);
+      var stamp = validStamp(time);
+      var start = h.sub.text.length;
+      h.sub.text += c;
+      var spans = h.sub.textSpans;
+      var lastSpan = spans.length ? spans[spans.length - 1] : null;
+      if (
+        lastSpan &&
+        lastSpan.to === start &&
+        lastSpan.toolIdx === h.sub.tools.length &&
+        lastSpan.thoughtIdx === h.sub.thoughts.length
+      ) {
+        lastSpan.to = h.sub.text.length;
+        if (
+          stamp !== undefined &&
+          (typeof lastSpan.time !== 'number' || stamp < lastSpan.time)
+        ) {
+          lastSpan.time = stamp;
+        }
+      } else {
+        spans.push({
+          from: start,
+          to: h.sub.text.length,
+          toolIdx: h.sub.tools.length,
+          thoughtIdx: h.sub.thoughts.length,
+          time: stamp,
+        });
+      }
+      if (h.tool) emitUpdate(h.tool);
+    }
+
+    function upsertSubagentTool(u, parentId, time) {
+      var h = holderOf(parentId, time);
+      if (!h) return;
+      closeSubThought(h.sub);
+      var stamp = validStamp(time);
       var id = strOr(u.toolCallId, '');
       var idx = subToolIndex.get(h.sub);
       if (!idx) {
@@ -680,9 +777,20 @@
         // #110: textAt is how much of the child's text had arrived when this
         // call started, so a trace can put the call between the words said
         // before it and after it rather than after all of them.
-        entry = { id: id, label: '', status: '', textAt: h.sub.text.length };
+        entry = {
+          id: id,
+          label: '',
+          status: '',
+          textAt: h.sub.text.length,
+          time: stamp,
+        };
         h.sub.tools.push(entry);
         if (id) idx.set(id, entry);
+      } else if (
+        stamp !== undefined &&
+        (typeof entry.time !== 'number' || stamp < entry.time)
+      ) {
+        entry.time = stamp;
       }
       entry.label = toolLabel(u, id, entry.label);
       // An update that names no status (a note, a rename) leaves the one the
@@ -917,9 +1025,16 @@
     // #110: a call's textAt counts into the text it was recorded against, so
     // text put in front of that text moves the call along by the same amount.
     function shiftTextAt(tools, by) {
-      if (!by) return;
+      if (!by || !Array.isArray(tools)) return;
       tools.forEach(function (t) {
         if (typeof t.textAt === 'number') t.textAt += by;
+      });
+    }
+    function shiftSpans(spans, by) {
+      if (!by || !Array.isArray(spans)) return;
+      spans.forEach(function (s) {
+        if (typeof s.from === 'number') s.from += by;
+        if (typeof s.to === 'number') s.to += by;
       });
     }
     function mergeSub(into, from) {
@@ -927,9 +1042,13 @@
       // Where the older text sits in the merged text: in front of it when it
       // is prepended, or wherever the overlap already holds it.
       var fromAt = 0;
+      var prepended = false;
       if (from.text && into.text.indexOf(from.text) < 0) {
         shiftTextAt(into.tools, from.text.length);
+        shiftTextAt(into.thoughts, from.text.length);
+        shiftSpans(into.textSpans, from.text.length);
         into.text = from.text + into.text;
+        prepended = true;
       } else if (from.text) {
         fromAt = into.text.indexOf(from.text);
       }
@@ -940,15 +1059,69 @@
       var older = [];
       from.tools.forEach(function (t) {
         var have = t.id ? known[t.id] : null;
-        if (!have) older.push(t);
-        else if (!have.label && t.label) have.label = t.label;
+        if (!have) {
+          older.push(t);
+        } else {
+          if (!have.label && t.label) have.label = t.label;
+          if (
+            typeof t.time === 'number' &&
+            (typeof have.time !== 'number' || t.time < have.time)
+          ) {
+            have.time = t.time;
+          }
+        }
       });
       shiftTextAt(older, fromAt);
       into.tools.splice.apply(into.tools, [0, 0].concat(older));
+      if (Array.isArray(from.thoughts) && from.thoughts.length) {
+        if (!Array.isArray(into.thoughts)) into.thoughts = [];
+        var olderThoughts = [];
+        from.thoughts.forEach(function (th) {
+          var shiftedAt =
+            (typeof th.textAt === 'number' ? th.textAt : 0) + fromAt;
+          var dup = into.thoughts.some(function (x) {
+            return x.text === th.text && x.textAt === shiftedAt;
+          });
+          if (!dup) {
+            olderThoughts.push({
+              text: th.text,
+              textAt: shiftedAt,
+              toolIdx: typeof th.toolIdx === 'number' ? th.toolIdx : 0,
+              time: th.time,
+              streaming: false,
+            });
+          }
+        });
+        into.thoughts.splice.apply(into.thoughts, [0, 0].concat(olderThoughts));
+      }
+      if (prepended && Array.isArray(from.textSpans) && from.textSpans.length) {
+        if (!Array.isArray(into.textSpans)) into.textSpans = [];
+        into.textSpans.splice.apply(
+          into.textSpans,
+          [0, 0].concat(
+            from.textSpans.map(function (sp) {
+              return {
+                from: sp.from,
+                to: sp.to,
+                toolIdx: sp.toolIdx,
+                thoughtIdx: sp.thoughtIdx,
+                time: sp.time,
+              };
+            }),
+          ),
+        );
+      }
       subToolIndex.delete(into);
       if (!into.type) into.type = from.type;
       if (from.startedAt < into.startedAt) into.startedAt = from.startedAt;
+      if (
+        typeof from.time === 'number' &&
+        (typeof into.time !== 'number' || from.time < into.time)
+      ) {
+        into.time = from.time;
+      }
       if (from.done && !into.done) {
+        closeSubThought(into);
         into.done = true;
         into.failed = from.failed;
         into.endedAt = from.endedAt;
@@ -957,6 +1130,7 @@
     }
     function settleSubIfTerminal(t) {
       if (t && t.sub && TERMINAL_TOOL_STATUSES[t.status] && !t.sub.done) {
+        closeSubThought(t.sub);
         t.sub.done = true;
         t.sub.failed = t.status === 'failed';
         t.sub.endedAt = t.sub.endedAt || now();
@@ -1204,6 +1378,7 @@
       setPlan: setPlan,
       upsertTool: upsertTool,
       setSubagentType: setSubagentType,
+      appendSubagentThought: appendSubagentThought,
       appendSubagentText: appendSubagentText,
       upsertSubagentTool: upsertSubagentTool,
       finishSubagent: finishSubagent,
@@ -1455,10 +1630,12 @@
         : '';
     if (parentId) {
       m.setSubagentType(parentId, u._meta.subagentType);
-      if (su === 'agent_message_chunk' && text)
-        m.appendSubagentText(parentId, text);
+      if (su === 'agent_thought_chunk' && text)
+        m.appendSubagentThought(parentId, text, sentAt);
+      else if (su === 'agent_message_chunk' && text)
+        m.appendSubagentText(parentId, text, sentAt);
       else if (su === 'tool_call' || su === 'tool_call_update')
-        m.upsertSubagentTool(u, parentId);
+        m.upsertSubagentTool(u, parentId, sentAt);
       return;
     }
     if (su === 'user_message_chunk') {

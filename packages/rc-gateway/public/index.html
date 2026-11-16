@@ -1012,8 +1012,12 @@
       #h1-status[data-state='run'] .dot {
         background: var(--g1-link);
       }
-      #h1-status[data-state='wait'] .dot {
+      #h1-status[data-state='wait'] .dot,
+      #h1-status[data-state='paused'] .dot {
         background: var(--g1-warn);
+      }
+      #h1-status[data-state='paused'] .f {
+        flex: 0 100 auto;
       }
       /* #223: a run with no turn open. Distinct from `run` so a reader can tell
          the process is still going after the answer finished, and not a second
@@ -2754,6 +2758,10 @@
         white-space: nowrap;
         color: var(--g1-ink-mid);
       }
+      #past-list .s .agchip[data-state='paused'] {
+        color: var(--g1-warn);
+        border-color: var(--g1-warn);
+      }
       /* #212. The conversation's tab on the host crashed or was lost: a word
          in a pill after the title, red for crashed, amber for lost. It never
          shrinks; the title gives way instead. */
@@ -3339,6 +3347,9 @@
         font-size: 13px;
         white-space: nowrap;
       }
+      #agents-chip[data-state='paused'] {
+        color: var(--g1-warn);
+      }
       #agents-chip[hidden] {
         display: none;
       }
@@ -3368,6 +3379,10 @@
         border-radius: 50%;
         background: var(--g1-link);
         animation: ag-pulse 1.6s ease-in-out infinite;
+      }
+      #agents-chip[data-state='paused'] .dot {
+        background: var(--g1-warn);
+        animation: none;
       }
       @keyframes ag-pulse {
         50% {
@@ -3483,8 +3498,11 @@
         display: flex;
         flex-direction: column;
         box-sizing: border-box;
-        max-height: 85%;
-        min-height: 40%;
+        height: 94vh;
+        height: calc(100dvh - env(safe-area-inset-top, 0px) - 8px);
+        max-height: 94vh;
+        max-height: calc(100dvh - env(safe-area-inset-top, 0px) - 8px);
+        min-height: 88vh;
         padding-bottom: env(safe-area-inset-bottom, 0px);
         background: var(--g1-band);
         border-top: 1px solid var(--g1-edge);
@@ -3805,6 +3823,30 @@
         font-size: 14px;
         overflow-wrap: anywhere;
       }
+      #agents-sheet .ag-step-head,
+      #agents-sheet .ag-step-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 4px 8px;
+      }
+      #agents-sheet .ag-step-who {
+        font-size: 13px;
+        font-weight: 600;
+        font-style: normal;
+        color: var(--g1-ink-mid);
+      }
+      #agents-sheet .ag-step.thought .ag-step-who[data-streaming='true'] {
+        color: var(--g1-link);
+      }
+      #agents-sheet .ag-step-time {
+        margin-left: auto;
+        font-family: system-ui, -apple-system, sans-serif;
+        font-size: 13px;
+        font-style: normal;
+        color: var(--g1-ink-mid);
+        white-space: nowrap;
+      }
       #agents-sheet .ag-step.tool,
       #agents-sheet .ag-step.act {
         font-family: ui-monospace, monospace;
@@ -3813,6 +3855,39 @@
       }
       #agents-sheet .ag-step .st {
         color: var(--g1-ink-mid);
+      }
+      #agents-sheet .ag-live-ind {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 10px 16px 2px;
+        padding: 8px 12px;
+        border: 1px solid var(--g1-edge);
+        border-radius: 10px;
+        background: var(--g1-raise);
+        color: var(--g1-ink-hi);
+        font-size: 13px;
+        overflow-wrap: anywhere;
+      }
+      #agents-sheet .ag-live-ind .ag-live-dot {
+        width: 8px;
+        height: 8px;
+        flex: none;
+        border-radius: 50%;
+        background: var(--g1-link);
+        animation: ag-pulse 1.6s ease-in-out infinite;
+      }
+      #agents-sheet .ag-live-ind[data-phase='waiting_approval'] .ag-live-dot {
+        background: var(--g1-warn);
+        animation: none;
+      }
+      #agents-sheet .ag-live-ind .ag-clock {
+        margin-left: auto;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #agents-sheet .ag-live-ind .ag-live-dot {
+          animation: none;
+        }
       }
       #agents-sheet .ag-step.msg {
         padding-left: 10px;
@@ -3854,7 +3929,11 @@
         }
         #agents-sheet .ag-card {
           width: 100%;
-          max-width: 80ch;
+          max-width: min(96ch, calc(100% - 24px));
+          height: 92vh;
+          height: 92dvh;
+          max-height: 92vh;
+          max-height: 92dvh;
           align-self: center;
         }
       }
@@ -8217,6 +8296,13 @@
       let uiHideThreads = null;
       function applyStampZone() {
         if (transcriptView && stampZone) transcriptView.setStampZone(stampZone);
+        if (
+          typeof agentSheet !== 'undefined' &&
+          agentSheet.open &&
+          typeof renderAgentSheetSoon === 'function'
+        ) {
+          renderAgentSheetSoon();
+        }
       }
       function stampZoneOption(zone) {
         const opt = document.createElement('option');
@@ -9542,13 +9628,17 @@
       // crowding (or vanishing from) the top-level transcript. The subagent
       // state (start/end time, type, text, child tools) lives on the parent
       // tool item; the view ticks the running timer.
-      function appendSubagentText(parentId, text) {
-        transcriptModel.appendSubagentText(parentId, text);
+      function appendSubagentThought(parentId, text, sentAt) {
+        transcriptModel.appendSubagentThought(parentId, text, sentAt);
+        scrollTranscript();
+      }
+      function appendSubagentText(parentId, text, sentAt) {
+        transcriptModel.appendSubagentText(parentId, text, sentAt);
         scrollTranscript();
       }
       // Same "keep the first name" rule as the top-level tool rows.
-      function renderSubagentTool(u, parentId) {
-        transcriptModel.upsertSubagentTool(u, parentId);
+      function renderSubagentTool(u, parentId, sentAt) {
+        transcriptModel.upsertSubagentTool(u, parentId, sentAt);
         scrollTranscript();
       }
       // A later status-only update may omit title/kind — the model keeps the
@@ -11321,6 +11411,19 @@
           (secs > 0 ? ' ' + h1Clock(secs) : '')
         );
       }
+      function agentsPausedWord() {
+        const paused =
+          typeof agentViews === 'function'
+            ? agentViews().filter((v) => v.state === 'paused')
+            : [];
+        if (!paused.length) return '';
+        const first = paused[0];
+        const label = first.desc || first.name || 'agent';
+        return (
+          (paused.length === 1 ? '1 paused, ' : paused.length + ' paused, ') +
+          label
+        );
+      }
       async function readRoster(id) {
         if (!id || !token()) return;
         rosterReading = true;
@@ -11366,6 +11469,14 @@
           typeof f.runtimeMs === 'number' && Number.isFinite(f.runtimeMs)
             ? f.runtimeMs
             : null;
+        if (
+          typeof agentsOn === 'function' &&
+          agentsOn() &&
+          (!f.kind || f.kind === 'agent') &&
+          typeof agentsSchedule === 'function'
+        ) {
+          agentsSchedule(150);
+        }
         taskFrames.set(f.taskId, { at: Date.now(), status: f.status, ms });
         // Before the first read there is nothing to move, and the read already
         // in flight answers later than this frame, so it carries the newer word.
@@ -11462,6 +11573,14 @@
         ) {
           state = 'bg';
           word = agentsBgWord();
+        } else if (
+          typeof agentsOn === 'function' &&
+          agentsOn() &&
+          typeof agentsPausedCount === 'function' &&
+          agentsPausedCount() > 0
+        ) {
+          state = 'paused';
+          word = agentsPausedWord();
         }
         if (btn.dataset.state !== state) btn.dataset.state = state;
         h1Text($('h1-state'), word);
@@ -15387,11 +15506,12 @@
         if (parentId) {
           // The first non-empty type label wins.
           transcriptModel.setSubagentType(parentId, u._meta.subagentType);
+          if (su === 'agent_thought_chunk' && text)
+            return appendSubagentThought(parentId, text, sentAt);
           if (su === 'agent_message_chunk' && text)
-            return appendSubagentText(parentId, text);
+            return appendSubagentText(parentId, text, sentAt);
           if (su === 'tool_call' || su === 'tool_call_update')
-            return renderSubagentTool(u, parentId);
-          // Subagent thoughts and other child frames: no top-level feedback.
+            return renderSubagentTool(u, parentId, sentAt);
           return;
         }
         // Token usage rides on agent_message_chunk _meta.usage (the frame may
@@ -15566,7 +15686,15 @@
             return showCrashBanner(d.recovered === false);
           }
           case 'session_recovered':
-            // Clear the crash banner; brief auto-fading note.
+            // Clear the crash banner; brief auto-fading note, and re-read
+            // recovered/paused agents and background tasks now that the daemon
+            // has restored the session (#274).
+            if (typeof agentsOn === 'function' && agentsOn()) {
+              agentsSchedule(0);
+            }
+            if (roster.sessionId && token()) {
+              void readRoster(roster.sessionId);
+            }
             return showRecoveredNote();
           case 'model_switched': {
             // The freshest model id — update the footer directly (the daemon's
@@ -15727,6 +15855,10 @@
             if (rosterStale) {
               rosterStale = false;
               if (roster.sessionId && token()) void readRoster(roster.sessionId);
+            }
+            if (agentsState && agentsState.stale) {
+              agentsState.stale = false;
+              if (watchedSessionId && agentsOn()) agentsSchedule(0);
             }
             return;
           // #190: the conversation's running usage, for the sheet and More.
@@ -16264,8 +16396,8 @@
       // of it and is never asked.
       const AGENTS_POLL_OPEN_MS = 3000; // the sheet is open and something runs
       const AGENTS_POLL_MS = 5000; // the sheet is shut and something runs
-      const AGENT_MSG_CLIP = 600; // characters of one message shown unopened
-      const AGENT_TASK_CLIP = 200;
+      const AGENT_MSG_CLIP = 200000; // #274: render subagent output expanded in full (safety ceiling only)
+      const AGENT_TASK_CLIP = 200000;
       // var, not const: renderStatusLine calls agentsOnStatus, and a call that
       // reached it before this line ran would otherwise throw on the binding.
       var agentsState = {
@@ -16274,6 +16406,7 @@
         readAt: 0, // this page's clock when that roster was read
         now: 0, // the daemon's clock in that roster (its own `now`)
         err: '',
+        stale: false,
         reading: false,
         timer: null,
         gen: 0,
@@ -16515,6 +16648,14 @@
         for (const v of agentViews()) if (v.running) n += 1;
         return n;
       }
+      function agentsPausedCount() {
+        let n = 0;
+        for (const v of agentViews()) if (v.state === 'paused') n += 1;
+        return n;
+      }
+      function agentsGap() {
+        if (agentsState && agentsState.sessionId) agentsState.stale = true;
+      }
       function agentFind(key) {
         if (!key) return null;
         for (const r of agentsState.rows || []) {
@@ -16585,6 +16726,7 @@
         } else {
           const b = r.body || {};
           agentsState.err = '';
+          agentsState.stale = false;
           agentsState.rows = (Array.isArray(b.tasks) ? b.tasks : []).filter(
             (t) =>
               t && typeof t === 'object' && t.kind === 'agent' && t.id,
@@ -16639,6 +16781,7 @@
         agentsState.gen += 1;
         agentsState.rows = null;
         agentsState.err = '';
+        agentsState.stale = false;
         agentsState.reading = false;
         agentsState.stops.clear();
         agentsState.msgs.clear();
@@ -16705,17 +16848,37 @@
       function agentsChipText(n) {
         return n === 1 ? '1 agent' : n + ' agents';
       }
+      function agentsPausedChipText(n) {
+        return n + ' paused';
+      }
       function renderAgentsChrome() {
         const on = agentsOn();
         const sid = watchedSessionId;
         const n = on && sid ? agentsRunningCount() : 0;
+        const paused = on && sid ? agentsPausedCount() : 0;
+        const showChip = n > 0 || paused > 0;
         const chip = $('agents-chip');
         if (chip) {
-          if (chip.hidden !== !(n > 0)) chip.hidden = !(n > 0);
-          h1Text($('agents-chip-text'), n > 0 ? agentsChipText(n) : '');
+          if (chip.hidden !== !showChip) chip.hidden = !showChip;
+          const chipState = n > 0 ? 'running' : paused > 0 ? 'paused' : '';
+          if (chipState) chip.dataset.state = chipState;
+          else delete chip.dataset.state;
+          h1Text(
+            $('agents-chip-text'),
+            n > 0
+              ? agentsChipText(n)
+              : paused > 0
+                ? agentsPausedChipText(paused)
+                : '',
+          );
           chip.setAttribute(
             'aria-label',
-            agentsChipText(n) + ' running: open the agents',
+            n > 0
+              ? agentsChipText(n) + ' running: open the agents'
+              : paused > 0
+                ? (paused === 1 ? '1 agent paused' : paused + ' agents paused') +
+                  ': open the agents'
+                : 'open the agents',
           );
         }
         const row = $('more-agents');
@@ -16725,8 +16888,22 @@
           const total = (agentsState.rows || []).length;
           h1Text(
             $('more-agents-val'),
-            n > 0 ? n + ' running' : total ? String(total) : '',
+            n > 0
+              ? n + ' running'
+              : paused > 0
+                ? paused + ' paused'
+                : total
+                  ? String(total)
+                  : '',
           );
+        }
+        if (
+          typeof paintRowMarks === 'function' &&
+          typeof pastConvos !== 'undefined' &&
+          Array.isArray(pastConvos) &&
+          $('past-list')
+        ) {
+          paintRowMarks();
         }
       }
       function renderAgents() {
@@ -17010,21 +17187,89 @@
         const subSteps = [];
         if (sub) {
           const text = sub.text || '';
+          const spans = Array.isArray(sub.textSpans) ? sub.textSpans : [];
+          const thoughts = Array.isArray(sub.thoughts) ? sub.thoughts : [];
+          const tools = Array.isArray(sub.tools) ? sub.tools : [];
+          const spanTime = (from, to) => {
+            for (const sp of spans) {
+              if (
+                sp &&
+                typeof sp.to === 'number' &&
+                typeof sp.from === 'number' &&
+                sp.to > from &&
+                sp.from < to &&
+                typeof sp.time === 'number' &&
+                Number.isFinite(sp.time)
+              ) {
+                return sp.time;
+              }
+            }
+            return null;
+          };
           let at = 0;
+          let thIdx = 0;
+          let tlIdx = 0;
           const words = (from, to) => {
             const t = text.slice(from, to);
-            if (t.trim()) subSteps.push({ kind: 'msg', text: t.trim() });
-          };
-          for (const t of sub.tools || []) {
-            if (typeof t.textAt === 'number' && t.textAt > at) {
-              words(at, Math.min(t.textAt, text.length));
-              at = Math.min(t.textAt, text.length);
+            if (t.trim()) {
+              subSteps.push({
+                kind: 'msg',
+                text: t.trim(),
+                time: spanTime(from, to),
+                streaming: false,
+              });
             }
-            subSteps.push({
-              kind: 'tool',
-              label: t.label || 'tool',
-              status: t.status || '',
-            });
+          };
+          while (thIdx < thoughts.length || tlIdx < tools.length) {
+            const th = thIdx < thoughts.length ? thoughts[thIdx] : null;
+            const tl = tlIdx < tools.length ? tools[tlIdx] : null;
+            const thPos =
+              th && typeof th.textAt === 'number'
+                ? Math.min(Math.max(0, th.textAt), text.length)
+                : Infinity;
+            const tlPos =
+              tl && typeof tl.textAt === 'number'
+                ? Math.min(Math.max(0, tl.textAt), text.length)
+                : Infinity;
+            const nextCut = Math.min(thPos, tlPos, text.length);
+            if (nextCut > at) {
+              words(at, nextCut);
+              at = nextCut;
+            }
+            const takeThought =
+              th &&
+              thPos <= at &&
+              (!tl ||
+                thPos < tlPos ||
+                (typeof th.toolIdx === 'number' ? th.toolIdx : 0) <= tlIdx);
+            if (takeThought) {
+              const thText = strOr(th.text, '').trim();
+              if (thText) {
+                subSteps.push({
+                  kind: 'thought',
+                  text: thText,
+                  time:
+                    typeof th.time === 'number' && Number.isFinite(th.time)
+                      ? th.time
+                      : null,
+                  streaming: !!(th.streaming && v.running),
+                });
+              }
+              thIdx += 1;
+            } else if (tl && tlPos <= at) {
+              subSteps.push({
+                kind: 'tool',
+                label: tl.label || 'tool',
+                status: tl.status || '',
+                time:
+                  typeof tl.time === 'number' && Number.isFinite(tl.time)
+                    ? tl.time
+                    : null,
+              });
+              tlIdx += 1;
+            } else {
+              break;
+            }
           }
           words(at, text.length);
         }
@@ -17046,6 +17291,12 @@
           let skippedInitialPrompt = false;
           for (const m of msgs) {
             if (!m || typeof m !== 'object') continue;
+            const msgTime =
+              typeof m.timestamp === 'number' &&
+              Number.isFinite(m.timestamp) &&
+              m.timestamp > 0
+                ? m.timestamp
+                : null;
             if (m.role === 'user') {
               const txt = strOr(m.content, '').trim();
               if (!txt) continue;
@@ -17054,7 +17305,7 @@
                 continue;
               }
               skippedInitialPrompt = true;
-              steps.push({ kind: 'user', text: txt });
+              steps.push({ kind: 'user', text: txt, time: msgTime });
             } else if (m.role === 'assistant') {
               const txt = strOr(m.content, '').trim();
               if (!txt) continue;
@@ -17063,12 +17314,14 @@
                 steps.push({
                   kind: 'thought',
                   text: txt,
+                  time: msgTime,
                   streaming: !!m.streaming,
                 });
               } else {
                 steps.push({
                   kind: 'msg',
                   text: txt,
+                  time: msgTime,
                   streaming: !!m.streaming,
                 });
               }
@@ -17081,7 +17334,7 @@
               const status = m.callId
                 ? resultsByCallId.get(m.callId) || (v.running ? 'running' : '')
                 : '';
-              steps.push({ kind: 'tool', label, status });
+              steps.push({ kind: 'tool', label, status, time: msgTime });
             }
           }
           if (steps.length) {
@@ -17095,6 +17348,10 @@
                   kind: 'tool',
                   label: t.label || 'tool',
                   status: t.status || '',
+                  time:
+                    typeof t.time === 'number' && Number.isFinite(t.time)
+                      ? t.time
+                      : null,
                 });
               }
             }
@@ -17115,6 +17372,74 @@
           });
         }
         return { steps, from: steps.length ? 'daemon' : '' };
+      }
+      function agentFmtStamp(ms) {
+        if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return '';
+        if (
+          typeof TranscriptView !== 'undefined' &&
+          TranscriptView &&
+          typeof TranscriptView.formatStamp === 'function'
+        ) {
+          return TranscriptView.formatStamp(ms, stampZone || undefined);
+        }
+        return '';
+      }
+      function agentStepHead(whoText, ms, streaming) {
+        const head = agentEl('div', 'ag-step-head');
+        const who = agentEl('span', 'ag-step-who', whoText);
+        if (streaming) who.dataset.streaming = 'true';
+        head.appendChild(who);
+        const stamp = agentFmtStamp(ms);
+        if (stamp) head.appendChild(agentEl('span', 'ag-step-time', stamp));
+        return head;
+      }
+      function appendAgentLiveIndicator(body, v, steps) {
+        if (!v || !v.running) return;
+        const row = v.row;
+        const sub = v.item && v.item.sub;
+        let phase = strOr(row && row.activityPhase, '');
+        if (!phase) {
+          if (sub && sub.thinking) phase = 'thinking';
+          else {
+            const last = steps.length ? steps[steps.length - 1] : null;
+            if (last && last.kind === 'thought' && last.streaming) phase = 'thinking';
+            else if (last && last.kind === 'msg' && last.streaming) phase = 'responding';
+            else if (last && last.kind === 'tool' && (last.status === 'running' || last.status === 'in_progress')) phase = 'tool';
+            else phase = 'thinking';
+          }
+        }
+        let label = 'Thinking...';
+        const tool = row && row.activeTool;
+        if (phase === 'waiting_approval') {
+          label =
+            tool && tool.name
+              ? 'Waiting for approval: ' +
+                tool.name +
+                (tool.description ? ' (' + tool.description + ')' : '')
+              : 'Waiting for approval';
+        } else if (phase === 'tool') {
+          if (tool && tool.name) {
+            label =
+              'Running ' +
+              tool.name +
+              (tool.description ? ': ' + tool.description : '') +
+              '...';
+          } else {
+            const last = steps.length ? steps[steps.length - 1] : null;
+            label =
+              last && last.kind === 'tool' && last.label
+                ? 'Running ' + last.label + '...'
+                : 'Running tool...';
+          }
+        } else if (phase === 'responding') {
+          label = 'Responding...';
+        }
+        const ind = agentEl('div', 'ag-live-ind');
+        ind.dataset.phase = phase;
+        ind.appendChild(agentEl('span', 'ag-live-dot'));
+        ind.appendChild(agentEl('span', 'ag-live-label', label));
+        ind.appendChild(agentClock(v));
+        body.appendChild(ind);
       }
       // How long ago, on the daemon's own clock: its `now` against its own
       // `at`, so a phone whose clock is off by minutes still reads it right.
@@ -17246,6 +17571,7 @@
                 : 'This page holds no steps for this agent, and the daemon reports them only while an agent runs.',
             ),
           );
+          appendAgentLiveIndicator(body, v, steps);
           return;
         }
         if (from === 'daemon') {
@@ -17262,32 +17588,50 @@
           const li = agentEl('li', 'ag-step ' + st.kind);
           li.dataset.kind = st.kind;
           if (st.kind === 'msg') {
+            const liveMsg = !!(st.streaming && v.running);
+            if (liveMsg || st.time) {
+              li.appendChild(
+                agentStepHead(
+                  liveMsg ? 'Responding...' : 'Assistant',
+                  st.time,
+                  liveMsg,
+                ),
+              );
+            }
             li.appendChild(agentClipped(st.text, 'msg-' + i, AGENT_MSG_CLIP));
           } else if (st.kind === 'thought') {
+            const liveThought = !!(st.streaming && v.running);
             li.appendChild(
-              agentClipped(
-                'Thinking: ' + st.text,
-                'thought-' + i,
-                AGENT_MSG_CLIP,
+              agentStepHead(
+                liveThought ? 'Thinking...' : 'Thought',
+                st.time,
+                liveThought,
               ),
             );
+            li.appendChild(agentClipped(st.text, 'thought-' + i, AGENT_MSG_CLIP));
           } else if (st.kind === 'user') {
-            li.appendChild(
-              agentClipped('You: ' + st.text, 'user-' + i, AGENT_MSG_CLIP),
-            );
+            li.appendChild(agentStepHead('You', st.time, false));
+            li.appendChild(agentClipped(st.text, 'user-' + i, AGENT_MSG_CLIP));
           } else if (st.kind === 'tool') {
-            li.appendChild(agentEl('span', null, '\u{1F527} ' + st.label));
-            if (st.status) li.appendChild(agentEl('span', 'st', st.status));
+            const rowEl = agentEl('div', 'ag-step-row');
+            rowEl.appendChild(agentEl('span', null, '\u{1F527} ' + st.label));
+            if (st.status) rowEl.appendChild(agentEl('span', 'st', st.status));
+            const stamp = agentFmtStamp(st.time);
+            if (stamp) rowEl.appendChild(agentEl('span', 'ag-step-time', stamp));
+            li.appendChild(rowEl);
           } else {
-            li.appendChild(
+            const rowEl = agentEl('div', 'ag-step-row');
+            rowEl.appendChild(
               agentEl('span', null, '\u{1F527} ' + st.label + (st.desc ? ': ' + st.desc : '')),
             );
-            const ago = agentAgo(st.at);
-            if (ago) li.appendChild(agentEl('span', 'st', ago));
+            const stamp = agentFmtStamp(st.at) || agentAgo(st.at);
+            if (stamp) rowEl.appendChild(agentEl('span', 'ag-step-time', stamp));
+            li.appendChild(rowEl);
           }
           ol.appendChild(li);
         });
         body.appendChild(ol);
+        appendAgentLiveIndicator(body, v, steps);
       }
       function renderAgentSheet() {
         if (!agentSheet.open) return;
@@ -27220,8 +27564,16 @@
       // serves a row being built and a row being kept.
       function paintAgentChip(head, s) {
         const n = rowAgentCount(s);
+        const paused =
+          n <= 0 &&
+          agentsOn() &&
+          s &&
+          s.sessionId === watchedSessionId &&
+          typeof agentsPausedCount === 'function'
+            ? agentsPausedCount()
+            : 0;
         let chip = head.querySelector('.agchip');
-        if (n <= 0) {
+        if (n <= 0 && paused <= 0) {
           if (chip) chip.remove();
           return;
         }
@@ -27229,11 +27581,18 @@
           chip = document.createElement('span');
           chip.className = 'agchip';
         }
+        if (n > 0) delete chip.dataset.state;
+        else chip.dataset.state = 'paused';
         const anchor = head.querySelector('.dot') || head.querySelector('.tt');
         if (chip.previousElementSibling !== anchor) anchor.after(chip);
-        const text = agentsChipText(n);
+        const text = n > 0 ? agentsChipText(n) : agentsPausedChipText(paused);
         if (chip.textContent !== text) chip.textContent = text;
-        const title = rowAgentWords(s);
+        const title =
+          n > 0
+            ? rowAgentWords(s)
+            : paused === 1
+              ? '1 paused subagent'
+              : paused + ' paused subagents';
         if (chip.title !== title) chip.title = title;
       }
       // The threads of `s` that are working now: rows anywhere in the list
@@ -28404,6 +28763,24 @@
           void renderLineage(id);
           void refreshIdleToggle();
           void loadPermRules(false); // task #27: refresh the rules for this workspace
+          if (
+            agentsOn() &&
+            (agentsState.stale ||
+              !!agentsState.err ||
+              (agentsState.rows === null &&
+                !agentsState.reading &&
+                !agentsState.timer))
+          ) {
+            agentsSchedule(0);
+          }
+          if (
+            rosterStale ||
+            roster.failed ||
+            (!roster.listed && !rosterReading)
+          ) {
+            rosterStale = false;
+            void readRoster(id);
+          }
           // issue #35: this session just (re)started — the list may predate
           // it. If its transcript file does not exist yet (lazy creation),
           // the startPastConvosPoll interval picks it up once the first
@@ -28482,6 +28859,7 @@
                   // #230: the bus epoch changed, so whatever the roster is
                   // showing missed everything between here and the reload.
                   if (roster.sessionId === id) rosterGap();
+                  if (agentsState && agentsState.sessionId === id) agentsGap();
                   myController.abort();
                 }
                 continue;
@@ -28511,6 +28889,7 @@
           // #230: either way the frames stopped arriving, so a run that moved
           // during the gap moved unseen. The replay boundary reads once.
           if (roster.sessionId === id) rosterGap();
+          if (agentsState && agentsState.sessionId === id) agentsGap();
           // issue #35: the session just finished — refresh so it lands in
           // the list with its final mtime/title instead of waiting for the
           // next interval tick.
@@ -28532,6 +28911,7 @@
             // #230: the same hole as a clean end, and an abort is not one: an
             // Unwatch or a switch tears the roster down anyway.
             if (roster.sessionId === id) rosterGap();
+            if (agentsState && agentsState.sessionId === id) agentsGap();
             scheduleWatchRetry(0);
           }
         } finally {

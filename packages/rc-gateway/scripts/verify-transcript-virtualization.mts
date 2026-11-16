@@ -27117,11 +27117,11 @@ PAGE_SCENARIOS.push({
     });
     expect(followed.over && followed.gap < 8, `the trace did not follow to the newest step (${JSON.stringify(followed)})`);
     expect(/tool-9/.test(followed.last), `the newest step is not at the bottom (${JSON.stringify(followed.last)})`);
-    const clipped = await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('#agents-body [data-expand]')).find((b) => /1500 characters/.test(b.textContent ?? '')) as HTMLElement | undefined;
-      return btn ? btn.dataset['expand'] : null;
-    });
-    expect(clipped !== null, 'a 1500-character message was not clipped with a way to read it');
+    // #274: long subagent output is rendered expanded in full without truncation.
+    const hasFullLongMsg = await page.evaluate(() =>
+      (document.getElementById('agents-body')!.textContent ?? '').includes('L'.repeat(1500)),
+    );
+    expect(hasFullLongMsg, 'a 1500-character message was truncated instead of rendered in full');
     // A reader who scrolled up to read is left there when more arrives.
     await page.evaluate(() => {
       document.getElementById('agents-body')!.scrollTop = 0;
@@ -27132,9 +27132,7 @@ PAGE_SCENARIOS.push({
     await page.waitForFunction(() => document.querySelectorAll('#agents-body .ag-steps > li').length === 25, null, { timeout: 10_000 });
     const kept = await page.evaluate(() => document.getElementById('agents-body')!.scrollTop);
     expect(kept === 0, `a reader who scrolled up was carried to ${kept}`);
-    await page.click(`#agents-body [data-expand="${clipped}"]`);
-    await page.waitForFunction(() => (document.getElementById('agents-body')!.textContent ?? '').includes('L'.repeat(1500)), null, { timeout: 5_000 });
-    return `steps msg,tool,msg,tool in order; titled Explore with its task; spawned 1 (asked ?rootAgentId=agent-a); Stop ${stop.h}px, ${stop.vh - stop.bottom}px off the bottom; followed to tool-9, left alone once scrolled up; a 1500-character message opened whole`;
+    return `steps msg,tool,msg,tool in order; titled Explore with its task; spawned 1 (asked ?rootAgentId=agent-a); Stop ${stop.h}px, ${stop.vh - stop.bottom}px off the bottom; followed to tool-9, left alone once scrolled up; 1500-character message shown in full`;
   },
 });
 
@@ -34304,10 +34302,9 @@ PAGE_SCENARIOS.push({
 }
 
 // #267, #260: Subagent Pause, Resume, and Abandon controls in #agents-sheet.
-{
-  const SUBAGENT_CTRL_FEATURES = [...AGENT_FEATURES, 'session_subagent_controls'];
+const SUBAGENT_CTRL_FEATURES = [...AGENT_FEATURES, 'session_subagent_controls'];
 
-  const SHEET_TEXT_COLLECTOR = String.raw`((roots) => {
+const SHEET_TEXT_COLLECTOR = String.raw`((roots) => {
     const out = [];
     const seen = new Set();
     const skip = ['checkbox', 'radio', 'file', 'hidden', 'range', 'color'];
@@ -34418,6 +34415,7 @@ PAGE_SCENARIOS.push({
     }
   }
 
+{
   async function openAgentsFromMore(page: Page): Promise<void> {
     await page.click('#h1-more');
     await page.waitForSelector('#more-agents', { state: 'visible' });
@@ -36070,6 +36068,7 @@ PAGE_SCENARIOS.push({
         hasPause: !!row && !!row.querySelector('.ag-pause:not([hidden])'),
         hasStop: !!row && !!row.querySelector('.ag-stop:not([hidden])'),
         chipHidden: !chip || chip.hidden === true,
+        chipText: chip ? (chip.textContent || '').trim() : '',
       };
     })()`)) as {
       subText: string;
@@ -36080,6 +36079,7 @@ PAGE_SCENARIOS.push({
       hasPause: boolean;
       hasStop: boolean;
       chipHidden: boolean;
+      chipText: string;
     };
     expect(
       pausedState.subText.includes('done in') &&
@@ -36090,7 +36090,8 @@ PAGE_SCENARIOS.push({
         pausedState.hasAbandon &&
         !pausedState.hasPause &&
         !pausedState.hasStop &&
-        pausedState.chipHidden,
+        !pausedState.chipHidden &&
+        pausedState.chipText === '1 paused',
       `paused inline/sheet parity failed: ${JSON.stringify(pausedState)}`,
     );
 
@@ -36332,6 +36333,270 @@ PAGE_SCENARIOS.push({
     return `inline Fork,Rewind,Copy stayed on 1 line (390px roleH=${m390.roleH}px, 320px roleH=${m320.roleH}px) at top of ${m390.bubbleH}px reply with 0px overflow`;
   },
 });
+
+{
+  // #274: Expanded subagent view, full untruncated output, step timestamps,
+  // and thinking indicators; plus idle view surfacing recovered/paused agents.
+  const T_274_BASE = Date.UTC(2026, 10, 16, 11, 10, 0);
+  const LONG_TASK_274 = 'Audit every route and middleware layer in detail: ' + 'TASK_SEGMENT_'.repeat(40);
+  const LONG_OUTPUT_274 = 'START_MARKER_' + 'FULL_SUBAGENT_OUTPUT_LINE '.repeat(95) + '_END_MARKER';
+
+  PAGE_SCENARIOS.push({
+    name: 'P597 #agents-sheet expands to nearly full viewport height, renders long tasks and 2400+ char output without truncation, and shows step timestamps plus thinking indicators (#274)',
+    stub: {
+      capabilitiesFeatures: SUBAGENT_CTRL_FEATURES,
+      sessionAgentsResult: (sid: string) =>
+        agentRoster(sid, [
+          {
+            ...agentTask({
+              id: 'agent-274-live',
+              toolUseId: 'tc-274-live',
+              subagentType: 'Explore',
+              description: 'deep route audit',
+              status: 'running',
+              isBackgrounded: true,
+              canPause: true,
+              startTime: T_274_BASE,
+              prompt: LONG_TASK_274,
+            }),
+            activityPhase: 'thinking',
+            messages: [
+              {
+                role: 'user',
+                content: LONG_TASK_274,
+                timestamp: T_274_BASE,
+              },
+              {
+                role: 'assistant',
+                content: 'Checking auth middleware before inspecting routes.',
+                timestamp: T_274_BASE + 15_000,
+                thought: true,
+              },
+              {
+                role: 'tool_call',
+                content: 'read_file: server.ts',
+                toolName: 'read_file',
+                description: 'server.ts',
+                callId: 'call-274-1',
+                timestamp: T_274_BASE + 30_000,
+              },
+              {
+                role: 'tool_result',
+                content: 'Tool read_file succeeded',
+                toolName: 'read_file',
+                callId: 'call-274-1',
+                success: true,
+                timestamp: T_274_BASE + 40_000,
+              },
+              {
+                role: 'assistant',
+                content: LONG_OUTPUT_274,
+                timestamp: T_274_BASE + 60_000,
+              },
+              {
+                role: 'user',
+                content: 'Also verify rate limiters.',
+                timestamp: T_274_BASE + 90_000,
+              },
+              {
+                role: 'assistant',
+                content: 'Mapping rate limiter buckets across sub-actors...',
+                timestamp: T_274_BASE + 120_000,
+                thought: true,
+                streaming: true,
+              },
+            ],
+          },
+        ]),
+    },
+    run: async ({ page, viewer }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await watch(page, viewer.sessionId);
+      await waitChip(page, '1 agent');
+      await openAgentsFromChip(page);
+      await waitSheetRows(page, 1);
+      await page.click('#agents-body .ag-open[data-key="tc-274-live"]');
+      await page.waitForFunction(
+        () => document.querySelectorAll('#agents-body .ag-steps > li').length === 5,
+        null,
+        { timeout: 10_000 },
+      );
+
+      const inspectAt = async (vw: number, vh: number) => {
+        await page.setViewportSize({ width: vw, height: vh });
+        await settlePage(page, 150);
+        await verifyAgentsSheetErgonomics(page, `P597@${vw}x${vh}`);
+        return (await page.evaluate(String.raw`(() => {
+          const card = document.querySelector('#agents-sheet .ag-card');
+          const rc = card.getBoundingClientRect();
+          const bodyText = document.getElementById('agents-body').textContent || '';
+          const stamps = Array.from(document.querySelectorAll('#agents-body .ag-step-time')).map(
+            (el) => (el.textContent || '').trim(),
+          );
+          const whos = Array.from(document.querySelectorAll('#agents-body .ag-step-who')).map(
+            (el) => (el.textContent || '').trim(),
+          );
+          const liveInd = document.querySelector('#agents-body .ag-live-ind');
+          const expandBtns = document.querySelectorAll('#agents-body [data-expand]').length;
+          return {
+            cardH: Math.round(rc.height),
+            vh: window.innerHeight,
+            ratio: rc.height / window.innerHeight,
+            hasFullTask: bodyText.includes(${JSON.stringify(LONG_TASK_274)}),
+            hasStartMarker: bodyText.includes('START_MARKER_'),
+            hasEndMarker: bodyText.includes('_END_MARKER'),
+            expandBtns,
+            stamps,
+            whos,
+            liveIndPhase: liveInd ? liveInd.getAttribute('data-phase') : null,
+            liveIndText: liveInd ? (liveInd.textContent || '').trim() : '',
+          };
+        })()`)) as {
+          cardH: number;
+          vh: number;
+          ratio: number;
+          hasFullTask: boolean;
+          hasStartMarker: boolean;
+          hasEndMarker: boolean;
+          expandBtns: number;
+          stamps: string[];
+          whos: string[];
+          liveIndPhase: string | null;
+          liveIndText: string;
+        };
+      };
+
+      const m390 = await inspectAt(390, 844);
+      const m320 = await inspectAt(320, 600);
+      for (const [label, m] of [
+        ['390x844', m390],
+        ['320x600', m320],
+      ] as const) {
+        expect(
+          m.ratio >= 0.88,
+          `${label}: #agents-sheet .ag-card took only ${m.cardH}/${m.vh}px (${m.ratio.toFixed(2)})`,
+        );
+        expect(
+          m.hasFullTask && m.hasStartMarker && m.hasEndMarker && m.expandBtns === 0,
+          `${label}: subagent task or long output was truncated: ${JSON.stringify(m)}`,
+        );
+        expect(
+          m.stamps.length === 5 && m.stamps.every((s) => /Nov 16/.test(s)),
+          `${label}: expected 5 step timestamps, got ${JSON.stringify(m.stamps)}`,
+        );
+        expect(
+          m.whos.join('|') === 'Thought|Assistant|You|Thinking...',
+          `${label}: unexpected step headers ${JSON.stringify(m.whos)}`,
+        );
+        expect(
+          m.liveIndPhase === 'thinking' && m.liveIndText.includes('Thinking...'),
+          `${label}: missing live thinking indicator at bottom: ${JSON.stringify(m)}`,
+        );
+      }
+      return `card expanded (390px=${m390.cardH}/844px, 320px=${m320.cardH}/600px); full 500-char task + 2400-char output untruncated; 5 timestamps + Thought/Thinking... + bottom Thinking... indicator verified`;
+    },
+  });
+
+  const P598_STATE = { phase: 'before_recovery' as 'before_recovery' | 'recovered_paused' | 'resumed' };
+  PAGE_SCENARIOS.push({
+    name: 'P598 when a session ends prematurely and recovers with paused agents, session_recovered re-reads /agents and surfaces paused agents in the idle status line, #agents-chip, More > Agents, and #past-list (#274)',
+    stub: {
+      capabilitiesFeatures: SUBAGENT_CTRL_FEATURES,
+      sessionAgentsResult: (sid: string) =>
+        agentRoster(
+          sid,
+          P598_STATE.phase === 'before_recovery'
+            ? []
+            : [
+                agentTask({
+                  id: 'agent-rec-1',
+                  toolUseId: 'tc-rec-1',
+                  subagentType: 'general-purpose',
+                  description: 'migrate schema',
+                  status: P598_STATE.phase === 'resumed' ? 'running' : 'paused',
+                  isBackgrounded: true,
+                  canPause: P598_STATE.phase === 'resumed',
+                  startTime: T_274_BASE,
+                  ...(P598_STATE.phase === 'recovered_paused'
+                    ? { endTime: T_274_BASE + 25_000 }
+                    : {}),
+                }),
+              ],
+        ),
+      subagentResumeResult: ({ sessionId, subagentRef }) => {
+        P598_STATE.phase = 'resumed';
+        return {
+          sessionId,
+          subagentRef,
+          outcome: 'resumed',
+          status: 'running',
+        };
+      },
+    },
+    run: async ({ page, viewer }) => {
+      P598_STATE.phase = 'before_recovery';
+      await page.setViewportSize({ width: 390, height: 844 });
+      await watch(page, viewer.sessionId);
+      await waitAgentsRead(page);
+      await waitChip(page, null);
+
+      // Simulate premature session interruption followed by daemon recovery
+      // where the background agent returns automatically in paused state.
+      await page.evaluate(String.raw`(() => {
+        renderFrame({ type: 'session_interrupted', data: { sessionId: watchedSessionId, recovered: true } });
+      })()`);
+      P598_STATE.phase = 'recovered_paused';
+      const beforeRecoveryRead = Date.now();
+      await page.evaluate(String.raw`(() => {
+        renderFrame({ type: 'session_recovered', data: { sessionId: watchedSessionId, tookMs: 42 } });
+      })()`);
+      await waitAgentsRead(page, beforeRecoveryRead);
+      await waitChip(page, '1 paused');
+
+      const idleChrome = (await page.evaluate(String.raw`(() => {
+        const statusBtn = document.getElementById('h1-status');
+        const stateText = (document.getElementById('h1-state').textContent || '').trim();
+        const chip = document.getElementById('agents-chip');
+        const moreVal = (document.getElementById('more-agents-val').textContent || '').trim();
+        return {
+          statusState: statusBtn.getAttribute('data-state'),
+          stateText,
+          chipHidden: chip.hidden,
+          chipState: chip.getAttribute('data-state'),
+          chipText: (chip.textContent || '').trim(),
+          chipH: Math.round(chip.getBoundingClientRect().height),
+          moreVal,
+        };
+      })()`)) as {
+        statusState: string | null;
+        stateText: string;
+        chipHidden: boolean;
+        chipState: string | null;
+        chipText: string;
+        chipH: number;
+        moreVal: string;
+      };
+      expect(
+        idleChrome.statusState === 'paused' &&
+          idleChrome.stateText === '1 paused, migrate schema' &&
+          !idleChrome.chipHidden &&
+          idleChrome.chipState === 'paused' &&
+          idleChrome.chipText === '1 paused' &&
+          idleChrome.chipH === 44 &&
+          idleChrome.moreVal === '1 paused',
+        `idle view did not surface recovered paused agent: ${JSON.stringify(idleChrome)}`,
+      );
+
+      // Tapping #agents-chip from the idle view opens the sheet to Paused (1) and lets the user Resume immediately.
+      await openAgentsFromChip(page);
+      await waitSheetRows(page, 1);
+      await verifyAgentsSheetErgonomics(page, 'P598 recovered paused roster');
+      await page.click('#agents-body .ag-resume[data-ref="tc-rec-1"]');
+      await waitChip(page, '1 agent');
+      return `session_recovered triggered agentsRead -> idle view showed "${idleChrome.stateText}" + 44px "1 paused" chip + More "1 paused"; Resume transitioned to "1 agent"`;
+    },
+  });
+}
 
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));

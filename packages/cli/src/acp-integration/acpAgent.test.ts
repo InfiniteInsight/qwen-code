@@ -17868,6 +17868,72 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await stop();
     });
 
+    it('hydrates cold paused sidecars via loadPausedBackgroundAgents on sessionTaskResume and sessionTaskMessage (#274)', async () => {
+      const items: Array<{
+        id: string;
+        kind: string;
+        status: string;
+        toolUseId?: string;
+      }> = [];
+      const registry = {
+        get: vi.fn((id: string) => items.find((t) => t.id === id)),
+        getAll: vi.fn(() => items),
+      };
+      const loadPausedBackgroundAgents = vi.fn(async () => {
+        if (items.length === 0) {
+          items.push({
+            id: 'agent-cold-274',
+            kind: 'agent',
+            status: 'paused',
+            toolUseId: 'call-cold-274',
+          });
+        }
+        return items;
+      });
+      const resumeBackgroundAgentWithOutcome = vi.fn(async (id: string) => {
+        const found = items.find((t) => t.id === id);
+        if (found) found.status = 'running';
+        return { resumed: true as const, task: found };
+      });
+      const { agent, stop } = await startAgent({
+        getBackgroundTaskRegistry: vi.fn().mockReturnValue(registry),
+        loadPausedBackgroundAgents,
+        resumeBackgroundAgentWithOutcome,
+      });
+
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskResume, {
+          sessionId,
+          taskId: 'call-cold-274',
+        }),
+      ).resolves.toEqual({ outcome: 'resumed', status: 'running' });
+      expect(loadPausedBackgroundAgents).toHaveBeenCalledTimes(1);
+      expect(resumeBackgroundAgentWithOutcome).toHaveBeenCalledWith(
+        'agent-cold-274',
+        undefined,
+      );
+
+      items.length = 0;
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskMessage, {
+          sessionId,
+          taskId: 'call-cold-274',
+          message: 'finish the audit',
+        }),
+      ).resolves.toEqual({
+        delivered: true,
+        action: 'resumed',
+        status: 'running',
+      });
+      expect(loadPausedBackgroundAgents).toHaveBeenCalledTimes(2);
+      expect(resumeBackgroundAgentWithOutcome).toHaveBeenLastCalledWith(
+        'agent-cold-274',
+        'finish the audit',
+      );
+
+      await stop();
+    });
+
     it('rejects a resume whose message is not a string', async () => {
       const { agent, stop } = await startAgent({
         getBackgroundTaskRegistry: vi.fn().mockReturnValue(registryWith([])),
