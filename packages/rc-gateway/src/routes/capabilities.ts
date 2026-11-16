@@ -335,6 +335,13 @@ export function createCapabilityRoute(deps: {
       // Reload workspace row only when this is set, the token holds write,
       // and the daemon advertises `workspace_reload`.
       workspaceReload: true,
+      // #123: GET, PATCH and DELETE /rc/workspace/session-groups are mounted.
+      workspaceSessionGroups: true,
+      // #123: POST and DELETE /rc/workspace/agents (project scope) are mounted.
+      workspaceAgentWrites: true,
+      // #123: GET /rc/workspace/voice and /rc/workspace/session-info are mounted.
+      workspaceVoiceRead: true,
+      workspaceSessionInfoRead: true,
       // #128: POST /session/:id/artifacts and DELETE
       // /session/:id/artifacts/:artifactId are mounted (relays; the pool
       // sends the daemon-issued client id the daemon requires). The page's

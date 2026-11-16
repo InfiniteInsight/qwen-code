@@ -225,6 +225,14 @@ export type AuditAction =
   | 'session_organize_failed'
   | 'session_group_created'
   | 'session_group_create_failed'
+  | 'session_group_updated'
+  | 'session_group_update_failed'
+  | 'session_group_deleted'
+  | 'session_group_delete_failed'
+  | 'workspace_agent_created'
+  | 'workspace_agent_create_failed'
+  | 'workspace_agent_deleted'
+  | 'workspace_agent_delete_failed'
   | 'session_source_added'
   | 'session_source_add_failed'
   | 'session_source_removed'
@@ -404,6 +412,14 @@ const AUDIT_ACTIONS_LIST = [
   'session_organize_failed',
   'session_group_created',
   'session_group_create_failed',
+  'session_group_updated',
+  'session_group_update_failed',
+  'session_group_deleted',
+  'session_group_delete_failed',
+  'workspace_agent_created',
+  'workspace_agent_create_failed',
+  'workspace_agent_deleted',
+  'workspace_agent_delete_failed',
   'session_source_added',
   'session_source_add_failed',
   'session_source_removed',

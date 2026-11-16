@@ -186,8 +186,8 @@ describe('PATCH /session/:id/organization (#110)', () => {
     ];
     for (const [body, code] of cases) {
       const out = await send(`${base}/session/${SID}/organization`, 'PATCH', body);
-      expect(out.status, JSON.stringify(body)).toBe(400);
-      expect(out.body['code'], JSON.stringify(body)).toBe(code);
+      expect(out.status).toBe(400);
+      expect(out.body['code']).toBe(code);
     }
     expect(stub?.organizationCalls).toEqual([]);
   });
@@ -316,8 +316,8 @@ describe('POST /rc/workspace/session-groups (#110)', () => {
     ];
     for (const [url, body, code] of cases) {
       const out = await send(url, 'POST', body);
-      expect(out.status, JSON.stringify(body)).toBe(400);
-      expect(out.body['code'], JSON.stringify(body)).toBe(code);
+      expect(out.status).toBe(400);
+      expect(out.body['code']).toBe(code);
     }
     expect(stub?.groupCreates).toEqual([]);
   });
@@ -426,8 +426,73 @@ describe('the #110 organization routes as the gateway mounts them', () => {
       headers: { Authorization: `Bearer ${token}` },
     });
     const body = (await res.json()) as {
-      remoteControl: { sessionOrganization?: unknown };
+      remoteControl: {
+        sessionOrganization?: unknown;
+        workspaceSessionGroups?: unknown;
+      };
     };
     expect(body.remoteControl.sessionOrganization).toBe(true);
+    expect(body.remoteControl.workspaceSessionGroups).toBe(true);
+  });
+
+  it('a write token lists, renames, and deletes workspace session groups (#123)', async () => {
+    const { url, store } = await bootGateway();
+    const { token } = await store.issue([WRITE], 'phone-write');
+    const { token: readToken } = await store.issue([SESSION_READ], 'phone-read');
+
+    const deniedList = await send(
+      `${url}/rc/workspace/session-groups?workspace=${encodeURIComponent(WS)}`,
+      'GET',
+      undefined,
+      readToken,
+    );
+    expect(deniedList.status).toBe(403);
+
+    const listed = await send(
+      `${url}/rc/workspace/session-groups?workspace=${encodeURIComponent(WS)}`,
+      'GET',
+      undefined,
+      token,
+    );
+    expect(listed.status).toBe(200);
+    const groups = listed.body['groups'] as Array<{ id: string; name: string }>;
+    expect(groups.map((g) => g.name)).toEqual(['Work']);
+
+    const renamed = await send(
+      `${url}/rc/workspace/session-groups/g-work?workspace=${encodeURIComponent(WS)}`,
+      'PATCH',
+      { name: 'Focus' },
+      token,
+    );
+    expect(renamed.status).toBe(200);
+    expect((renamed.body['group'] as { name: string }).name).toBe('Focus');
+
+    const badUpdate = await send(
+      `${url}/rc/workspace/session-groups/g-work?workspace=${encodeURIComponent(WS)}`,
+      'PATCH',
+      {},
+      token,
+    );
+    expect(badUpdate.status).toBe(400);
+    expect(badUpdate.body['code']).toBe('empty_group_update');
+
+    const deleted = await send(
+      `${url}/rc/workspace/session-groups/g-work?workspace=${encodeURIComponent(WS)}`,
+      'DELETE',
+      undefined,
+      token,
+    );
+    expect(deleted.status).toBe(200);
+    expect(deleted.body['deleted']).toBe(true);
+
+    const after = await send(
+      `${url}/rc/workspace/session-groups?workspace=${encodeURIComponent(WS)}`,
+      'GET',
+      undefined,
+      token,
+    );
+    expect(
+      (after.body['groups'] as Array<{ name: string }>).map((g) => g.name),
+    ).toEqual([]);
   });
 });

@@ -7,6 +7,7 @@
 import type { RequestHandler, Response } from 'express';
 import type {
   DaemonSessionGroupInput,
+  DaemonSessionGroupUpdate,
   DaemonSessionOrganizationUpdate,
 } from '@qwen-code/sdk';
 import {
@@ -305,5 +306,164 @@ export function createSessionGroupCreateRoute(
     // and a group's name is the user's own words.
     void audit?.record({ action: 'session_group_created', actorTokenId });
     res.status(201).json({ group });
+  };
+}
+
+/** GET /rc/workspace/session-groups?workspace=<cwd> (#123): list named groups. */
+export function createSessionGroupListRoute(
+  daemon: Pick<SessionDaemon, 'listSessionGroups'>,
+): RequestHandler {
+  return async (req, res) => {
+    const workspace = parseWorkspace(req.query['workspace']);
+    if (workspace === undefined) {
+      return invalid(
+        res,
+        'invalid_workspace',
+        'A group list belongs to one folder: name it with ?workspace=',
+      );
+    }
+    try {
+      const catalog = await daemon.listSessionGroups(workspace);
+      res.status(200).json(catalog);
+    } catch (err) {
+      sendOrganizationError(res, err, 'group');
+    }
+  };
+}
+
+function validGroupId(raw: unknown): raw is string {
+  return (
+    typeof raw === 'string' &&
+    raw.length > 0 &&
+    raw.length <= MAX_GROUP_ID_LENGTH &&
+    !raw.includes('/') &&
+    !raw.includes('\0')
+  );
+}
+
+/** PATCH /rc/workspace/session-groups/:groupId?workspace=<cwd> (#123). */
+export function createSessionGroupUpdateRoute(
+  daemon: Pick<SessionDaemon, 'updateSessionGroup'>,
+  audit?: AuditRecorder,
+): RequestHandler {
+  return async (req, res) => {
+    const actorTokenId = req.rcClient?.id;
+    const workspace = parseWorkspace(req.query['workspace']);
+    if (workspace === undefined) {
+      return invalid(
+        res,
+        'invalid_workspace',
+        'A group belongs to one folder: name it with ?workspace=',
+      );
+    }
+    const groupId = req.params.groupId;
+    if (!validGroupId(groupId)) {
+      return invalid(res, 'invalid_group_id', 'Invalid group id');
+    }
+    const body: unknown = req.body;
+    const allowed = ['name', 'color', 'order'];
+    if (!isPlainObject(body) || Object.keys(body).some((k) => !allowed.includes(k))) {
+      return invalid(
+        res,
+        'invalid_group_update',
+        'Only `name`, `color`, and `order` can be updated',
+      );
+    }
+    const keys = Object.keys(body);
+    if (keys.length === 0) {
+      return invalid(res, 'empty_group_update', 'Nothing to change');
+    }
+    const update: DaemonSessionGroupUpdate = {};
+    if (body['name'] !== undefined) {
+      const name = typeof body['name'] === 'string' ? body['name'].trim() : '';
+      if (
+        name.length === 0 ||
+        name.length > MAX_GROUP_NAME_LENGTH ||
+        /[\p{Cc}\p{Cf}]/u.test(name)
+      ) {
+        return invalid(
+          res,
+          'invalid_group_name',
+          'A group name is 1 to 64 characters with no control characters',
+        );
+      }
+      update.name = name;
+    }
+    if (body['color'] !== undefined) {
+      const color = typeof body['color'] === 'string' ? body['color'] : '';
+      if (!PRESET_COLORS.includes(color) && !/^#[0-9a-fA-F]{6}$/.test(color)) {
+        return invalid(
+          res,
+          'invalid_group_color',
+          'A group colour is one of ' + PRESET_COLORS.join(', ') + ', or #RRGGBB',
+        );
+      }
+      update.color = color as DaemonSessionGroupUpdate['color'];
+    }
+    if (body['order'] !== undefined) {
+      const order = body['order'];
+      if (typeof order !== 'number' || !Number.isSafeInteger(order) || order < 0) {
+        return invalid(
+          res,
+          'invalid_group_order',
+          '`order` must be a non-negative integer',
+        );
+      }
+      update.order = order;
+    }
+    let group;
+    try {
+      group = await daemon.updateSessionGroup(workspace, groupId, update);
+    } catch (err) {
+      const reason = sendOrganizationError(res, err, 'group');
+      void audit?.record({
+        action: 'session_group_update_failed',
+        actorTokenId,
+        detail: { reason },
+      });
+      return;
+    }
+    void audit?.record({
+      action: 'session_group_updated',
+      actorTokenId,
+      detail: { fields: keys.sort() },
+    });
+    res.status(200).json({ group });
+  };
+}
+
+/** DELETE /rc/workspace/session-groups/:groupId?workspace=<cwd> (#123). */
+export function createSessionGroupDeleteRoute(
+  daemon: Pick<SessionDaemon, 'deleteSessionGroup'>,
+  audit?: AuditRecorder,
+): RequestHandler {
+  return async (req, res) => {
+    const actorTokenId = req.rcClient?.id;
+    const workspace = parseWorkspace(req.query['workspace']);
+    if (workspace === undefined) {
+      return invalid(
+        res,
+        'invalid_workspace',
+        'A group belongs to one folder: name it with ?workspace=',
+      );
+    }
+    const groupId = req.params.groupId;
+    if (!validGroupId(groupId)) {
+      return invalid(res, 'invalid_group_id', 'Invalid group id');
+    }
+    let result;
+    try {
+      result = await daemon.deleteSessionGroup(workspace, groupId);
+    } catch (err) {
+      const reason = sendOrganizationError(res, err, 'group');
+      void audit?.record({
+        action: 'session_group_delete_failed',
+        actorTokenId,
+        detail: { reason },
+      });
+      return;
+    }
+    void audit?.record({ action: 'session_group_deleted', actorTokenId });
+    res.status(200).json(result);
   };
 }

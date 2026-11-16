@@ -3553,6 +3553,12 @@ export class DaemonClient {
     return this.workspaceByCwd(workspaceCwd).getSessionLiveState(opts);
   }
 
+  getWorkspaceSessionInfo(
+    workspaceCwd: string,
+  ): Promise<DaemonWorkspaceSessionInfo> {
+    return this.workspaceByCwd(workspaceCwd).getWorkspaceSessionInfo();
+  }
+
   async listSessionGroups(
     workspaceCwd: string,
   ): Promise<DaemonSessionGroupCatalog> {

@@ -320,4 +320,112 @@ describe('GET /rc/workspace/agents', () => {
       expect((await res.json()).code).toBe('daemon_auth_failed');
     }
   });
+
+  it('POST and DELETE /rc/workspace/agents enforce workspace scope, forbid mcpServers/hooks, and write project agents (#123)', async () => {
+    const ctx = await setup();
+
+    const deniedRead = await fetch(`${ctx.baseUrl}/rc/workspace/agents`, {
+      method: 'POST',
+      headers: {
+        ...authed(ctx.readToken),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: 'reviewer',
+        description: 'Review code',
+        systemPrompt: 'Inspect diffs.',
+      }),
+    });
+    expect(deniedRead.status).toBe(403);
+
+    const refusedGlobal = await fetch(`${ctx.baseUrl}/rc/workspace/agents`, {
+      method: 'POST',
+      headers: {
+        ...authed(ctx.writeToken),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: 'reviewer',
+        description: 'Review code',
+        systemPrompt: 'Inspect diffs.',
+        scope: 'user',
+      }),
+    });
+    expect(refusedGlobal.status).toBe(400);
+    expect((await refusedGlobal.json()).code).toBe(
+      'global_scope_not_supported',
+    );
+
+    const refusedMcp = await fetch(`${ctx.baseUrl}/rc/workspace/agents`, {
+      method: 'POST',
+      headers: {
+        ...authed(ctx.writeToken),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: 'reviewer',
+        description: 'Review code',
+        systemPrompt: 'Inspect diffs.',
+        mcpServers: { rogue: { command: 'sh' } },
+      }),
+    });
+    expect(refusedMcp.status).toBe(400);
+    expect((await refusedMcp.json()).code).toBe('agent_host_config_forbidden');
+
+    const conflict = await fetch(`${ctx.baseUrl}/rc/workspace/agents`, {
+      method: 'POST',
+      headers: {
+        ...authed(ctx.writeToken),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: 'reviewer',
+        description: 'Review code',
+        systemPrompt: 'Inspect diffs.',
+        scope: 'workspace',
+      }),
+    });
+    expect(conflict.status).toBe(409);
+    expect((await conflict.json()).code).toBe('agent_already_exists');
+
+    const created = await fetch(`${ctx.baseUrl}/rc/workspace/agents`, {
+      method: 'POST',
+      headers: {
+        ...authed(ctx.writeToken),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: 'qa-helper',
+        description: 'Run targeted QA checks',
+        systemPrompt: 'Inspect diffs.',
+        scope: 'workspace',
+      }),
+    });
+    expect(created.status).toBe(201);
+    const createdBody = await created.json();
+    expect(createdBody.agent.name).toBe('qa-helper');
+    expect(createdBody.agent.level).toBe('project');
+
+    const refusedDeleteGlobal = await fetch(
+      `${ctx.baseUrl}/rc/workspace/agents/qa-helper?scope=user`,
+      {
+        method: 'DELETE',
+        headers: authed(ctx.writeToken),
+      },
+    );
+    expect(refusedDeleteGlobal.status).toBe(400);
+    expect((await refusedDeleteGlobal.json()).code).toBe(
+      'global_scope_not_supported',
+    );
+
+    const deleted = await fetch(
+      `${ctx.baseUrl}/rc/workspace/agents/qa-helper?scope=workspace`,
+      {
+        method: 'DELETE',
+        headers: authed(ctx.writeToken),
+      },
+    );
+    expect(deleted.status).toBe(200);
+    expect(await deleted.json()).toEqual({ deleted: true, name: 'qa-helper' });
+  });
 });

@@ -81,6 +81,12 @@ import {
   type DaemonWorkspaceSettingsStatus,
   type DaemonWorkspaceMemoryStatus,
   type DaemonWorkspaceAgentsStatus,
+  type DaemonCreateAgentRequest,
+  type DaemonAgentMutationResult,
+  type DaemonWorkspaceVoiceStatus,
+  type DaemonWorkspaceSessionInfo,
+  type DaemonSessionGroupCatalog,
+  type DaemonSessionGroupUpdate,
   type DaemonWriteMemoryRequest,
   type DaemonWriteMemoryResult,
   type DaemonReloadResponse,
@@ -744,6 +750,19 @@ export interface SessionDaemon {
     workspaceCwd: string,
     input: DaemonSessionGroupInput,
   ): Promise<DaemonSessionGroup>;
+  /** #123: list named groups in a workspace's organization store. */
+  listSessionGroups(workspaceCwd: string): Promise<DaemonSessionGroupCatalog>;
+  /** #123: rename, recolour, or reorder a named group in a workspace. */
+  updateSessionGroup(
+    workspaceCwd: string,
+    groupId: string,
+    update: DaemonSessionGroupUpdate,
+  ): Promise<DaemonSessionGroup>;
+  /** #123: delete a named group in a workspace. */
+  deleteSessionGroup(
+    workspaceCwd: string,
+    groupId: string,
+  ): Promise<{ deleted: boolean }>;
   /** #110: the session's reference list (files and links), metadata only. */
   listSessionSources(
     sessionId: string,
@@ -842,6 +861,15 @@ export interface SessionDaemon {
   workspacePreflight(
     workspaceCwd?: string,
   ): Promise<DaemonWorkspacePreflightStatus>;
+  /** #123: read-only workspace voice configuration status. */
+  workspaceVoice(
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceVoiceStatus>;
+  /** #123: read-only session store counts for a workspace. */
+  getWorkspaceSessionInfo(
+    workspaceCwd: string,
+  ): Promise<DaemonWorkspaceSessionInfo>;
   // Workspace inventory (rc-workspace-inventory, #123). Same no-argument
   // wrappers as the diagnostics pair: the trailing cwd picks the pooled
   // client, and that client's base URL is the target workspace.
@@ -858,6 +886,19 @@ export interface SessionDaemon {
   listWorkspaceAgents(
     workspaceCwd?: string,
   ): Promise<DaemonWorkspaceAgentsStatus>;
+  /** #123: create a project-scoped subagent definition in a workspace. */
+  createWorkspaceAgent(
+    req: DaemonCreateAgentRequest,
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<DaemonAgentMutationResult>;
+  /** #123: delete a project-scoped subagent definition in a workspace. */
+  deleteWorkspaceAgent(
+    agentType: string,
+    opts?: { scope?: 'workspace' | 'global' },
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<void>;
   setWorkspaceSetting(
     scope: 'workspace' | 'user',
     key: string,
@@ -3174,6 +3215,36 @@ export class DaemonPool implements SessionDaemon {
     );
   }
 
+  async listSessionGroups(
+    workspaceCwd: string,
+  ): Promise<DaemonSessionGroupCatalog> {
+    const key = this.keyFor(workspaceCwd);
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.listSessionGroups(key),
+    );
+  }
+
+  async updateSessionGroup(
+    workspaceCwd: string,
+    groupId: string,
+    update: DaemonSessionGroupUpdate,
+  ): Promise<DaemonSessionGroup> {
+    const key = this.keyFor(workspaceCwd);
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.updateSessionGroup(key, groupId, update),
+    );
+  }
+
+  async deleteSessionGroup(
+    workspaceCwd: string,
+    groupId: string,
+  ): Promise<{ deleted: boolean }> {
+    const key = this.keyFor(workspaceCwd);
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.deleteSessionGroup(key, groupId),
+    );
+  }
+
   /**
    * #110: the session's sources, relayed verbatim. The daemon takes an
    * unbound read (`resolveTrustedClientId` passes when no id is sent), so
@@ -3574,6 +3645,24 @@ export class DaemonPool implements SessionDaemon {
     );
   }
 
+  workspaceVoice(
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<DaemonWorkspaceVoiceStatus> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.workspaceVoice(clientId),
+    );
+  }
+
+  getWorkspaceSessionInfo(
+    workspaceCwd: string,
+  ): Promise<DaemonWorkspaceSessionInfo> {
+    const key = this.keyFor(workspaceCwd);
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.getWorkspaceSessionInfo(key),
+    );
+  }
+
   workspaceSkills(workspaceCwd?: string): Promise<DaemonWorkspaceSkillsStatus> {
     return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
       client.workspaceSkills(),
@@ -3610,6 +3699,27 @@ export class DaemonPool implements SessionDaemon {
     // runtime on the client side. workspaceSkills above follows that rule.
     return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
       client.listWorkspaceAgents(),
+    );
+  }
+
+  createWorkspaceAgent(
+    req: DaemonCreateAgentRequest,
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<DaemonAgentMutationResult> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.createWorkspaceAgent(req, clientId),
+    );
+  }
+
+  deleteWorkspaceAgent(
+    agentType: string,
+    opts?: { scope?: 'workspace' | 'global' },
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<void> {
+    return this.withWorkspaceDeathTrigger(workspaceCwd, (client) =>
+      client.deleteWorkspaceAgent(agentType, opts, clientId),
     );
   }
 

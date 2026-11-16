@@ -292,4 +292,70 @@ describe('GET /rc/workspace/preflight', () => {
       expect((await res.json()).code).toBe('daemon_auth_failed');
     }
   });
+
+  it('GET /rc/workspace/voice and /rc/workspace/session-info require write scope and relay status (#123)', async () => {
+    const ctx = await setup({
+      workspaceVoiceResult: {
+        v: 1,
+        workspaceCwd: '/proj',
+        enabled: true,
+        mode: 'push-to-talk',
+        language: 'en-US',
+        voiceModel: 'whisper-large-v3',
+        availableVoiceModels: [
+          { modelId: 'whisper-large-v3', name: 'Whisper Large v3', authType: 'openai' },
+        ],
+      },
+      workspaceSessionInfoResult: {
+        active: 4,
+        archived: 2,
+        total: 6,
+        live: 1,
+      },
+    });
+
+    for (const path of ['/rc/workspace/voice', '/rc/workspace/session-info']) {
+      const denied = await fetch(`${ctx.baseUrl}${path}`, {
+        headers: authed(ctx.readToken),
+      });
+      expect(denied.status).toBe(403);
+    }
+
+    const voiceRes = await fetch(`${ctx.baseUrl}/rc/workspace/voice`, {
+      headers: authed(ctx.writeToken),
+    });
+    expect(voiceRes.status).toBe(200);
+    const voiceBody = await voiceRes.json();
+    expect(voiceBody.enabled).toBe(true);
+    expect(voiceBody.voiceModel).toBe('whisper-large-v3');
+
+    const infoRes = await fetch(`${ctx.baseUrl}/rc/workspace/session-info`, {
+      headers: authed(ctx.writeToken),
+    });
+    expect(infoRes.status).toBe(200);
+    expect(await infoRes.json()).toEqual({
+      active: 4,
+      archived: 2,
+      total: 6,
+      live: 1,
+    });
+  });
+
+  it('daemon 404 -> 502 voice_unsupported and session_info_unsupported (#123)', async () => {
+    const ctx = await setup({
+      workspaceVoiceStatus: 404,
+      workspaceSessionInfoStatus: 404,
+    });
+    const voiceRes = await fetch(`${ctx.baseUrl}/rc/workspace/voice`, {
+      headers: authed(ctx.writeToken),
+    });
+    expect(voiceRes.status).toBe(502);
+    expect((await voiceRes.json()).code).toBe('voice_unsupported');
+
+    const infoRes = await fetch(`${ctx.baseUrl}/rc/workspace/session-info`, {
+      headers: authed(ctx.writeToken),
+    });
+    expect(infoRes.status).toBe(502);
+    expect((await infoRes.json()).code).toBe('session_info_unsupported');
+  });
 });

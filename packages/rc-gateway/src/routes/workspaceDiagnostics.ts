@@ -142,3 +142,100 @@ export function createWorkspacePreflightRoute(
 ): RequestHandler {
   return diagnosticsRead(daemon, 'preflight');
 }
+
+/**
+ * GET /rc/workspace/voice (#123) - read-only workspace voice configuration
+ * status (`enabled`, `mode`, `language`, `voiceModel`, `availableVoiceModels`).
+ * Mounted at WRITE floor like the other workspace reads.
+ */
+export function createWorkspaceVoiceRoute(
+  daemon: Pick<SessionDaemon, 'workspaceVoice'>,
+): RequestHandler {
+  return async (req, res) => {
+    const target = parseWorkspaceTarget(req.query.workspace);
+    if (!target.ok) {
+      res.status(400).json({
+        error: 'Invalid workspace target',
+        code: 'invalid_workspace',
+      });
+      return;
+    }
+    try {
+      const result = await daemon.workspaceVoice(undefined, target.cwd);
+      res.status(200).json(result);
+    } catch (err) {
+      if (err instanceof WorkspacePoolFullError) {
+        res.status(503).json(workspacePoolFullBody(req, err));
+        return;
+      }
+      if (relayDaemonAuthFailure(res, err, 'workspace_voice')) return;
+      const status = (err as { status?: unknown }).status;
+      if (status === 404) {
+        res.status(502).json({
+          error: 'Daemon does not support workspace voice read',
+          code: 'voice_unsupported',
+        });
+        return;
+      }
+      if (!res.headersSent) {
+        res
+          .status(502)
+          .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
+      }
+    }
+  };
+}
+
+/**
+ * GET /rc/workspace/session-info (#123) - read-only session store counts
+ * (`active`, `archived`, `total`, `live`) for a workspace.
+ */
+export function createWorkspaceSessionInfoRoute(
+  daemon: Pick<SessionDaemon, 'getWorkspaceSessionInfo' | 'capabilities'>,
+): RequestHandler {
+  return async (req, res) => {
+    const target = parseWorkspaceTarget(req.query.workspace);
+    if (!target.ok) {
+      res.status(400).json({
+        error: 'Invalid workspace target',
+        code: 'invalid_workspace',
+      });
+      return;
+    }
+    try {
+      let cwd = target.cwd;
+      if (!cwd) {
+        const caps = await daemon.capabilities();
+        cwd = caps.workspaceCwd;
+      }
+      if (!cwd) {
+        res.status(400).json({
+          error: 'Workspace path is required: pass ?workspace=',
+          code: 'invalid_workspace',
+        });
+        return;
+      }
+      const result = await daemon.getWorkspaceSessionInfo(cwd);
+      res.status(200).json(result);
+    } catch (err) {
+      if (err instanceof WorkspacePoolFullError) {
+        res.status(503).json(workspacePoolFullBody(req, err));
+        return;
+      }
+      if (relayDaemonAuthFailure(res, err, 'workspace_session_info')) return;
+      const status = (err as { status?: unknown }).status;
+      if (status === 404) {
+        res.status(502).json({
+          error: 'Daemon does not support workspace session-info read',
+          code: 'session_info_unsupported',
+        });
+        return;
+      }
+      if (!res.headersSent) {
+        res
+          .status(502)
+          .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
+      }
+    }
+  };
+}
