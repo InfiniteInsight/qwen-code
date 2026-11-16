@@ -2935,6 +2935,7 @@
         display: none;
       }
       #list-menu [role='menuitem'],
+      #list-folders [role='menuitem'],
       #list-folders [role='menuitemradio'] {
         min-height: 44px;
         padding: 0 14px;
@@ -2947,6 +2948,8 @@
       }
       #list-menu [role='menuitem']:hover,
       #list-menu [role='menuitem']:focus,
+      #list-folders [role='menuitem']:hover,
+      #list-folders [role='menuitem']:focus,
       #list-folders [role='menuitemradio']:hover,
       #list-folders [role='menuitemradio']:focus {
         background: var(--g1-on);
@@ -3063,6 +3066,7 @@
         font-size: 14px;
       }
       #dir-use,
+      #dir-open-list,
       #new-session {
         min-height: 44px;
         border-radius: 10px;
@@ -3072,8 +3076,12 @@
         flex: none;
         white-space: nowrap;
       }
-      #dir-use {
+      #dir-use,
+      #dir-open-list {
         width: 100%;
+      }
+      #dir-open-list {
+        margin-top: 8px;
       }
       /* #190: in the 280px pane the field takes its own line rather than the
          few characters Start here leaves beside it. */
@@ -3621,7 +3629,10 @@
       #agents-sheet .ag-stop[hidden] {
         display: none;
       }
-      #agent-msg:disabled,
+      #agent-msg:disabled {
+        cursor: not-allowed;
+        color: var(--g1-ink-lo);
+      }
       #agent-send:disabled,
       #agent-pause:disabled,
       #agent-resume:disabled,
@@ -5997,6 +6008,7 @@
           <div id="dir-current">(not loaded)</div>
           <div id="dir-list">(loading…)</div>
           <button id="dir-use" type="button">New conversation in this folder</button>
+          <button id="dir-open-list" type="button">Show conversations in this folder</button>
           <div class="grp">Or type an absolute path</div>
           <div class="typed">
             <input
@@ -9054,6 +9066,22 @@
         const added = transcriptModel.prependItems(rows, () => {
           if (transcriptView) transcriptView.anchorReader();
         });
+        let prependedUsers = 0;
+        for (let i = 0; i < added; i++) {
+          if (rows[i] && rows[i].kind === 'user' && !rows[i].midTurn) {
+            prependedUsers += 1;
+          }
+        }
+        if (prependedUsers > 0) {
+          userTurnsSeen += prependedUsers;
+          if (forkTurnCount > 0) forkTurnCount += prependedUsers;
+          if (
+            transcriptModel.forkItem &&
+            Number.isInteger(transcriptModel.forkItem.turn)
+          ) {
+            transcriptModel.forkItem.turn += prependedUsers;
+          }
+        }
         return { added, exhausted: transcriptExhausted };
       }
 
@@ -9389,7 +9417,16 @@
       }
       // `openingSessionId` names the conversation the clear is making room for,
       // so its pending cards stay pinned through it (#186, see dropAllCards).
+      let placeSavedBeforeClear = null;
       function clearTranscript(openingSessionId) {
+        if (
+          openingSessionId &&
+          watchedSessionId &&
+          openingSessionId !== watchedSessionId
+        ) {
+          savePlace();
+          placeSavedBeforeClear = watchedSessionId;
+        }
         findClose(false); // #138: a search belongs to the conversation it ran in
         // Every item, the tool/subagent bookkeeping and the turn pointers.
         transcriptModel.clear();
@@ -13737,7 +13774,7 @@
         const res = await fetch(url, {
           method: 'POST',
           headers: wsfAuth({ 'Content-Type': 'application/json' }),
-          body: JSON.stringify(Object.assign({}, body, wsTargetBody())),
+          body: JSON.stringify(Object.assign({}, wsTargetBody(), body)),
         });
         const data =
           res.status === 204 ? {} : await res.json().catch(() => ({}));
@@ -14167,6 +14204,7 @@
           hash,
           saving: false,
           memory: memory || null,
+          cwd: wsTargetCwd || null,
         };
         $('wsf-editor-note').textContent = memory ? memory.note : '';
         wsfEditorStatus('');
@@ -14235,6 +14273,7 @@
             content: text,
             mode: 'replace',
             expectedHash: cur.hash,
+            ...(cur.cwd ? { cwd: cur.cwd } : {}),
           });
           if (res.ok) {
             wsfHideEditor();
@@ -15056,7 +15095,13 @@
           // the folder of the conversation on screen has to be among them, or
           // a conversation opened by a deep link into a folder never listed
           // shows $HOME's rows and not its own.
-          if (ctxInfo.cwd) noteWatchedFolder(ctxInfo.cwd);
+          if (ctxInfo.cwd) {
+            if (id === watchedSessionId && !watchedSessionCwd) {
+              watchedSessionCwd = ctxInfo.cwd;
+              persistWatch();
+            }
+            noteWatchedFolder(ctxInfo.cwd);
+          }
           // rc-workspace-scoping (#28): watching a session in a non-default
           // workspace targets the workspace controls at it, but never over a
           // target the reader picked. #173: a target the page itself chose
@@ -15621,6 +15666,7 @@
               userTurnsSeen = keep;
               forkTurnCount = keep;
               asstThisTurn = false;
+              markPrevTurnEnd();
               scrollTranscript(true);
             }
             return addSystem(
@@ -15636,6 +15682,7 @@
             // the arm above becomes eligible. It carries no id, so it is never
             // written to the WAL and can never come back as a replayed boundary.
             insideReplay = false;
+            if (!turnOpen) markPrevTurnEnd();
             // #230: a closed stream is a hole in the transitions, and with the
             // re-read retired nothing papers over it. From here the frames are
             // live again, so one read closes whatever the gap swallowed. It is
@@ -16013,11 +16060,13 @@
           // Switch the viewer to the fork: abort any live stream first,
           // then run the standard watch hand-off (no freeform id field
           // anymore, so the hand-off is a direct startWatch call).
+          const forkCwd = watchedSessionCwd;
           if ($('watch').disabled) $('stop').onclick();
           // #173: the fork route returns no cursor, so this is the rewind's
           // move: clear, then replay from 0. With no cursor startWatch sent no
           // Last-Event-ID and the fork opened blank.
           lastSeenEventId = null;
+          watchedSessionCwd = forkCwd;
           clearTranscript(data.sessionId);
           startWatch(data.sessionId, 0);
         } catch (e) {
@@ -16298,6 +16347,7 @@
         const streamSettledSinceRead = !!(
           sub &&
           sub.done &&
+          !sub.settledBySweep &&
           typeof sub.endedAt === 'number' &&
           agentsState.readAt > 0 &&
           sub.endedAt > agentsState.readAt
@@ -16315,7 +16365,10 @@
               : sub.failed
                 ? 'failed'
                 : 'completed';
-        } else if (sub && agentStreamLive(item)) {
+        } else if (
+          sub &&
+          (agentStreamLive(item) || (!sub.done && sub.reopened))
+        ) {
           state = 'running';
         } else if (row) {
           state = row.status;
@@ -16483,6 +16536,33 @@
           );
           agentsState.readAt = Date.now();
           agentsState.now = typeof b.now === 'number' ? b.now : 0;
+          for (const row of agentsState.rows) {
+            const it = row.toolUseId && agentStreamItem(row.toolUseId);
+            if (row.status === 'running') {
+              if (it && it.sub && it.sub.done) {
+                it.sub.done = false;
+                it.sub.failed = false;
+                it.sub.endedAt = null;
+                it.sub.settledBySweep = false;
+                it.sub.reopened = true;
+                agentsState.liveSubs.add(row.toolUseId);
+                transcriptModel.touch(it);
+              }
+            } else if (
+              it &&
+              it.sub &&
+              !it.sub.done &&
+              (row.status === 'paused' || !turnRunning())
+            ) {
+              it.sub.done = true;
+              it.sub.failed = row.status === 'failed';
+              it.sub.endedAt = Date.now();
+              it.sub.settledBySweep = row.status === 'paused';
+              it.sub.reopened = false;
+              transcriptModel.touch(it);
+              agentsState.liveSubs.delete(row.toolUseId);
+            }
+          }
         }
         renderAgents();
         renderStatusLine();
@@ -17490,6 +17570,12 @@
           if (vNow && vNow.item && vNow.item.sub) {
             vNow.item.sub.done = false;
             vNow.item.sub.endedAt = null;
+            vNow.item.sub.settledBySweep = false;
+            vNow.item.sub.reopened = true;
+            if (vNow.item.toolCallId) {
+              agentsState.liveSubs.add(vNow.item.toolCallId);
+            }
+            transcriptModel.touch(vNow.item);
           }
           if (vNow && vNow.row) {
             if (!Array.isArray(vNow.row.messages)) vNow.row.messages = [];
@@ -17532,6 +17618,7 @@
 
       function setAgentCtrl(ref, busy, note) {
         agentsState.ctrls.set(ref, { busy, note });
+        if (agentSheet.open && !agentSheet.holding) renderAgentSheet();
         renderAgents();
       }
       async function pauseAgent(ref) {
@@ -17557,6 +17644,18 @@
           agentsState.stops.delete(ref);
           agentsState.msgs.delete(ref);
           const vNow = agentFind(ref);
+          if (vNow && vNow.item && vNow.item.sub && !vNow.item.sub.done) {
+            vNow.item.sub.done = true;
+            vNow.item.sub.failed = false;
+            vNow.item.sub.endedAt = Date.now();
+            vNow.item.sub.settledBySweep = true;
+            vNow.item.sub.reopened = false;
+            transcriptModel.touch(vNow.item);
+            if (vNow.item.toolCallId) {
+              agentsState.liveSubs.delete(vNow.item.toolCallId);
+            }
+          }
+          agentsState.liveSubs.delete(ref);
           if (vNow && vNow.row) {
             vNow.row.status = 'paused';
             vNow.row.canPause = false;
@@ -17612,7 +17711,14 @@
           const vNow = agentFind(ref);
           if (vNow && vNow.item && vNow.item.sub) {
             vNow.item.sub.done = false;
+            vNow.item.sub.failed = false;
             vNow.item.sub.endedAt = null;
+            vNow.item.sub.settledBySweep = false;
+            vNow.item.sub.reopened = true;
+            if (vNow.item.toolCallId) {
+              agentsState.liveSubs.add(vNow.item.toolCallId);
+            }
+            transcriptModel.touch(vNow.item);
           }
           if (vNow && vNow.row) {
             vNow.row.status = 'running';
@@ -17660,6 +17766,19 @@
         }
         const outcome = r.body && r.body.outcome;
         if (outcome === 'abandoned') {
+          const vNow = agentFind(ref);
+          if (vNow && vNow.item && vNow.item.sub && !vNow.item.sub.done) {
+            vNow.item.sub.done = true;
+            vNow.item.sub.failed = false;
+            vNow.item.sub.endedAt = Date.now();
+            vNow.item.sub.settledBySweep = false;
+            vNow.item.sub.reopened = false;
+            transcriptModel.touch(vNow.item);
+            if (vNow.item.toolCallId) {
+              agentsState.liveSubs.delete(vNow.item.toolCallId);
+            }
+          }
+          agentsState.liveSubs.delete(ref);
           agentsState.ctrls.delete(ref);
           agentsState.stops.delete(ref);
           agentsState.msgs.delete(ref);
@@ -19545,7 +19664,11 @@
         const m = /[#&]code=([^&]+)/.exec(location.hash || '');
         if (!m) return;
         const code = decodeURIComponent(m[1]);
-        history.replaceState(null, '', location.pathname + location.search);
+        history.replaceState(
+          history.state,
+          '',
+          location.pathname + location.search,
+        );
         $('code').value = code;
         void doPair(code);
       })();
@@ -20090,6 +20213,9 @@
       }
       async function refreshPendingCards(sessionId, early) {
         if (!token()) return;
+        if (!early && resumeInFlight && resumeInFlight.sessionId === sessionId) {
+          return;
+        }
         // #172: and the visit it was asked in. The deep link's early read is
         // the one exception: it is made before its own watch opens, on
         // purpose, and the id check below already drops it if the reader goes
@@ -20097,7 +20223,8 @@
         const gen = switchGen;
         const superseded = () =>
           (sessionId !== watchedSessionId && sessionId !== deepLinkSessionId) ||
-          (!early && gen !== switchGen);
+          (!early && gen !== switchGen) ||
+          (!early && resumeInFlight && resumeInFlight.sessionId === sessionId);
         let res;
         try {
           res = await fetch(
@@ -20121,18 +20248,23 @@
           if (
             failBody &&
             failBody.code === 'session_not_found' &&
-            watchedSessionCwd &&
-            tokenCanResume() &&
-            !goneResumed.has(sessionId) &&
             watchedSessionId === sessionId
           ) {
-            goneResumed.add(sessionId);
-            const ok = await resumeConversation(
+            const ok = await autoResumeGoneSession(
               sessionId,
-              watchedSessionCwd,
               watchedSessionTitle,
             );
-            if (ok || watchedSessionId !== sessionId) return;
+            if (ok || watchedSessionId !== sessionId || lastResumeRetryable) {
+              if (
+                !ok &&
+                watchedSessionId === sessionId &&
+                lastResumeRetryable &&
+                !watchStreamAlive
+              ) {
+                scheduleWatchRetry(503);
+              }
+              return;
+            }
           }
           // Gone, not busy: nothing to redraw now or later (#59).
           forgetGoneSession('session ended on the host — start or resume one');
@@ -20280,6 +20412,8 @@
           const cancel = ask.querySelector('.cancel');
           if (cancel) cancel.click();
         }
+        if (typeof cmdPickClose === 'function') cmdPickClose();
+        if (typeof closeWfSheet === 'function') closeWfSheet(false);
       }
       // #186: the conversation a push deep link is opening, from the moment
       // its pending card is asked for until a watch of something else
@@ -20365,12 +20499,87 @@
       // the retry, so the two cannot loop.
       const walReloaded = new Set();
       const goneResumed = new Set();
+      let resumeInFlight = null; // { sessionId, promise }
+      let lastResumeRetryable = false;
       function tokenCanResume() {
         return !!(
           caps &&
           caps.remoteControl &&
           caps.remoteControl.writeScope === true
         );
+      }
+      function resolveWatchedSessionCwd(id) {
+        if (id === watchedSessionId && watchedSessionCwd) return watchedSessionCwd;
+        const row = pastConvos.find((s) => s && s.sessionId === id && s.cwd);
+        if (row && row.cwd) {
+          if (id === watchedSessionId) {
+            watchedSessionCwd = row.cwd;
+            persistWatch();
+          }
+          return row.cwd;
+        }
+        if (id === watchedSessionId && ctxInfo && ctxInfo.cwd) {
+          watchedSessionCwd = ctxInfo.cwd;
+          persistWatch();
+          return ctxInfo.cwd;
+        }
+        return null;
+      }
+      // Coalesce concurrent 404 self-heal resumes (startWatch + refreshPendingCards)
+      // so the second 404 waits on the in-flight POST /session/:id/resume rather
+      // than seeing goneResumed.has(id) === true and calling forgetGoneSession()
+      // while the resume is still loading the transcript on the daemon.
+      async function autoResumeGoneSession(sessionId, title) {
+        if (resumeInFlight && resumeInFlight.sessionId === sessionId) {
+          return resumeInFlight.promise;
+        }
+        if (
+          !tokenCanResume() ||
+          goneResumed.has(sessionId) ||
+          watchedSessionId !== sessionId
+        ) {
+          return false;
+        }
+        let cwd = resolveWatchedSessionCwd(sessionId);
+        if (!cwd) {
+          const gen = switchGen;
+          for (const candidate of loadRecentWorkspaces()) {
+            try {
+              const r = await fetch(
+                '/rc/sessions?cwd=' + encodeURIComponent(candidate),
+                { headers: { Authorization: 'Bearer ' + token() } },
+              );
+              if (gen !== switchGen || watchedSessionId !== sessionId) return false;
+              if (!r.ok) continue;
+              const b = await r.json().catch(() => null);
+              if (gen !== switchGen || watchedSessionId !== sessionId) return false;
+              const hit =
+                b && Array.isArray(b.sessions)
+                  ? b.sessions.find((x) => x && x.sessionId === sessionId)
+                  : null;
+              if (hit) {
+                cwd = candidate;
+                watchedSessionCwd = candidate;
+                if (!title && hit.title) {
+                  watchedSessionTitle = strOr(hit.title, '');
+                  title = watchedSessionTitle;
+                }
+                persistWatch();
+                break;
+              }
+            } catch {
+              /* unreachable workspace: keep probing */
+            }
+          }
+        }
+        if (resumeInFlight && resumeInFlight.sessionId === sessionId) {
+          return resumeInFlight.promise;
+        }
+        if (!cwd || goneResumed.has(sessionId) || watchedSessionId !== sessionId) {
+          return false;
+        }
+        goneResumed.add(sessionId);
+        return resumeConversation(sessionId, cwd, title);
       }
       // The retry the 412 always had, from the oldest id the WAL keeps, and a
       // word that what is older is not on screen.
@@ -20484,15 +20693,58 @@
           // windows on the origin, so this is what lets a second window keep a
           // second conversation instead of being moved by whoever wrote last.
           sessionStorage.setItem(WINDOW_KEY, pointer);
+          try {
+            const st =
+              history.state && typeof history.state === 'object'
+                ? history.state
+                : {};
+            history.replaceState(
+              Object.assign({}, st, { [WINDOW_KEY]: pointer }),
+              '',
+            );
+          } catch {
+            /* ignore history errors */
+          }
         }
       }
 
       function clearPersistedWatch() {
-        localStorage.removeItem(WATCHED_KEY);
-        // #50: Unwatch means this window, so it clears this window's pointer. The
-        // shared one goes with it as it always has, which leaves a second window
-        // on its own conversation rather than dragging it along.
-        sessionStorage.removeItem(WINDOW_KEY);
+        try {
+          const raw = localStorage.getItem(WATCHED_KEY);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (
+              !parsed ||
+              !parsed.sessionId ||
+              !watchedSessionId ||
+              parsed.sessionId === watchedSessionId
+            ) {
+              localStorage.removeItem(WATCHED_KEY);
+            }
+          }
+        } catch {
+          localStorage.removeItem(WATCHED_KEY);
+        }
+        // #50: Unwatch / gone-session clears this window's watched session id,
+        // but keeps a per-window sentinel ({ sessionId: null }) rather than
+        // removing WINDOW_KEY. Removing WINDOW_KEY made restoreWatchedSession()
+        // treat an unloaded tab as a brand-new window and fall back to
+        // localStorage[WATCHED_KEY], causing all unloaded tabs to load
+        // whichever conversation was opened next in any other tab.
+        const emptyPointer = JSON.stringify({ sessionId: null });
+        sessionStorage.setItem(WINDOW_KEY, emptyPointer);
+        try {
+          const st =
+            history.state && typeof history.state === 'object'
+              ? history.state
+              : {};
+          history.replaceState(
+            Object.assign({}, st, { [WINDOW_KEY]: emptyPointer }),
+            '',
+          );
+        } catch {
+          /* ignore history errors */
+        }
         lastSeenEventId = null;
         watchedSessionCwd = null;
       }
@@ -20740,14 +20992,23 @@
         watchedSessionTitle = null;
         noteConversationSwitch(); // #172: nothing for the gone one lands now
         // #201: its files can never be sent, the session is gone.
-        pendingAttachmentsBySession.delete(watchedSessionId);
+        if (watchedSessionId) {
+          for (const e of pendingFor(watchedSessionId)) {
+            if (e.up) abandonUpload(watchedSessionId, e);
+          }
+          pendingAttachmentsBySession.delete(watchedSessionId);
+        }
         watchedSessionId = null;
         // #190: its cards go with it, as a switch takes them (a push deep
         // link's card for the conversation being opened stays).
         dropAllCards(deepLinkSessionId || undefined);
         renderPendingAttachments();
         syncStoredForSession();
+        syncRecapForSession();
+        syncBtwForSession();
         syncAgentsForSession(); // #110: its agents go with it
+        syncRosterForSession();
+        syncArtifactsForSession();
         // #50: showSessionTitle above ran while watchedSessionId was still set, so
         // the switcher was drawn against the conversation being left. Redrawn here,
         // after the clear, or the control stays on screen offering a folder this
@@ -20784,7 +21045,11 @@
         dropAllCards(deepLinkSessionId || undefined);
         renderPendingAttachments(); // #201: nothing watched, nothing staged
         syncStoredForSession();
+        syncRecapForSession();
+        syncBtwForSession();
         syncAgentsForSession(); // #110: nothing watched, no agents
+        syncRosterForSession();
+        syncArtifactsForSession();
         // #50: redrawn after the clear for the same reason as in
         // forgetGoneSession. Unwatch is the path a reader takes on purpose to
         // leave a conversation, so a switcher still naming that folder here would
@@ -21544,6 +21809,11 @@
           setTimeout(() => drainOutbox(attempt + 1), 50);
           return;
         }
+        if (!watchedSessionId) return;
+        if (pendingFor(watchedSessionId).some((entry) => !entry.reference)) {
+          setStatus('a queued message is waiting: a file is still uploading');
+          return;
+        }
         const text = outbox[0];
         // Shifted before the press, so a send that is refused still does not
         // leave the item queued behind an offer to put it back. A double send
@@ -21553,6 +21823,7 @@
         saveOutbox();
         renderQueued();
         $('prompt').value = text;
+        saveDraft();
         $('send').click();
       }
 
@@ -21748,54 +22019,58 @@
       async function shrinkImage(file, limit) {
         const img = await decodeImage(file);
         if (!img) return null;
-        const longest = Math.max(img.width, img.height);
-        const sides = [longest].concat(
-          IMAGE_SIDE_STEPS.filter((side) => side < longest),
-        );
-        const canvas = document.createElement('canvas');
-        const draw = (side, flatten) => {
-          const k = side / longest;
-          canvas.width = Math.max(1, Math.round(img.width * k));
-          canvas.height = Math.max(1, Math.round(img.height * k));
-          const g = canvas.getContext('2d');
-          if (flatten) {
-            g.fillStyle = '#ffffff';
-            g.fillRect(0, 0, canvas.width, canvas.height);
+        try {
+          const longest = Math.max(img.width, img.height);
+          const sides = [longest].concat(
+            IMAGE_SIDE_STEPS.filter((side) => side < longest),
+          );
+          const canvas = document.createElement('canvas');
+          const draw = (side, flatten) => {
+            const k = side / longest;
+            canvas.width = Math.max(1, Math.round(img.width * k));
+            canvas.height = Math.max(1, Math.round(img.height * k));
+            const g = canvas.getContext('2d');
+            if (flatten) {
+              g.fillStyle = '#ffffff';
+              g.fillRect(0, 0, canvas.width, canvas.height);
+            }
+            g.imageSmoothingQuality = 'high';
+            g.drawImage(img, 0, 0, canvas.width, canvas.height);
+          };
+          const keepPng = file.type === 'image/png' && hasTransparency(img);
+          if (keepPng) {
+            for (const side of sides) {
+              if (side < PNG_KEEP_MIN_SIDE && side !== longest) break;
+              draw(side, false);
+              const blob = await canvasBlob(canvas, 'image/png');
+              if (blob && blob.size <= limit) {
+                return {
+                  file: new File([blob], file.name, { type: 'image/png' }),
+                  width: canvas.width,
+                  height: canvas.height,
+                };
+              }
+            }
           }
-          g.imageSmoothingQuality = 'high';
-          g.drawImage(img, 0, 0, canvas.width, canvas.height);
-        };
-        const keepPng = file.type === 'image/png' && hasTransparency(img);
-        if (keepPng) {
           for (const side of sides) {
-            if (side < PNG_KEEP_MIN_SIDE && side !== longest) break;
-            draw(side, false);
-            const blob = await canvasBlob(canvas, 'image/png');
-            if (blob && blob.size <= limit) {
-              return {
-                file: new File([blob], file.name, { type: 'image/png' }),
-                width: canvas.width,
-                height: canvas.height,
-              };
+            draw(side, true);
+            for (const q of IMAGE_JPEG_QUALITY) {
+              const blob = await canvasBlob(canvas, 'image/jpeg', q);
+              if (blob && blob.size <= limit) {
+                return {
+                  file: new File([blob], renamed(file.name, '.jpg'), {
+                    type: 'image/jpeg',
+                  }),
+                  width: canvas.width,
+                  height: canvas.height,
+                };
+              }
             }
           }
+          return null;
+        } finally {
+          if (typeof img.close === 'function') img.close();
         }
-        for (const side of sides) {
-          draw(side, true);
-          for (const q of IMAGE_JPEG_QUALITY) {
-            const blob = await canvasBlob(canvas, 'image/jpeg', q);
-            if (blob && blob.size <= limit) {
-              return {
-                file: new File([blob], renamed(file.name, '.jpg'), {
-                  type: 'image/jpeg',
-                }),
-                width: canvas.width,
-                height: canvas.height,
-              };
-            }
-          }
-        }
-        return null;
       }
 
       // #130: a file over one chunk goes up in pieces the gateway keeps by
@@ -21965,7 +22240,7 @@
           }
           return refusedUpload(target, entry, { status: 0, body: { code: 'upload_incomplete' } });
         } catch (err) {
-          if (up.dropped) return;
+          if (gone()) return;
           if (err && err.stalled) {
             // Out of retries. The id and the landed set stay on the entry, so
             // a reconnect, Resume, or coming back here picks up from them.
@@ -23673,6 +23948,10 @@
         let cwd = '';
         if (id) {
           const row = pastConvos.find((s) => s && s.sessionId === id);
+          if (row && row.cwd && !watchedSessionCwd) {
+            watchedSessionCwd = row.cwd;
+            persistWatch();
+          }
           title = row
             ? convoTitle(row)
             : watchedSessionTitle || 'session ' + String(id).slice(0, 8);
@@ -24363,6 +24642,16 @@
       $('dir-use').onclick = () => {
         if (!curDirPath) return setStatus('browse a folder first');
         startConversationIn(curDirPath);
+      };
+
+      $('dir-open-list').onclick = () => {
+        if (!curDirPath) return setStatus('browse a folder first');
+        pushRecentWorkspace(curDirPath);
+        dirPickerFrom = null;
+        setListFolder(curDirPath);
+        setDirPickerOpen(false, false);
+        void refreshPastConversations(curDirPath);
+        if (listShown()) $('list-folder').focus({ preventScroll: true });
       };
 
       // Typing an absolute path and leaving the field (blur, or Enter — both
@@ -26065,6 +26354,17 @@
           };
           menu.appendChild(b);
         }
+        const browse = document.createElement('button');
+        browse.type = 'button';
+        browse.setAttribute('role', 'menuitem');
+        browse.tabIndex = -1;
+        browse.id = 'list-folders-browse';
+        browse.textContent = 'Browse folders…';
+        browse.onclick = () => {
+          setFolderMenuOpen(false, false);
+          setDirPickerOpen(true);
+        };
+        menu.appendChild(browse);
         if (uiHideThreads !== null) menu.appendChild(hideThreadsItem()); // #255
         menu.hidden = false;
         door.setAttribute('aria-expanded', 'true');
@@ -27261,6 +27561,7 @@
           setStatus('pair first');
           return false;
         }
+        lastResumeRetryable = false;
         // #172: a resume is a switch asked for, so it moves the number at the
         // tap. A cold A then a warm B used to end on A, because A's answer
         // landed last, cleared B's transcript and aborted B's watch. The
@@ -27269,141 +27570,170 @@
         const gen = switchGen;
         const label = title || 'session ' + sessionId.slice(0, 8);
         setStatus('resuming ' + label + '…');
-        try {
-          const res = await fetch(
-            '/session/' + encodeURIComponent(sessionId) + '/resume',
-            {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                Authorization: 'Bearer ' + token(),
+        const run = (async () => {
+          try {
+            const res = await fetch(
+              '/session/' + encodeURIComponent(sessionId) + '/resume',
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: 'Bearer ' + token(),
+                },
+                body: JSON.stringify({ cwd }),
               },
-              body: JSON.stringify({ cwd }),
-            },
-          );
-          if (gen !== switchGen) return false;
-          if (res.status === 200) {
-            const j = await res.json();
-            if (gen !== switchGen) return false;
-            lastSeenEventId = null;
-            // Resume is a conversation SWITCH, not a reconnect: startWatch
-            // only self-clears when fromEventId is null (which would skip the
-            // replay), so wipe the stale transcript here for the replayed
-            // history to render on a clean slate. #186: the cards of the
-            // conversation being resumed stay; they are still answerable in it.
-            clearTranscript(sessionId);
-            // issue #39: the daemon's load action returns the transcript in
-            // THIS RESPONSE — compactedReplay + liveJournal are DaemonEvent[]
-            // (the same shape as SSE frames) — and clears the bus ring after
-            // seeding it, so a cursor-0 watch would replay nothing. Render
-            // the in-band frames now, then watch from the lastEventId
-            // watermark: at the watermark the daemon emits no resync frame,
-            // only live events follow. No watermark (older gateway/daemon)
-            // → fall back to the max replay-frame id, or cursor 0.
-            const replay = [].concat(
-              Array.isArray(j.compactedReplay) ? j.compactedReplay : [],
-              Array.isArray(j.liveJournal) ? j.liveJournal : [],
             );
-            // These frames are the load response's history, not the stream's, so the
-            // cursor below has not been sent yet and cannot have armed the gate.
-            // They are replay by definition, so the gate is set by hand here.
-            // Without this the historical user records would arm the indicator
-            // and nothing would ever stand it down, which is the exact failure
-            // the gate exists to prevent. startWatch re-derives it from its own
-            // cursor immediately after.
-            insideReplay = true;
-            for (const f of replay) renderFrame(f);
-            let from = 0;
-            if (typeof j.lastEventId === 'number') {
-              from = j.lastEventId;
-            } else {
-              for (const f of replay)
-                if (f && Number.isFinite(f.id) && f.id > from) from = f.id;
-            }
-            // issue #46: daemons that predate the in-band resume transcript
-            // (e.g. published 0.24.x) return no replay frames, and their
-            // lastEventId watermark sits AFTER a pending question's
-            // permission_request frame — a watermark watch replays nothing,
-            // so the question is invisible and the session looks stuck.
-            // With no in-band frames, replay from 0 instead: the daemon's
-            // journal still holds the history, the transcript rebuilds, and
-            // the question frame re-renders. If that replay is met with a
-            // resync (cursor fell out of the ring), the self-heal re-runs
-            // this resume and noReplayResynced stops a second from-0
-            // attempt (a loop) — the watermark watch plus the status poll
-            // still recover the card.
-            const walReload =
-              !!opts && Object.prototype.hasOwnProperty.call(opts, 'walReloadFrom');
-            if (
-              walReload &&
-              (typeof j.lastEventId !== 'number' || replay.length === 0)
-            ) {
-              // #150: never from 0 here, which is the cursor that just 412'd:
-              // the 412's own lastEventId, or with none (an empty WAL) the
-              // newest frame drawn, or no cursor when nothing was.
-              if (typeof opts.walReloadFrom === 'number') {
-                from = opts.walReloadFrom;
-              } else if (from === 0) {
+            if (gen !== switchGen) return false;
+            if (res.status === 200) {
+              const j = await res.json();
+              if (gen !== switchGen) return false;
+              goneResumed.delete(sessionId);
+              lastSeenEventId = null;
+              // Resume is a conversation SWITCH, not a reconnect: startWatch
+              // only self-clears when fromEventId is null (which would skip the
+              // replay), so wipe the stale transcript here for the replayed
+              // history to render on a clean slate. #186: the cards of the
+              // conversation being resumed stay; they are still answerable in it.
+              clearTranscript(sessionId);
+              // issue #39: the daemon's load action returns the transcript in
+              // THIS RESPONSE - compactedReplay + liveJournal are DaemonEvent[]
+              // (the same shape as SSE frames) - and clears the bus ring after
+              // seeding it, so a cursor-0 watch would replay nothing. Render
+              // the in-band frames now, then watch from the lastEventId
+              // watermark: at the watermark the daemon emits no resync frame,
+              // only live events follow. No watermark (older gateway/daemon)
+              // → fall back to the max replay-frame id, or cursor 0.
+              const replay = [].concat(
+                Array.isArray(j.compactedReplay) ? j.compactedReplay : [],
+                Array.isArray(j.liveJournal) ? j.liveJournal : [],
+              );
+              // These frames are the load response's history, not the stream's, so the
+              // cursor below has not been sent yet and cannot have armed the gate.
+              // They are replay by definition, so the gate is set by hand here.
+              // Without this the historical user records would arm the indicator
+              // and nothing would ever stand it down, which is the exact failure
+              // the gate exists to prevent. startWatch re-derives it from its own
+              // cursor immediately after.
+              insideReplay = true;
+              for (const f of replay) renderFrame(f);
+              if (j.hasActivePrompt !== true) markPrevTurnEnd();
+              let from = 0;
+              if (typeof j.lastEventId === 'number') {
+                from = j.lastEventId;
+              } else {
+                for (const f of replay)
+                  if (f && Number.isFinite(f.id) && f.id > from) from = f.id;
+              }
+              // issue #46: daemons that predate the in-band resume transcript
+              // (e.g. published 0.24.x) return no replay frames, and their
+              // lastEventId watermark sits AFTER a pending question's
+              // permission_request frame - a watermark watch replays nothing,
+              // so the question is invisible and the session looks stuck.
+              // With no in-band frames, replay from 0 instead: the daemon's
+              // journal still holds the history, the transcript rebuilds, and
+              // the question frame re-renders. If that replay is met with a
+              // resync (cursor fell out of the ring), the self-heal re-runs
+              // this resume and noReplayResynced stops a second from-0
+              // attempt (a loop) - the watermark watch plus the status poll
+              // still recover the card.
+              const walReload =
+                !!opts &&
+                Object.prototype.hasOwnProperty.call(opts, 'walReloadFrom');
+              if (
+                walReload &&
+                (typeof j.lastEventId !== 'number' || replay.length === 0)
+              ) {
+                // #150: never from 0 here, which is the cursor that just 412'd:
+                // the 412's own lastEventId, or with none (an empty WAL) the
+                // newest frame drawn, or no cursor when nothing was.
+                if (typeof opts.walReloadFrom === 'number') {
+                  from = opts.walReloadFrom;
+                } else if (from === 0) {
+                  from = null;
+                }
+              } else if (
+                replay.length === 0 &&
+                !noReplayResynced.has(j.sessionId)
+              ) {
+                from = 0;
+                noReplayFallbackSessionId = j.sessionId;
+              } else if (
+                replay.length === 0 &&
+                from === 0 &&
+                typeof j.lastEventId !== 'number'
+              ) {
                 from = null;
               }
-            } else if (
-              replay.length === 0 &&
-              !noReplayResynced.has(j.sessionId)
-            ) {
-              from = 0;
-              noReplayFallbackSessionId = j.sessionId;
-            } else if (replay.length === 0 && from === 0 && typeof j.lastEventId !== 'number') {
-              from = null;
+              lastSeenEventId =
+                typeof from === 'number' && from > 0 ? from : null;
+              watchedSessionCwd = cwd || null;
+              startWatch(
+                j.sessionId,
+                typeof from === 'number' && Number.isFinite(from) && from >= 0
+                  ? from
+                  : null,
+                title,
+              );
+              if (j.hasActivePrompt === true) {
+                daemonTurnActive = true;
+                if (!turnOpen) showProcessing();
+              }
+              if (
+                j.hasRunningBackgroundTasks === true &&
+                roster.sessionId === j.sessionId &&
+                !rosterReading
+              ) {
+                void readRoster(j.sessionId);
+              }
+              // Asked only once the resume has actually succeeded: the route
+              // answers 404 for a session the daemon does not know, so a request
+              // fired from the call site would queue a tab for a conversation this
+              // tap failed to open. Still best-effort in the #49 sense, which is
+              // non-blocking rather than silent: requestHostTerminal reports why.
+              if (opts && opts.hostTerminal)
+                void requestHostTerminal(j.sessionId);
+              return true;
+            } else {
+              // #211: the answer's own status, code and message, and the next
+              // step when it names one (a 412 says `recovery: reload`), never a
+              // bare "resume failed". The folder, "session not found" and
+              // "workspace busy" lines these replaced are in the message the
+              // gateway sent (invalid_workspace, session_not_found,
+              // workspace_pool_full); the body is the cause and the page only
+              // adds what was attempted.
+              const body = await res.json().catch(() => null);
+              if (gen !== switchGen) return false;
+              if (res.status >= 500 || res.status === 429) {
+                lastResumeRetryable = true;
+                goneResumed.delete(sessionId);
+              }
+              const base = describeFailure(res, body, 'resume of ' + label);
+              setStatus(
+                res.status === 401 || res.status === 403
+                  ? 'not authorized: ' + base
+                  : base,
+              );
             }
-            lastSeenEventId = typeof from === 'number' && from > 0 ? from : null;
-            watchedSessionCwd = cwd || null;
-            startWatch(
-              j.sessionId,
-              typeof from === 'number' && Number.isFinite(from) && from >= 0
-                ? from
-                : null,
-              title,
-            );
-            if (j.hasActivePrompt === true) {
-              daemonTurnActive = true;
-              if (!turnOpen) showProcessing();
-            }
-            if (
-              j.hasRunningBackgroundTasks === true &&
-              roster.sessionId === j.sessionId &&
-              !rosterReading
-            ) {
-              void readRoster(j.sessionId);
-            }
-            // Asked only once the resume has actually succeeded: the route
-            // answers 404 for a session the daemon does not know, so a request
-            // fired from the call site would queue a tab for a conversation this
-            // tap failed to open. Still best-effort in the #49 sense, which is
-            // non-blocking rather than silent: requestHostTerminal reports why.
-            if (opts && opts.hostTerminal) void requestHostTerminal(j.sessionId);
-            return true;
-          } else {
-            // #211: the answer's own status, code and message, and the next
-            // step when it names one (a 412 says `recovery: reload`), never a
-            // bare "resume failed". The folder, "session not found" and
-            // "workspace busy" lines these replaced are in the message the
-            // gateway sent (invalid_workspace, session_not_found,
-            // workspace_pool_full); the body is the cause and the page only
-            // adds what was attempted.
-            const body = await res.json().catch(() => null);
+          } catch (e) {
             if (gen !== switchGen) return false;
-            const base = describeFailure(res, body, 'resume of ' + label);
+            lastResumeRetryable = true;
+            goneResumed.delete(sessionId);
             setStatus(
-              res.status === 401 || res.status === 403
-                ? 'not authorized: ' + base
-                : base,
+              describeFailure(null, null, {
+                did: 'resume of ' + label,
+                err: e,
+              }),
             );
           }
-        } catch (e) {
-          if (gen !== switchGen) return false;
-          setStatus(describeFailure(null, null, { did: 'resume of ' + label, err: e }));
+          return false;
+        })();
+        const tracked = { sessionId, promise: run };
+        resumeInFlight = tracked;
+        try {
+          return await run;
+        } finally {
+          if (resumeInFlight === tracked) resumeInFlight = null;
         }
-        return false;
       }
 
       async function deletePastConversation(sessionId, title, cwd) {
@@ -27424,6 +27754,10 @@
         if (!r.ok) return setStatus('delete failed: ' + rcDetail(r));
         const gone = (r.body && r.body.removed) || [];
         if (!gone.includes(sessionId)) return setStatus('not deleted');
+        for (const e of pendingFor(sessionId)) {
+          if (e.up) abandonUpload(sessionId, e);
+        }
+        pendingAttachmentsBySession.delete(sessionId);
         if (sessionId === watchedSessionId) $('stop').onclick();
         setStatus('deleted');
         // #193: the list is every folder's, so the refresh is the list's
@@ -27465,6 +27799,10 @@
         const already = (r.body && r.body.alreadyArchived) || [];
         if (!done.includes(sessionId))
           return setStatus(already.includes(sessionId) ? 'already archived' : 'not archived');
+        for (const e of pendingFor(sessionId)) {
+          if (e.up) abandonUpload(sessionId, e);
+        }
+        pendingAttachmentsBySession.delete(sessionId);
         // The transcript has moved out of the dir the watch re-attaches from, so
         // a watch left up here could never be restored. Tear it down the way
         // delete does rather than leave one that only looks alive.
@@ -27807,12 +28145,16 @@
           hideJoinedNote();
           saveDraft();
           // The reader's place in the conversation being left is saved now,
-          // while its rows are still the ones on screen.
-          savePlace();
+          // while its rows are still the ones on screen (unless clearTranscript
+          // already saved it right before wiping the rows).
+          if (placeSavedBeforeClear !== watchedSessionId) savePlace();
+          placeSavedBeforeClear = null;
           cancelPlaceRestore();
           // #172: before watchedSessionId moves, so nothing asked for the
           // conversation being left can land in this one.
           noteConversationSwitch();
+        } else {
+          placeSavedBeforeClear = null;
         }
         watchedSessionId = id;
         // #255: a thread being opened is listed though threads are hidden.
@@ -27900,6 +28242,9 @@
             '/session/' + encodeURIComponent(id) + '/events',
             { headers, signal: myController.signal },
           );
+          if (controller !== myController || watchedSessionId !== id) {
+            return;
+          }
           if (!res.ok) {
             const terminal =
               res.status === 401 || res.status === 403 || res.status === 404;
@@ -27908,22 +28253,26 @@
               .clone()
               .json()
               .catch(() => null);
+            if (controller !== myController || watchedSessionId !== id) {
+              return;
+            }
             if (
               res.status === 404 &&
               failBody &&
               failBody.code === 'session_not_found' &&
-              watchedSessionCwd &&
-              tokenCanResume() &&
-              !goneResumed.has(id) &&
               watchedSessionId === id
             ) {
-              goneResumed.add(id);
-              const ok = await resumeConversation(
-                id,
-                watchedSessionCwd,
-                title,
-              );
-              if (ok || watchedSessionId !== id) return;
+              const ok = await autoResumeGoneSession(id, title);
+              if (ok || watchedSessionId !== id || controller !== myController) {
+                return;
+              }
+              if (lastResumeRetryable) {
+                scheduleWatchRetry(503);
+                return;
+              }
+            }
+            if (controller !== myController || watchedSessionId !== id) {
+              return;
             }
             const failLine = describeFailure(
               res,
@@ -27984,6 +28333,7 @@
             if (watchedSessionId === id) void refreshPendingCards(id);
             return;
           }
+          goneResumed.delete(id);
           setStatus('streaming');
           watchStreamAlive = true;
           watchRetryAttempt = 0; // healthy connect: reset the self-heal backoff
@@ -28955,20 +29305,51 @@
         }
       }
       window.addEventListener('focus', () => {
+        if (
+          watchedSessionId &&
+          !watchStreamAlive &&
+          !watchRetryTimer &&
+          !$('watch').disabled &&
+          token()
+        ) {
+          refreshOnWake();
+          return;
+        }
         void refreshWorkspaceSections();
+      });
+      window.addEventListener('online', () => {
+        if (
+          watchedSessionId &&
+          !watchStreamAlive &&
+          !watchRetryTimer &&
+          !$('watch').disabled &&
+          token()
+        ) {
+          refreshOnWake();
+        }
       });
 
       // Spec 4.2: polling pauses while the tab is backgrounded and RESUMES ON
       // visibility return (the interval alone would just keep skipping).
       // Also reconnects the session SSE stream if it died while backgrounded
       // (mobile screen-off kills connections).
-      document.addEventListener('visibilitychange', () => {
+      function refreshOnWake() {
         if (document.hidden) return;
         // #186: what is waiting on the reader is asked for first, ahead of
         // every other catch-up read, so a request raised while the page was
         // away is the first answer back and is pinned the moment it lands.
         // A card the stream delivered while hidden is already in place.
-        if (watchedSessionId) void refreshPendingCards(watchedSessionId);
+        if (watchedSessionId) {
+          if (watchStreamAlive || !token()) {
+            void refreshPendingCards(watchedSessionId);
+          }
+          if (agentsOn() && (agentSheet.open || agentsLive() || (agentsState.rows && agentsState.rows.length > 0))) {
+            agentsSchedule(0);
+          }
+          if (roster.sessionId === watchedSessionId && (rosterLive().length > 0 || roster.listed)) {
+            void readRoster(watchedSessionId);
+          }
+        }
         void pollDaemonHealths();
         // issue #35: the 30 s tick is paused while hidden — catch up now.
         void refreshPastConversations(curDirPath);
@@ -28983,6 +29364,10 @@
         // went out first, above. (startWatch's own refresh duplicates it when
         // the stream just reconnected; the card dedupe makes that harmless.)
         void refreshWorkspaceSections();
+      }
+      document.addEventListener('visibilitychange', refreshOnWake);
+      window.addEventListener('pageshow', (e) => {
+        if (e.persisted) refreshOnWake();
       });
 
       async function loadDaemonManifest() {
@@ -29498,7 +29883,7 @@
         // Scrub immediately (like the auto-pair hash scrub, above) so the
         // session id never lingers in the URL or history. #186: before the
         // decode, so a link that cannot be decoded is scrubbed too.
-        history.replaceState(null, '', location.pathname);
+        history.replaceState(history.state, '', location.pathname);
         // #186: a link mangled on its way here (a stray %, an escape cut in
         // half) makes decodeURIComponent throw, and the throw used to land in
         // authGate's catch and show the pairing gate over a token that was
@@ -29547,7 +29932,20 @@
         // coming back to a conversation it chose, which is never a join. Only a
         // restore off the shared record can be one, and only then does it ask
         // whether a live window is already on that conversation.
-        const own = sessionStorage.getItem(WINDOW_KEY);
+        const own =
+          sessionStorage.getItem(WINDOW_KEY) ||
+          (history.state &&
+          typeof history.state === 'object' &&
+          typeof history.state[WINDOW_KEY] === 'string'
+            ? history.state[WINDOW_KEY]
+            : null);
+        if (own && !sessionStorage.getItem(WINDOW_KEY)) {
+          try {
+            sessionStorage.setItem(WINDOW_KEY, own);
+          } catch {
+            /* ignore storage errors */
+          }
+        }
         const raw = own || localStorage.getItem(WATCHED_KEY);
         if (!raw) return;
         try {
@@ -30795,6 +31193,10 @@
         });
         if (r.ok) {
           out.textContent = 'session ended';
+          for (const e of pendingFor(id)) {
+            if (e.up) abandonUpload(id, e);
+          }
+          pendingAttachmentsBySession.delete(id);
           // The session is gone: drop the watch (and any self-heal retry
           // the stream-end may have scheduled) instead of re-attaching to
           // a corpse. #172: only while it is still the one watched; after

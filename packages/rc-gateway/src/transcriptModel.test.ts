@@ -1422,6 +1422,37 @@ describe('TranscriptModel', () => {
       });
       expect(m.items[0].sub).toBeNull();
     });
+
+    it('tags subagents settled by settleAllSubagents() with settledBySweep = true while explicit tool_call_update sets settledBySweep = false', () => {
+      const { m } = setup();
+      m.upsertTool({
+        toolCallId: 'bg_sub',
+        title: 'Agent',
+        status: 'completed',
+      });
+      m.appendSubagentText('bg_sub', 'background agent still running');
+      expect(m.items[0].sub?.done).toBe(false);
+      expect(m.items[0].sub?.settledBySweep).toBe(false);
+
+      m.settleAllSubagents();
+      expect(m.items[0].sub?.done).toBe(true);
+      expect(m.items[0].sub?.settledBySweep).toBe(true);
+
+      // Explicit terminal tool_call_update marks settledBySweep = false
+      m.upsertTool({
+        toolCallId: 'fg_sub',
+        title: 'Agent',
+        status: 'in_progress',
+      });
+      m.appendSubagentText('fg_sub', 'foreground agent');
+      m.upsertTool({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'fg_sub',
+        status: 'completed',
+      });
+      expect(m.items[1].sub?.done).toBe(true);
+      expect(m.items[1].sub?.settledBySweep).toBe(false);
+    });
   });
 
   describe('thought and tool server timestamps (#268)', () => {
