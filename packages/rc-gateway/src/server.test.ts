@@ -2727,11 +2727,11 @@ describe('public/index.html regression checks (#469, #470, #471)', () => {
     const out = evalSteps(resumedView);
     expect(out.from).toBe('transcript');
     expect(out.steps).toEqual([
-      { kind: 'thought', text: 'thinking...', streaming: false },
-      { kind: 'tool', label: 'read_file: a.ts', status: 'completed' },
-      { kind: 'msg', text: 'First answer', streaming: false },
-      { kind: 'user', text: 'Follow-up question' },
-      { kind: 'tool', label: 'grep: foo', status: 'running' },
+      { kind: 'thought', text: 'thinking...', time: null, streaming: false },
+      { kind: 'tool', label: 'read_file: a.ts', status: 'completed', time: null },
+      { kind: 'msg', text: 'First answer', time: null, streaming: false },
+      { kind: 'user', text: 'Follow-up question', time: null },
+      { kind: 'tool', label: 'grep: foo', status: 'running', time: null },
     ]);
   });
 
