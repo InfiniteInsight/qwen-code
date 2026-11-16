@@ -227,7 +227,11 @@ export function createPromptRoute(
         // know the turn was cancelled by the gateway.
         broadcaster?.emit(sessionId, {
           type: 'stream_error',
-          data: { code: 'prompt_timeout', timeoutMs: firedTimeoutMs },
+          data: {
+            code: 'prompt_timeout',
+            timeoutMs: firedTimeoutMs,
+            reason: firedReason,
+          },
         });
         // #40: the turn ended in failure (gateway timeout).
         opts.onTurnEnd?.(sessionId, { ok: false, reason: 'timeout' });

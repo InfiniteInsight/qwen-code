@@ -7104,6 +7104,33 @@
             Start a new conversation here
           </button>
         </div>
+        <div
+          id="continue-nudge"
+          hidden
+          style="
+            margin-top: 4px;
+            padding: 4px 8px;
+            font-size: 0.85rem;
+            color: #e6edf3;
+            border-bottom: 1px solid #333;
+          "
+        >
+          <span id="continue-nudge-text"></span>
+          <button
+            id="continue-nudge-btn"
+            type="button"
+            style="margin-left: 8px; min-height: 44px; min-width: 64px; padding: 0 12px"
+          >
+            Continue
+          </button>
+          <button
+            id="continue-nudge-dismiss"
+            type="button"
+            style="margin-left: 6px; min-height: 44px; min-width: 44px; padding: 0 10px"
+          >
+            Dismiss
+          </button>
+        </div>
         <div id="lineage" hidden></div>
         <div id="transcript-wrap">
           <div id="transcript"></div>
@@ -7656,7 +7683,35 @@
         const box = $('joined-note');
         if (box) box.hidden = true;
         joinedNoteTarget = null;
+        hideContinueNudge();
       }
+      function showContinueNudge(reasonWords) {
+        const rc = caps && caps.remoteControl;
+        if (rc && rc.writeScope === false) return;
+        const box = $('continue-nudge');
+        const txt = $('continue-nudge-text');
+        if (!box || !txt) return;
+        txt.textContent = reasonWords;
+        box.hidden = false;
+      }
+      function hideContinueNudge() {
+        const box = $('continue-nudge');
+        if (box) box.hidden = true;
+      }
+      $('continue-nudge-dismiss').onclick = () => hideContinueNudge();
+      $('continue-nudge-btn').onclick = () => {
+        if ($('prompt').value.trim()) {
+          setStatus('the composer has a draft: clear it to continue');
+          return;
+        }
+        if ($('send').disabled) {
+          setStatus('a send is still in flight');
+          return;
+        }
+        hideContinueNudge();
+        $('prompt').value = 'continue';
+        void $('send').onclick();
+      };
       $('joined-note-join').onclick = () => {
         const target = joinedNoteTarget;
         hideJoinedNote();
@@ -15978,18 +16033,37 @@
         switch (ev.type) {
           case 'session_update':
             return renderSessionUpdate(ev.data && ev.data.update, frameStamp(ev));
-          case 'stream_error':
+          case 'stream_error': {
             // #71: these three end a session without ever sending
             // turn_complete, so without this the indicator would keep claiming
             // work for a session that has stopped. A dropped socket is
             // deliberately not among them: the turn really is still running
             // there (issue #38), and the replay on reconnect brings the frames
             // that close it out.
+            finishThought();
             endTurn();
-            return addSystem(
-              'error: ' + strOr(ev.data && ev.data.error, 'stream_error'),
-              true,
-            );
+            if (abandonPendingSend) abandonPendingSend('turn');
+            drainOutbox(0);
+            const se = ev.data && typeof ev.data === 'object' ? ev.data : {};
+            if (se.code === 'prompt_timeout') {
+              const secs =
+                typeof se.timeoutMs === 'number' && se.timeoutMs > 0
+                  ? Math.max(1, Math.round(se.timeoutMs / 1000)) + 's'
+                  : '';
+              const detail =
+                'turn timed out' +
+                (secs ? ' after ' + secs : '') +
+                (se.reason === 'silence' ? ' of silence' : '');
+              lastTurnStopReason = 'prompt_timeout';
+              renderStreamStateReadout();
+              showContinueNudge(detail);
+              return addSystem('error: ' + detail, true);
+            }
+            const errWord = strOr(se.error || se.code, 'stream_error');
+            lastTurnStopReason = errWord;
+            renderStreamStateReadout();
+            return addSystem('error: ' + errWord, true);
+          }
           case 'session_died':
             endTurn();
             return addSystem(
@@ -16060,7 +16134,11 @@
             }
             return;
           }
-          case 'turn_complete':
+          case 'turn_complete': {
+            const tc = ev.data && typeof ev.data === 'object' ? ev.data : {};
+            const tcStop = strOr(tc.stopReason, '');
+            lastTurnStopReason = tcStop || 'end_turn';
+            renderStreamStateReadout();
             // The just-finished turn is a valid fork point: place "Fork from
             // here" under the turn's last assistant bubble. Replayed history
             // carries no turn_complete, so historical turns stay button-less
@@ -16093,8 +16171,23 @@
             // #135: hooks are configuration, so a turn rarely moves them, but one
             // can register a hook (a skill does), so the row reads again.
             hooksRefreshSoon();
+            if (
+              tcStop === 'max_tokens' ||
+              tcStop === 'length' ||
+              tcStop === 'max_output_tokens' ||
+              tcStop === 'max_turn_requests'
+            ) {
+              showContinueNudge(
+                tcStop === 'max_turn_requests'
+                  ? 'reply paused at the turn request limit (' + tcStop + ')'
+                  : 'reply hit the output token limit (' + tcStop + ')',
+              );
+            } else {
+              hideContinueNudge();
+            }
             if (asstThisTurn && transcriptModel.curAsst) placeForkButton();
             return;
+          }
           case 'turn_error': {
             // #199. The daemon sends this INSTEAD of turn_complete when a
             // prompt fails (a model request dying mid-stream, a rate limit, a
@@ -21404,6 +21497,7 @@
         renderQueueControl();
       }
 
+      let lastTurnStopReason = null;
       function renderStreamStateReadout() {
         const el = $('stream-state-readout');
         if (!el) return;
@@ -21411,7 +21505,9 @@
         const cur = lastSeenEventId !== null && lastSeenEventId !== undefined
           ? String(lastSeenEventId)
           : '(none)';
-        el.textContent = 'session: ' + sid + '  cursor: ' + cur;
+        const stop = lastTurnStopReason || '(none)';
+        el.textContent =
+          'session: ' + sid + '  cursor: ' + cur + '  lastStop: ' + stop;
       }
       $('copy-stream-state').onclick = async () => {
         const statusWord = (($('h1-status') && $('h1-status').textContent) || '').trim();
@@ -21421,6 +21517,8 @@
           (lastSeenEventId !== null && lastSeenEventId !== undefined
             ? String(lastSeenEventId)
             : '(none)') +
+          ' ' +
+          (lastTurnStopReason || '(none)') +
           (statusWord ? ' [' + statusWord + ']' : '');
         const note = $('copy-stream-state-note');
         try {
@@ -21506,6 +21604,7 @@
         }
         lastSeenEventId = null;
         watchedSessionCwd = null;
+        lastTurnStopReason = null;
         renderStreamStateReadout();
       }
 
@@ -24476,6 +24575,7 @@
         // #130: a file still going up would be left behind by this message.
         if (pendingFor(watchedSessionId).some((entry) => !entry.reference))
           return setStatus('a file is still uploading; wait for it or drop it');
+        hideContinueNudge();
         $('send').disabled = true;
         // The reason line goes to #status, which is not where the reader is
         // looking, so the held button carries it too. #184: in its label,
