@@ -6,7 +6,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { createServer as createNetServer, type AddressInfo } from 'node:net';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -345,7 +345,21 @@ describe('POST /rc/workspace/mcp/servers', () => {
 
   it('daemon transport failure → 502 daemon_unavailable (no audit row)', async () => {
     const ctx = await setup();
+    const crashedPort = Number(new URL(ctx.stub.baseUrl).port);
     await ctx.stub.crash();
+
+    // Port stays reserved until close() so parallel test workers cannot steal it (#262).
+    const stealCode = await new Promise<string>((resolve) => {
+      const probe = createNetServer();
+      probe.once('error', (err: NodeJS.ErrnoException) =>
+        resolve(err.code ?? 'ERR'),
+      );
+      probe.listen(crashedPort, '127.0.0.1', () => {
+        probe.close(() => resolve('BOUND'));
+      });
+    });
+    expect(stealCode).toBe('EADDRINUSE');
+
     const res = await postMcp(ctx.baseUrl, ctx.ownerToken, {
       operation: 'set',
       name: 'memory',

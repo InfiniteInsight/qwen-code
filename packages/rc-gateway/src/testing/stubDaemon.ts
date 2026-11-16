@@ -5044,8 +5044,17 @@ export async function startStubDaemon(
     });
   });
 
+  let crashed = false;
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
+  });
+  server.prependListener('connection', (sock) => {
+    if (!crashed) return;
+    if (typeof sock.resetAndDestroy === 'function') {
+      sock.resetAndDestroy();
+    } else {
+      sock.destroy();
+    }
   });
   const { port } = server.address() as AddressInfo;
   return {
@@ -5288,21 +5297,24 @@ export async function startStubDaemon(
     },
     close: () =>
       new Promise<void>((resolve, reject) => {
-        // Idempotent: crash() may already have closed the server, and a
-        // second server.close() would reject with ERR_SERVER_NOT_RUNNING.
+        // Idempotent: a second server.close() would reject with
+        // ERR_SERVER_NOT_RUNNING.
         if (!server.listening) {
           resolve();
           return;
         }
-        server.close((err) => (err ? reject(err) : resolve()));
-      }),
-    crash: () =>
-      new Promise<void>((resolve, reject) => {
-        // closeAllConnections() (Node 18.2+) destroys the live SSE sockets,
-        // so close() completes without waiting for open connections.
         server.closeAllConnections();
         server.close((err) => (err ? reject(err) : resolve()));
       }),
+    crash: () => {
+      // Destroy live SSE and HTTP sockets immediately while holding the
+      // ephemeral loopback port bound until close() runs in teardown, so
+      // parallel test workers cannot recycle the port mid-test (#262).
+      crashed = true;
+      server.closeAllConnections();
+      server.unref();
+      return Promise.resolve();
+    },
   };
 }
 
