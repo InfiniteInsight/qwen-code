@@ -575,18 +575,18 @@
     // bold` becomes an element only when it closes), so the O(delta) append is
     // not available here. The pass is already batched to one rAF, and the
     // re-render is skipped entirely while the text is unchanged.
-    // #184. A finished turn's actions: Fork here, Rewind to here, Copy. The
-    // latest turn's sit on its fork row (the model's `fork` item); an answer
-    // the page has marked as ending an earlier turn (item.turnEnd) carries the
-    // same strip in its own row, under its bubble. Each button reports the
-    // item it belongs to (onTurnAct) and the page does the work; busy and note
-    // live on that item, so a row scrolled away and rebuilt still shows them.
+    // #184, #233. A finished turn's actions: Fork, Rewind, Copy. Mounted
+    // inline in the assistant bubble's role line immediately after the stamp so
+    // a reader does not scroll past a long reply to reach them; any status note
+    // sits directly beneath the role line while non-empty.
     function buildActs(item) {
-      var a = { box: el('div', 'turn-acts') };
-      a.fork = el('button', 'act-fork', 'Fork here');
-      a.rewind = el('button', 'act-rewind', 'Rewind to here');
+      var a = {
+        box: el('span', 'turn-acts'),
+        note: el('div', 'turn-acts-note'),
+      };
+      a.fork = el('button', 'act-fork', 'Fork');
+      a.rewind = el('button', 'act-rewind', 'Rewind');
       a.copy = el('button', 'act-copy', 'Copy');
-      a.note = el('span', 'note');
       [
         ['fork', a.fork],
         ['rewind', a.rewind],
@@ -598,22 +598,25 @@
         });
         a.box.appendChild(pair[1]);
       });
-      a.box.appendChild(a.note);
       patchActs(a, item);
       return a;
     }
     function patchActs(a, item) {
       var busy = !!item.busy;
       if (a.fork.disabled !== busy) a.fork.disabled = busy;
-      setText(a.note, item.note || '');
+      var note = item.note || '';
+      setText(a.note, note);
+      a.note.hidden = !note;
     }
     function syncAsstActs(m) {
       var want = !!m.item.turnEnd;
-      if (want && !m.acts) {
+      if (want && !m.acts && m.role) {
         m.acts = buildActs(m.item);
-        m.row.appendChild(m.acts.box);
+        m.role.appendChild(m.acts.box);
+        m.bubble.insertBefore(m.acts.note, m.role.nextSibling);
       } else if (!want && m.acts) {
         m.acts.box.remove();
+        m.acts.note.remove();
         m.acts = null;
       }
       if (m.acts) patchActs(m.acts, m.item);
@@ -621,7 +624,8 @@
 
     function buildAsst(m) {
       var b = el('div', 'bubble asst');
-      b.appendChild(roleLine('asst', m.item, stampZone));
+      m.role = roleLine('asst', m.item, stampZone);
+      b.appendChild(m.role);
       m.mdBody = el('div', 'md');
       m.mdText = null;
       b.appendChild(m.mdBody);
@@ -1038,15 +1042,17 @@
     // The page sets item.hideActs when another row sits between the fork row
     // and its answer; the answer then carries the strip and this draws none.
     function buildFork(m) {
+      var wrap = el('div', 'bubble-fork');
       m.acts = buildActs(m.item);
-      m.acts.box.className = 'bubble-fork turn-acts';
+      wrap.appendChild(m.acts.box);
+      wrap.appendChild(m.acts.note);
       patchFork(m);
-      return m.acts.box;
+      return wrap;
     }
     function patchFork(m) {
       patchActs(m.acts, m.item);
       var hide = !!m.item.hideActs;
-      if (m.acts.box.hidden !== hide) m.acts.box.hidden = hide;
+      if (m.bubble && m.bubble.hidden !== hide) m.bubble.hidden = hide;
     }
 
     function buildImage(m) {
@@ -1096,6 +1102,7 @@
     function build(m, now) {
       if (find) findStale = true;
       var old = m.bubble;
+      m.acts = null;
       m.shape = shapeOf(m.item);
       var make = BUILD[m.shape] || buildSystem;
       m.bubble = make(m, now);
@@ -1227,10 +1234,11 @@
             partsH
           );
         case 'asst':
+          // #233: inline .turn-acts grows the 16px role head to 36px (+20px).
           return (
             38 +
             21 * lineCount(item, item.text, perLine) +
-            (item.turnEnd ? 36 : 0)
+            (item.turnEnd ? 20 : 0)
           );
         case 'image':
           // A thumbnail is capped by the page's CSS at 240px of picture plus
@@ -1732,7 +1740,9 @@
         if (
           p &&
           p.closest &&
-          p.closest('.role, .stamp, .turn-acts, button, [hidden], .not-sent')
+          p.closest(
+            '.role, .stamp, .turn-acts, .turn-acts-note, button, [hidden], .not-sent',
+          )
         )
           continue;
         var data = node.data;

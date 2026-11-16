@@ -6742,24 +6742,45 @@
           }
           /* Per-message "Fork from here" (add-session-forking web gap): a small
          action under a COMPLETED assistant turn. */
-          /* #184. A turn's actions, under its last answer: Fork here, Rewind
-             to here, Copy. Not a row of their own in the drawing, so the strip
-             is pulled up against the answer it belongs to (the row above ends
-             8px higher, at the view's gap), and an answer that ends an earlier
-             turn carries the same strip inside its row. Text buttons in the
-             muted ink, 36px so a thumb lands on them. */
+          /* #184, #233. A turn's actions inline in its last answer's role line
+             immediately after the timestamp: Fork, Rewind, Copy. Short labels
+             keep the role head on one 36px thumb-target line down to 320px
+             width; any transient action note renders just beneath the role line. */
+          #transcript .asst > .role {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            opacity: 1;
+            color: var(--g1-ink-mid);
+          }
+          #transcript .asst > .role .stamp {
+            opacity: 0.9;
+          }
           #transcript .turn-acts {
+            margin-left: auto;
+            padding-left: 6px;
+            display: inline-flex;
+            flex-wrap: nowrap;
+            align-items: center;
+            gap: 6px;
+            text-transform: none;
+            letter-spacing: 0;
+            white-space: nowrap;
+            word-break: normal;
+          }
+          #transcript .bubble-fork {
             align-self: stretch;
             display: flex;
             flex-wrap: wrap;
             align-items: center;
-            gap: 4px 14px;
+            gap: 4px 10px;
             padding: 0 14px;
-          }
-          #transcript .bubble-fork.turn-acts {
             margin-top: -6px;
           }
-          #transcript .turn-acts[hidden] {
+          #transcript .bubble-fork[hidden],
+          #transcript .turn-acts[hidden],
+          #transcript .turn-acts-note[hidden],
+          #transcript .turn-acts-note:empty {
             display: none;
           }
           #transcript .turn-acts button {
@@ -6768,18 +6789,33 @@
             border: 0;
             background: transparent;
             color: var(--g1-ink-mid);
-            font-size: 13px;
+            font-size: 12px;
             cursor: pointer;
           }
           #transcript .turn-acts button:hover {
             color: var(--g1-ink-hi);
           }
-          #transcript .turn-acts .note {
+          @media (max-width: 359px) {
+            #transcript .asst {
+              padding: 10px 10px;
+            }
+            #transcript .asst > .role {
+              letter-spacing: 0;
+            }
+            #transcript .turn-acts {
+              padding-left: 4px;
+              gap: 4px;
+            }
+            #transcript .turn-acts button {
+              font-size: 11px;
+            }
+          }
+          #transcript .turn-acts-note {
             color: var(--g1-ink-mid);
             font-size: 12px;
-          }
-          #transcript .turn-acts .note:empty {
-            display: none;
+            margin-bottom: 4px;
+            text-transform: none;
+            letter-spacing: 0;
           }
           /* Fork-lineage breadcrumb above the transcript (add-session-forking). */
           #lineage {
@@ -15747,28 +15783,30 @@
 
       // Idempotent: re-calls for the same turn only re-position the button
       // (a late agent chunk may have started a newer assistant bubble).
-      // #184: the fork row is the latest turn's actions. When it moves on to a
-      // newer turn, the answer it was under keeps the same actions in its own
-      // row (item.turnEnd), so every finished turn has them, not only the last.
+      // #184, #233: every completed turn's last answer carries Fork, Rewind,
+      // and Copy inline in its top role line (item.turnEnd); forkItem continues
+      // tracking the latest completed turn's index and state while staying
+      // hidden as a standalone row.
       function placeForkButton() {
         const was = transcriptModel.forkItem;
-        const wasUnder = was ? asstBefore(was) : null;
+        const wasUnder = was ? was.under || asstBefore(was) : null;
         transcriptModel.placeFork(forkTurnCount);
         const now = transcriptModel.forkItem;
-        if (was && now !== was && wasUnder) markTurnEnd(wasUnder, true);
-        if (now) {
-          // The row joins the end of the list, so a row that arrived after the
-          // answer (the to-do row a plan frame adds) can sit between them. Then
-          // the answer carries the actions in its own row, where the reader
-          // looks for them, and the fork row draws nothing.
-          const under = asstBefore(now);
-          const items = transcriptModel.items;
-          const next = items[items.lastIndexOf(now) - 1] === under;
-          markTurnEnd(under, !next);
-          if (!!now.hideActs !== !next) {
-            now.hideActs = !next;
-            transcriptModel.touch(now);
-          }
+        if (!now) {
+          scrollTranscript();
+          return;
+        }
+        const under = asstBefore(now);
+        if (was && was === now && wasUnder && wasUnder !== under) {
+          markTurnEnd(wasUnder, false);
+        } else if (was && was !== now && wasUnder) {
+          markTurnEnd(wasUnder, true);
+        }
+        now.under = under;
+        markTurnEnd(under, true);
+        if (!now.hideActs) {
+          now.hideActs = true;
+          transcriptModel.touch(now);
         }
         scrollTranscript();
       }
@@ -15825,8 +15863,17 @@
       async function turnAct(act, src) {
         const asst = src.kind === 'fork' ? asstBefore(src) : src;
         const turn = turnNumberOf(src);
+        const syncLatestFork = () => {
+          const f = transcriptModel.forkItem;
+          if (f && f !== src && f.under === src) {
+            f.mode = src.mode;
+            f.note = src.note;
+            f.busy = src.busy;
+          }
+        };
         const say = (note) => {
           src.note = note;
+          syncLatestFork();
           transcriptModel.touch(src);
         };
         if (act === 'copy') {
@@ -15856,11 +15903,14 @@
           if (!mode) return;
           src.mode = mode;
           if (src.kind !== 'fork') src.turn = turn;
+          syncLatestFork();
           return doForkHere(watchedSessionId, src);
         }
       }
       function turnNumberOf(src) {
         if (src.kind === 'fork' && Number.isInteger(src.turn)) return src.turn;
+        const f = transcriptModel.forkItem;
+        if (f && f.under === src && Number.isInteger(f.turn)) return f.turn;
         const items = transcriptModel.items;
         const at = items.lastIndexOf(src);
         let n = 0;
@@ -16001,6 +16051,11 @@
         const show = (busy, note) => {
           item.busy = busy;
           item.note = note;
+          const f = transcriptModel.forkItem;
+          if (f && f !== item && f.under === item) {
+            f.busy = busy;
+            f.note = note;
+          }
           transcriptModel.touch(item);
         };
         if (!sessionId) return show(false, 'watch a session first');
