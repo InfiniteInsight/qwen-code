@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { AcpWsTransport } from '../../src/daemon/AcpWsTransport.js';
 import { negotiateTransport } from '../../src/daemon/negotiateTransport.js';
 
 // ---------------------------------------------------------------------------
@@ -31,6 +32,8 @@ function installMockFetch(
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -287,6 +290,68 @@ describe('negotiateTransport', () => {
       const transport = await negotiateTransport('http://localhost:8080');
       expect(transport.connected).toBe(true);
       transport.dispose();
+    });
+  });
+
+  // ---- Probe timer cleanup (#269) ---------------------------------------
+
+  describe('probe timer cleanup (#269)', () => {
+    it('leaves zero pending timers when capability probe settles early or rejects', async () => {
+      vi.useFakeTimers();
+
+      // Case 1: capabilities fetch settles early (200 OK).
+      installMockFetch(() => jsonResponse(200, { v: 1, transports: ['rest'] }));
+      const okTransport = await negotiateTransport(
+        'http://localhost:8080',
+        undefined,
+        { probeTimeoutMs: 5_000 },
+      );
+      expect(okTransport.type).toBe('rest');
+      expect(vi.getTimerCount()).toBe(0);
+      okTransport.dispose();
+
+      // Case 2: capabilities fetch rejects early.
+      installMockFetch(() => Promise.reject(new Error('network down')));
+      const errTransport = await negotiateTransport(
+        'http://localhost:8080',
+        undefined,
+        { probeTimeoutMs: 5_000 },
+      );
+      expect(errTransport.type).toBe('rest');
+      expect(vi.getTimerCount()).toBe(0);
+      errTransport.dispose();
+    });
+
+    it('leaves zero pending timers when WS probe resolves early or rejects', async () => {
+      vi.useFakeTimers();
+      installMockFetch(() =>
+        jsonResponse(200, { v: 1, transports: ['acp-ws', 'acp-http'] }),
+      );
+
+      // Case 1: WS probe resolves immediately (should not leak the 5s race timer).
+      const wsFetchSpy = vi
+        .spyOn(AcpWsTransport.prototype, 'fetch')
+        .mockResolvedValueOnce(jsonResponse(200, { v: 1 }));
+
+      const wsTransport = await negotiateTransport(
+        'http://localhost:8080',
+        undefined,
+        { probeTimeoutMs: 5_000 },
+      );
+      expect(wsTransport.type).toBe('acp-ws');
+      expect(vi.getTimerCount()).toBe(0);
+      wsTransport.dispose();
+
+      // Case 2: WS probe rejects immediately (should dispose WS, fall back, and leave zero timers).
+      wsFetchSpy.mockRejectedValueOnce(new Error('ws handshake failed'));
+      const fallbackTransport = await negotiateTransport(
+        'http://localhost:8080',
+        undefined,
+        { probeTimeoutMs: 5_000 },
+      );
+      expect(fallbackTransport.type).toBe('acp-http');
+      expect(vi.getTimerCount()).toBe(0);
+      fallbackTransport.dispose();
     });
   });
 });
