@@ -12,6 +12,10 @@ import {
 import type { AuditEntry } from '../auditLog.js';
 import { loadLayeredPolicy, type Policy } from './loader.js';
 import {
+  WorkspaceConfigHeldError,
+  type WorkspaceConfigApprovalStore,
+} from './workspaceConfigApprovals.js';
+import {
   loadLayeredRoutingMatcherStrict,
   type RoutingMatcher,
 } from '../routing/rules.js';
@@ -52,6 +56,12 @@ export interface HotReload {
    * (some platforms report a null filename); every watched file is then named.
    */
   trigger(file?: string): void;
+  /**
+   * Run one reload pass immediately (used when an owner approves a held
+   * workspace config file via `POST /rc/workspace-config-approvals/approve` so
+   * the approved ruleset takes effect before the HTTP response returns, #242).
+   */
+  reloadNow?(file?: string): Promise<void>;
   stop(): void;
 }
 
@@ -89,6 +99,7 @@ interface HotReloadSpec<T> {
   apply: (value: T) => void;
   reloaded: AuditEntry['action'];
   failed: AuditEntry['action'];
+  held: AuditEntry['action'];
   /** Detail for the applied row beyond `file`. */
   appliedDetail: (value: T, notes: string[]) => Record<string, unknown>;
   label: string;
@@ -104,6 +115,43 @@ function createHotReload<T>(spec: HotReloadSpec<T>): HotReload {
   // The files and notes of the reload in flight (reloads never overlap).
   let current: { files: string; notes: string[] } = { files: '', notes: [] };
 
+  const handleLoaded = (value: T) => {
+    const detail: Record<string, unknown> = {
+      file: current.files,
+      ...spec.appliedDetail(value, current.notes),
+    };
+    void spec.audit.record({ action: spec.reloaded, detail });
+    spec.log.info(
+      `${spec.label}: reloaded ${current.files} (${String(detail['ruleCount'])} rule(s))`,
+    );
+  };
+
+  const handleError = (err: unknown) => {
+    if (err instanceof WorkspaceConfigHeldError) {
+      void spec.audit.record({
+        action: spec.held,
+        target: err.filePath,
+        detail: {
+          file: err.filePath,
+          sha256: err.sha256,
+          phase: 'reload',
+        },
+      });
+      spec.log.warn(
+        `${spec.label}: holding unapproved workspace config ${err.filePath} (sha256=${err.sha256}), keeping the previous ruleset`,
+      );
+      return;
+    }
+    const reason = reloadFailureReason(err);
+    void spec.audit.record({
+      action: spec.failed,
+      detail: { file: current.files, reason },
+    });
+    spec.log.warn(
+      `${spec.label}: reload of ${current.files} refused, keeping the previous ruleset (${reason})`,
+    );
+  };
+
   const reloader = new DebouncedReloader<T>({
     ...RELOAD_TIMING,
     ...spec.timing,
@@ -115,26 +163,8 @@ function createHotReload<T>(spec: HotReloadSpec<T>): HotReload {
     },
     // apply MUST stay synchronous (atomic against an in-flight decision).
     apply: spec.apply,
-    onReloaded: (value) => {
-      const detail: Record<string, unknown> = {
-        file: current.files,
-        ...spec.appliedDetail(value, current.notes),
-      };
-      void spec.audit.record({ action: spec.reloaded, detail });
-      spec.log.info(
-        `${spec.label}: reloaded ${current.files} (${String(detail['ruleCount'])} rule(s))`,
-      );
-    },
-    onError: (err) => {
-      const reason = reloadFailureReason(err);
-      void spec.audit.record({
-        action: spec.failed,
-        detail: { file: current.files, reason },
-      });
-      spec.log.warn(
-        `${spec.label}: reload of ${current.files} refused, keeping the previous ruleset (${reason})`,
-      );
-    },
+    onReloaded: handleLoaded,
+    onError: handleError,
   });
 
   return {
@@ -142,6 +172,17 @@ function createHotReload<T>(spec: HotReloadSpec<T>): HotReload {
       if (file === undefined) for (const f of spec.files) changed.add(f);
       else changed.add(file);
       reloader.trigger();
+    },
+    async reloadNow(file) {
+      const files = file ?? spec.files.join(', ');
+      current = { files, notes: [] };
+      try {
+        const value = await spec.load((msg) => current.notes.push(msg));
+        spec.apply(value);
+        handleLoaded(value);
+      } catch (err) {
+        handleError(err);
+      }
     },
     stop: () => reloader.stop(),
   };
@@ -160,6 +201,7 @@ export interface PolicyHotReloadOptions {
   /** Swap the loaded policy in. MUST be synchronous. */
   apply: (policy: Policy) => void;
   audit: { record(entry: AuditEntry): Promise<void> };
+  approvals?: WorkspaceConfigApprovalStore;
   log?: HotReloadLog;
   timing?: Timing;
 }
@@ -194,11 +236,12 @@ export function createPolicyHotReload(opts: PolicyHotReloadOptions): HotReload {
           note(msg);
           log.warn(msg);
         },
-        { strictWorkspace: true },
+        { strictWorkspace: true, approvals: opts.approvals },
       ),
     apply: opts.apply,
     reloaded: 'policy_reloaded',
     failed: 'policy_reload_failed',
+    held: 'policy_workspace_held',
     appliedDetail: (policy, notes) => ({
       ruleCount: policy.rules.length,
       // Parts of the workspace file that exceeded its bounds and were dropped.
@@ -217,6 +260,7 @@ export interface RoutingHotReloadOptions {
   /** Swap the compiled matcher in. MUST be synchronous. */
   apply: (matcher: RoutingMatcher | undefined) => void;
   audit: { record(entry: AuditEntry): Promise<void> };
+  approvals?: WorkspaceConfigApprovalStore;
   log?: HotReloadLog;
   timing?: Timing;
 }
@@ -240,13 +284,19 @@ export function createRoutingHotReload(
         : []),
     ],
     load: (note) =>
-      loadLayeredRoutingMatcherStrict(opts.userPath, opts.workspaceCwd, (m) => {
-        note(m);
-        (opts.log ?? defaultLog).warn(m);
-      }),
+      loadLayeredRoutingMatcherStrict(
+        opts.userPath,
+        opts.workspaceCwd,
+        (m) => {
+          note(m);
+          (opts.log ?? defaultLog).warn(m);
+        },
+        { approvals: opts.approvals },
+      ),
     apply: ({ matcher }) => opts.apply(matcher),
     reloaded: 'routing_reloaded',
     failed: 'routing_reload_failed',
+    held: 'routing_workspace_held',
     appliedDetail: ({ ruleCount, ignored }) => ({ ruleCount, ignored }),
     label: 'routing',
     audit: opts.audit,

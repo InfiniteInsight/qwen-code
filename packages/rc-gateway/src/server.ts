@@ -99,6 +99,10 @@ import { createApprovalModeRoute } from './routes/approvalMode.js';
 import { createModelSwitchRoute } from './routes/modelSwitch.js';
 import { createWorkspacePermissionsRoutes } from './routes/workspacePermissions.js';
 import { createWorkspaceTrustRoutes } from './routes/workspaceTrust.js';
+import {
+  createWorkspaceConfigApprovalRoutes,
+  type WorkspaceConfigApprovalsDeps,
+} from './routes/workspaceConfigApprovals.js';
 import { createWorkspaceSettingsRoute } from './routes/workspaceSettings.js';
 import {
   createWorkspaceEnvRoute,
@@ -449,6 +453,11 @@ export interface GatewayDeps {
   walDir?: string;
   /** Live policy access for POST /policy/explain (P4). Absent → route not mounted. */
   policyExplain?: PolicyExplainAccess;
+  /**
+   * Owner-approved SHA-256 records for watched workspace `.qwen/{policy,routing}.yaml`
+   * files (#242). Absent → `/rc/workspace-config-approvals` routes not mounted.
+   */
+  workspaceConfigApprovals?: Omit<WorkspaceConfigApprovalsDeps, 'audit'>;
   /**
    * Session-scoped permission overlay store (issue #33): TTL-bound,
    * dashboard-set overrides that preempt the file policy. When set, the
@@ -1866,6 +1875,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       hostAttach: deps.hostAttach !== undefined,
       hostTabs: deps.hostTabs !== undefined,
       githubClone: deps.github !== undefined,
+      workspaceConfigApprovals: deps.workspaceConfigApprovals !== undefined,
       maxAttachmentBytes: attachmentLimit,
       daemonQwenBin: deps.daemonQwenBin,
       daemonQwenBinHealthy: deps.daemonQwenBinHealthy,
@@ -2501,6 +2511,17 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       '/policy/explain',
       requireScope(OWNER, audit),
       createPolicyExplainRoute(deps.policyExplain, { audit }),
+    );
+  }
+
+  if (deps.workspaceConfigApprovals) {
+    app.use(
+      '/rc/workspace-config-approvals',
+      requireScope(OWNER, audit),
+      createWorkspaceConfigApprovalRoutes({
+        ...deps.workspaceConfigApprovals,
+        audit,
+      }),
     );
   }
 

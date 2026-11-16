@@ -99,6 +99,13 @@ export {
   type PolicyAction,
 } from './policy/loader.js';
 export {
+  WorkspaceConfigApprovalStore,
+  WorkspaceConfigHeldError,
+  type WorkspaceConfigApprovalRecord,
+  type HeldWorkspaceConfig,
+  type WorkspaceConfigKind,
+} from './policy/workspaceConfigApprovals.js';
+export {
   evaluate,
   explainPolicy,
   type PolicyDecision,

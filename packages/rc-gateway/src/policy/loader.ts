@@ -7,6 +7,12 @@
 import { readFile, stat } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { parse } from 'yaml';
+import {
+  WorkspaceConfigHeldError,
+  readContainedWorkspaceConfig,
+  type HeldWorkspaceConfig,
+  type WorkspaceConfigApprovalStore,
+} from './workspaceConfigApprovals.js';
 
 export type PolicyAction = 'allow' | 'deny' | 'prompt';
 
@@ -550,7 +556,11 @@ export async function loadLayeredPolicy(
   userPath: string,
   workspaceCwd: string | undefined,
   warn: (msg: string) => void = () => {},
-  opts: { strictWorkspace?: boolean } = {},
+  opts: {
+    strictWorkspace?: boolean;
+    approvals?: WorkspaceConfigApprovalStore;
+    onHeld?: (held: HeldWorkspaceConfig) => void;
+  } = {},
 ): Promise<Policy> {
   const user = (await loadPolicyFile(userPath)) ?? DEFAULT_PROMPT_POLICY;
   // Readability warning: emitted once per load for the user-scope file only.
@@ -567,13 +577,47 @@ export async function loadLayeredPolicy(
   let violations: string[] = [];
   if (workspaceCwd) {
     try {
-      // readPolicyText returns null for ENOENT (absent); loadWorkspacePolicy
-      // throws only for a malformed file.
-      const text = await readPolicyText(
-        join(workspaceCwd, '.qwen', 'policy.yaml'),
-      );
-      if (text !== null) {
-        ({ policy: workspace, violations } = loadWorkspacePolicy(text));
+      if (opts.approvals) {
+        const contained = readContainedWorkspaceConfig(workspaceCwd, 'policy');
+        if (contained.absent) {
+          opts.approvals.clearHeld(contained.path);
+        } else {
+          const parsed = loadWorkspacePolicy(contained.text);
+          if (opts.approvals.isApproved(contained.path, contained.sha256)) {
+            opts.approvals.clearHeld(contained.path);
+            workspace = parsed.policy;
+            violations = parsed.violations;
+          } else {
+            const phase = opts.strictWorkspace ? 'reload' : 'boot';
+            const held = opts.approvals.recordHeld({
+              path: contained.path,
+              kind: 'policy',
+              sha256: contained.sha256,
+              phase,
+            });
+            if (opts.strictWorkspace) {
+              throw new WorkspaceConfigHeldError(
+                'policy',
+                contained.path,
+                contained.sha256,
+              );
+            }
+            warn(
+              `[policy] workspace policy.yaml (${contained.path}, sha256=${contained.sha256}) held pending owner approval`,
+            );
+            opts.onHeld?.(held);
+            workspace = null;
+          }
+        }
+      } else {
+        // readPolicyText returns null for ENOENT (absent); loadWorkspacePolicy
+        // throws only for a malformed file.
+        const text = await readPolicyText(
+          join(workspaceCwd, '.qwen', 'policy.yaml'),
+        );
+        if (text !== null) {
+          ({ policy: workspace, violations } = loadWorkspacePolicy(text));
+        }
       }
     } catch (err) {
       if (opts.strictWorkspace) throw err; // reload: retain the previous ruleset

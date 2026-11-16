@@ -9,6 +9,12 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parse } from 'yaml';
 import { matchesAny } from '../policy/glob.js';
+import {
+  WorkspaceConfigHeldError,
+  readContainedWorkspaceConfig,
+  type HeldWorkspaceConfig,
+  type WorkspaceConfigApprovalStore,
+} from '../policy/workspaceConfigApprovals.js';
 
 /**
  * The match clause of a routing rule. Both fields are optional; an absent field
@@ -558,41 +564,74 @@ async function loadBothRoutingLayers(
   userPath: string,
   workspaceCwd: string | undefined,
   warn: (msg: string) => void,
+  opts: {
+    approvals?: WorkspaceConfigApprovalStore;
+    onHeld?: (held: HeldWorkspaceConfig) => void;
+  } = {},
 ): Promise<{
   workspace: RoutingConfig | null;
   user: RoutingConfig | null;
   workspacePath: string | undefined;
 }> {
   const user = await loadOneFailOpen(userPath, 'routing.yaml', warn);
-  const workspacePath = workspaceCwd
-    ? join(workspaceCwd, '.qwen', 'routing.yaml')
-    : undefined;
-  const workspace = workspacePath
-    ? await loadOneFailOpen(workspacePath, 'workspace routing.yaml', warn)
-    : null;
-  return { workspace, user, workspacePath };
+  if (!workspaceCwd) {
+    return { workspace: null, user, workspacePath: undefined };
+  }
+  if (!opts.approvals) {
+    const workspacePath = join(workspaceCwd, '.qwen', 'routing.yaml');
+    const workspace = await loadOneFailOpen(
+      workspacePath,
+      'workspace routing.yaml',
+      warn,
+    );
+    return { workspace, user, workspacePath };
+  }
+  try {
+    const contained = readContainedWorkspaceConfig(workspaceCwd, 'routing');
+    if (contained.absent) {
+      opts.approvals.clearHeld(contained.path);
+      return { workspace: null, user, workspacePath: contained.path };
+    }
+    const parsed = loadRoutingConfig(contained.text);
+    if (opts.approvals.isApproved(contained.path, contained.sha256)) {
+      opts.approvals.clearHeld(contained.path);
+      return { workspace: parsed, user, workspacePath: contained.path };
+    }
+    const held = opts.approvals.recordHeld({
+      path: contained.path,
+      kind: 'routing',
+      sha256: contained.sha256,
+      phase: 'boot',
+    });
+    warn(
+      `[routing] workspace routing.yaml (${contained.path}, sha256=${contained.sha256}) held pending owner approval`,
+    );
+    opts.onHeld?.(held);
+    return { workspace: null, user, workspacePath: contained.path };
+  } catch (err) {
+    warn(`[routing] ignoring workspace routing.yaml: ${(err as Error).message}`);
+    return {
+      workspace: null,
+      user,
+      workspacePath: join(workspaceCwd, '.qwen', 'routing.yaml'),
+    };
+  }
 }
 
-/**
- * Load the user-level routing file and, when a workspace cwd is given, the
- * workspace override `<workspaceCwd>/.qwen/routing.yaml`, merge them (workspace
- * rules PREPENDED - design D1), and compile a single {@link RoutingMatcher}.
- *
- * Per-file FAIL-OPEN + NEVER-THROW (design D4): each layer is loaded
- * independently; a malformed file at either layer is logged and ignored while
- * the other layer still applies (`compileRouting` is total). Returns
- * `{ matcher: undefined, ruleCount: 0 }` when neither file exists. `warn`
- * defaults to a no-op (the CLI passes a `console.warn` wrapper).
- */
 export async function loadLayeredRoutingMatcher(
   userPath: string,
   workspaceCwd: string | undefined,
   warn: (msg: string) => void = () => {},
+  opts: {
+    approvals?: WorkspaceConfigApprovalStore;
+    onHeld?: (held: HeldWorkspaceConfig) => void;
+  } = {},
 ): Promise<{ matcher: RoutingMatcher | undefined; ruleCount: number }> {
   const { workspace, user } = await loadBothRoutingLayers(
     userPath,
     workspaceCwd,
     warn,
+    opts,
   );
   const merged = mergeRoutingConfigs(workspace, user, (r) =>
     warn(refusedRuleMessage(r)),
@@ -616,6 +655,7 @@ export async function loadLayeredRoutingMatcherStrict(
   userPath: string,
   workspaceCwd: string | undefined,
   warn: (msg: string) => void = () => {},
+  opts: { approvals?: WorkspaceConfigApprovalStore } = {},
 ): Promise<{
   matcher: RoutingMatcher | undefined;
   ruleCount: number;
@@ -623,9 +663,37 @@ export async function loadLayeredRoutingMatcherStrict(
   ignored: number;
 }> {
   const user = await loadRoutingConfigFile(userPath);
-  const workspace = workspaceCwd
-    ? await loadRoutingConfigFile(join(workspaceCwd, '.qwen', 'routing.yaml'))
-    : null;
+  let workspace: RoutingConfig | null = null;
+  if (workspaceCwd) {
+    if (opts.approvals) {
+      const contained = readContainedWorkspaceConfig(workspaceCwd, 'routing');
+      if (contained.absent) {
+        opts.approvals.clearHeld(contained.path);
+      } else {
+        const parsed = loadRoutingConfig(contained.text);
+        if (opts.approvals.isApproved(contained.path, contained.sha256)) {
+          opts.approvals.clearHeld(contained.path);
+          workspace = parsed;
+        } else {
+          opts.approvals.recordHeld({
+            path: contained.path,
+            kind: 'routing',
+            sha256: contained.sha256,
+            phase: 'reload',
+          });
+          throw new WorkspaceConfigHeldError(
+            'routing',
+            contained.path,
+            contained.sha256,
+          );
+        }
+      }
+    } else {
+      workspace = await loadRoutingConfigFile(
+        join(workspaceCwd, '.qwen', 'routing.yaml'),
+      );
+    }
+  }
   let ignored = 0;
   const merged = mergeRoutingConfigs(workspace, user, (r) => {
     ignored += 1;
@@ -657,11 +725,13 @@ export async function loadResolvedRoutingRules(
   userPath: string,
   workspaceCwd: string | undefined,
   warn: (msg: string) => void = () => {},
+  opts: { approvals?: WorkspaceConfigApprovalStore } = {},
 ): Promise<ResolvedRoutingRule[]> {
   const { workspace, user, workspacePath } = await loadBothRoutingLayers(
     userPath,
     workspaceCwd,
     warn,
+    opts,
   );
   const out: ResolvedRoutingRule[] = [];
   if (workspace && workspacePath) {

@@ -5202,6 +5202,21 @@
                 "
               ></div>
             </section>
+            <section id="ws-config-approvals" class="ops-card" hidden>
+              <h2>Watched workspace config</h2>
+              <div class="ops-note">
+                (owner approval for watched .qwen/policy.yaml and .qwen/routing.yaml; unapproved files are held)
+              </div>
+              <div
+                id="ws-config-approvals-body"
+                style="
+                  margin-top: 6px;
+                  display: flex;
+                  flex-direction: column;
+                  gap: 10px;
+                "
+              ></div>
+            </section>
             <section id="policy-explain-view" class="ops-card">
               <h2>Policy dry-run</h2>
               <div class="ops-note">
@@ -7649,6 +7664,7 @@
         renderMoreValues();
         void readHostActions(); // #192: the Host rows, read as More opens
         void readHostTabs(); // #256: the Closed tabs row's count, read as More opens
+        void loadWorkspaceConfigApprovals(false); // #242: held workspace policy/routing badge
         $('more-github').hidden = !githubOn(); // #257: no row on an older gateway
         if (quiet) return;
         const first = scr.querySelector('.row');
@@ -7738,6 +7754,9 @@
         if (key === 'closed-tabs') {
           renderClosedTabs();
           void readHostTabs();
+        }
+        if (key === 'trust') {
+          void loadWorkspaceConfigApprovals(false);
         }
       }
 
@@ -8057,7 +8076,14 @@
           v.mcp = mcp.servers.filter((s) => s && !s.disabled).length + ' on';
         }
         const trust = wsLastData.trust;
-        if (trust && trust.effective && trust.effective.state) {
+        const heldCfgCount = wsConfigApprovalsHeldCount();
+        if (heldCfgCount > 0) {
+          const heldWord = heldCfgCount + ' held';
+          v.trust =
+            trust && trust.effective && trust.effective.state
+              ? String(trust.effective.state) + ' \u00b7 ' + heldWord
+              : heldWord;
+        } else if (trust && trust.effective && trust.effective.state) {
           v.trust = String(trust.effective.state);
         }
         const daemons = manifestDaemons();
@@ -8096,6 +8122,9 @@
           const val = row.querySelector('.val');
           const text = v[row.dataset.panel] || '';
           if (val.textContent !== text) val.textContent = text;
+          if (row.dataset.panel === 'trust') {
+            val.style.color = heldCfgCount > 0 ? '#d29922' : '';
+          }
         }
         // The group heads say where Workspace and Host point, as drawn.
         const ws = wsTargetCwd || (caps && caps.workspaceCwd) || '';
@@ -12880,6 +12909,222 @@
         }
         status.textContent =
           'still pending after ~20s - the local operator on the daemon host has not applied it yet';
+      }
+
+      // #242: owner-approved SHA-256 records for watched workspace
+      // .qwen/policy.yaml and .qwen/routing.yaml files.
+      let wsConfigApprovalsData = null;
+      function wsConfigApprovalsOn() {
+        const rc = caps && caps.remoteControl;
+        return !!(rc && rc.workspaceConfigApprovals === true);
+      }
+      function wsConfigApprovalsHeldCount() {
+        if (!wsConfigApprovalsData || !Array.isArray(wsConfigApprovalsData.files)) {
+          return 0;
+        }
+        return wsConfigApprovalsData.files.filter(
+          (f) => f && f.status === 'held',
+        ).length;
+      }
+      function renderWorkspaceConfigApprovals(statusMsg) {
+        const sec = $('ws-config-approvals');
+        const body = $('ws-config-approvals-body');
+        if (!sec || !body) return;
+        const on = wsConfigApprovalsOn();
+        sec.hidden = !on;
+        if (!on) return;
+        body.replaceChildren();
+        const statusEl = wsSectionStatusEl('ws-config-approvals-status');
+        if (statusMsg) statusEl.textContent = statusMsg;
+
+        if (!wsConfigApprovalsData) {
+          statusEl.textContent = statusMsg || 'loading...';
+          body.append(statusEl);
+          return;
+        }
+        const files = Array.isArray(wsConfigApprovalsData.files)
+          ? wsConfigApprovalsData.files
+          : [];
+        if (files.length === 0) {
+          const empty = document.createElement('div');
+          empty.style.cssText = 'font-size:0.85rem;color:#888';
+          empty.textContent = 'no watched workspace directory is bound';
+          body.append(empty);
+        } else {
+          for (const f of files) {
+            const item = document.createElement('div');
+            item.className = 'ws-cfg-item';
+            item.dataset.kind = f.kind || '';
+            item.dataset.status = f.status || '';
+            item.style.cssText =
+              'border:1px solid #30363d;border-radius:8px;padding:10px;display:flex;flex-direction:column;gap:6px';
+
+            const head = document.createElement('div');
+            head.style.cssText =
+              'display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap';
+            const nameEl = document.createElement('strong');
+            nameEl.style.fontFamily = 'ui-monospace,monospace';
+            nameEl.textContent = '.qwen/' + f.kind + '.yaml';
+
+            const badge = document.createElement('span');
+            badge.className = 'ws-cfg-badge';
+            badge.style.cssText = 'font-size:0.8rem;font-family:ui-monospace,monospace';
+            if (f.status === 'held') {
+              badge.style.color = '#d29922';
+              badge.textContent =
+                f.heldPhase === 'boot'
+                  ? 'held at boot (unapproved)'
+                  : f.heldPhase === 'reload'
+                    ? 'held on reload (unapproved)'
+                    : 'held (unapproved)';
+            } else if (f.status === 'approved') {
+              badge.style.color = '#3fb950';
+              badge.textContent =
+                'approved (' + String(f.sha256 || '').slice(0, 12) + ')';
+            } else if (f.status === 'invalid') {
+              badge.style.color = '#f85149';
+              badge.textContent = 'invalid';
+            } else {
+              badge.style.color = '#8b949e';
+              badge.textContent = 'absent';
+            }
+            head.append(nameEl, badge);
+            item.append(head);
+
+            if (f.sha256) {
+              const shaEl = document.createElement('div');
+              shaEl.style.cssText =
+                'font-family:ui-monospace,monospace;font-size:0.75rem;color:#8b949e;word-break:break-all';
+              shaEl.textContent = 'sha256: ' + f.sha256;
+              item.append(shaEl);
+            }
+            if (f.approved && f.approved.approvedBy) {
+              const metaEl = document.createElement('div');
+              metaEl.style.cssText = 'font-size:0.78rem;color:#8b949e';
+              metaEl.textContent =
+                'last approved by ' +
+                f.approved.approvedBy +
+                (f.status === 'held'
+                  ? ' (' + String(f.approved.sha256 || '').slice(0, 12) + ')'
+                  : '');
+              item.append(metaEl);
+            }
+            if (f.error) {
+              const errEl = document.createElement('div');
+              errEl.style.cssText = 'font-size:0.8rem;color:#f85149';
+              errEl.textContent = f.error;
+              item.append(errEl);
+            }
+            if (Array.isArray(f.violations) && f.violations.length > 0) {
+              const vEl = document.createElement('div');
+              vEl.style.cssText = 'font-size:0.78rem;color:#d29922';
+              vEl.textContent = 'ignored out-of-bounds: ' + f.violations.join('; ');
+              item.append(vEl);
+            }
+            if (f.status === 'held' && typeof f.preview === 'string') {
+              const pre = document.createElement('pre');
+              pre.className = 'ws-cfg-preview';
+              pre.style.cssText =
+                'margin:0;max-height:180px;overflow:auto;padding:8px;background:#0d1117;border-radius:6px;font-size:0.78rem;white-space:pre-wrap;word-break:break-word';
+              pre.textContent =
+                f.preview + (f.previewTruncated ? '\n... (truncated)' : '');
+              item.append(pre);
+
+              const approveBtn = document.createElement('button');
+              approveBtn.type = 'button';
+              approveBtn.className = 'ws-cfg-approve';
+              approveBtn.dataset.kind = f.kind;
+              approveBtn.style.cssText = 'min-height:44px;font-size:16px';
+              approveBtn.textContent = 'Approve .qwen/' + f.kind + '.yaml';
+              approveBtn.addEventListener('click', () => {
+                void approveWorkspaceConfig(f.kind, f.sha256, approveBtn);
+              });
+              item.append(approveBtn);
+            }
+            body.append(item);
+          }
+        }
+        const actions = document.createElement('div');
+        actions.style.cssText = 'display:flex;gap:8px;align-items:center';
+        const refreshBtn = document.createElement('button');
+        refreshBtn.type = 'button';
+        refreshBtn.id = 'ws-config-approvals-refresh';
+        refreshBtn.style.cssText = 'min-height:44px;font-size:16px';
+        refreshBtn.textContent = 'Refresh';
+        refreshBtn.addEventListener('click', () => {
+          void loadWorkspaceConfigApprovals(true);
+        });
+        actions.append(refreshBtn);
+        body.append(actions, statusEl);
+      }
+
+      async function loadWorkspaceConfigApprovals(notify) {
+        const sec = $('ws-config-approvals');
+        if (!wsConfigApprovalsOn()) {
+          if (sec) sec.hidden = true;
+          return;
+        }
+        if (sec) sec.hidden = false;
+        if (!token()) return;
+        try {
+          const res = await fetch('/rc/workspace-config-approvals', {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (!res.ok) {
+            const e = await res.json().catch(() => ({}));
+            wsConfigApprovalsData = null;
+            const msg =
+              res.status === 401 || res.status === 403
+                ? 'not authorized - needs an owner token'
+                : (e.error || 'load failed') + ' (' + res.status + ')';
+            const body = $('ws-config-approvals-body');
+            if (body) {
+              body.replaceChildren();
+              const st = wsSectionStatusEl('ws-config-approvals-status');
+              st.textContent = msg;
+              body.append(st);
+            }
+            renderMoreValues();
+            return;
+          }
+          wsConfigApprovalsData = await res.json();
+          renderWorkspaceConfigApprovals('');
+          renderMoreValues();
+        } catch (err) {
+          if (notify) {
+            setStatus('watched workspace config load failed: ' + err.message);
+          }
+        }
+      }
+
+      async function approveWorkspaceConfig(kind, sha256, btn) {
+        if (btn) btn.disabled = true;
+        try {
+          const res = await fetch('/rc/workspace-config-approvals/approve', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + token(),
+            },
+            body: JSON.stringify({ kind, sha256 }),
+          });
+          const body = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            const msg =
+              res.status === 401 || res.status === 403
+                ? 'not authorized - needs an owner token'
+                : (body.error || 'approval failed') + ' (' + res.status + ')';
+            await loadWorkspaceConfigApprovals(false);
+            renderWorkspaceConfigApprovals(msg);
+            setStatus(msg);
+            return;
+          }
+          await loadWorkspaceConfigApprovals(false);
+          renderWorkspaceConfigApprovals('approved .qwen/' + kind + '.yaml');
+        } catch (err) {
+          if (btn) btn.disabled = false;
+          renderWorkspaceConfigApprovals('approval failed: ' + err.message);
+        }
       }
 
       function mcpOriginLabel(origin) {
@@ -19842,6 +20087,7 @@
         renderRecapGate();
         renderBtwGate(); // #133, same reason
         renderWtResetGate(); // #134, same reason
+        void loadWorkspaceConfigApprovals(false); // #242: surface held-at-boot workspace config
 
         // rc-workspace-scoping (#28): the target selector appears when at
         // least one workspace-control surface is available on this daemon.
