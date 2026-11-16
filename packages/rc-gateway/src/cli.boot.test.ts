@@ -154,6 +154,35 @@ describe('parseServeFlags', () => {
     }
   });
 
+  it('reads --prompt-silence-sec in both forms (including 0 to disable) and from QWEN_RC_PROMPT_SILENCE_SEC (#244)', () => {
+    expect(parseServeFlags([]).promptSilenceSec).toBeUndefined();
+    expect(parseServeFlags(['--prompt-silence-sec', '120'])).toMatchObject({
+      promptSilenceSec: 120,
+      promptSilenceSecFrom: '--prompt-silence-sec',
+    });
+    expect(parseServeFlags(['--prompt-silence-sec=0'])).toMatchObject({
+      promptSilenceSec: 0,
+      promptSilenceSecFrom: '--prompt-silence-sec',
+    });
+    const saved = process.env.QWEN_RC_PROMPT_SILENCE_SEC;
+    process.env.QWEN_RC_PROMPT_SILENCE_SEC = '0';
+    try {
+      expect(parseServeFlags([])).toMatchObject({
+        promptSilenceSec: 0,
+        promptSilenceSecFrom: 'QWEN_RC_PROMPT_SILENCE_SEC',
+      });
+      expect(
+        parseServeFlags(['--prompt-silence-sec', '45']).promptSilenceSec,
+      ).toBe(45);
+    } finally {
+      if (saved === undefined) delete process.env.QWEN_RC_PROMPT_SILENCE_SEC;
+      else process.env.QWEN_RC_PROMPT_SILENCE_SEC = saved;
+    }
+    expect(() => parseServeFlags(['--prompt-silence-sec', '-1'])).toThrow(
+      /--prompt-silence-sec: expected a non-negative whole number, got "-1"/,
+    );
+  });
+
   it('refuses a --max-daemons that is not a positive whole number, before any daemon is spawned (#214)', () => {
     expect(() => parseServeFlags(['--max-daemons', '0'])).toThrow(
       /--max-daemons: expected a positive whole number, got "0"/,

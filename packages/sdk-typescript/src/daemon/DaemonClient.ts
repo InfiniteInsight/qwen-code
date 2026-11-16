@@ -172,6 +172,7 @@ import type {
   PromptContentBlock,
   PromptResult,
   TurnFrameObserver,
+  TurnSubscribedObserver,
   SetModelResult,
   SetSessionLanguageResult,
   SetUserLanguageResult,
@@ -6546,6 +6547,7 @@ export class DaemonClient {
     signal?: AbortSignal,
     clientId?: string,
     onTurnFrame?: TurnFrameObserver,
+    onTurnSubscribed?: TurnSubscribedObserver,
   ): Promise<PromptResult> {
     signal?.throwIfAborted();
     const releasePromptSlot = this.reservePromptSlot(sessionId);
@@ -6576,6 +6578,7 @@ export class DaemonClient {
             clientId,
             accept.eventEpoch,
             onTurnFrame,
+            onTurnSubscribed,
           );
         } finally {
           releasePromptSlot();
@@ -6647,6 +6650,7 @@ export class DaemonClient {
     clientId?: string,
     eventEpoch?: string,
     onTurnFrame?: TurnFrameObserver,
+    onTurnSubscribed?: TurnSubscribedObserver,
   ): Promise<PromptResult> {
     const sseAbort = new AbortController();
     const composedSignal = signal
@@ -6654,6 +6658,13 @@ export class DaemonClient {
       : sseAbort.signal;
 
     try {
+      if (onTurnSubscribed) {
+        try {
+          onTurnSubscribed();
+        } catch {
+          // Informational only, same rule as onTurnFrame below.
+        }
+      }
       const events = this.subscribeEvents(sessionId, {
         lastEventId,
         // Cursor and epoch both come from the 202 envelope: a daemon

@@ -273,6 +273,12 @@ export interface SessionDaemon {
      * frame type so no prompt content can reach a measurement.
      */
     onTurnFrame?: (frameType: string) => void,
+    /**
+     * Called once when `prompt()` enters the 202 subscription wait, and never
+     * on the blocking 200 path (#244). Lets a silence window arm only when
+     * frames can actually be observed.
+     */
+    onTurnSubscribed?: () => void,
   ): Promise<PromptResult>;
   capabilities(): Promise<DaemonCapabilities>;
   closeSession(sessionId: string, clientId?: string): Promise<void>;
@@ -2412,9 +2418,17 @@ export class DaemonPool implements SessionDaemon {
     signal?: AbortSignal,
     clientId?: string,
     onTurnFrame?: (frameType: string) => void,
+    onTurnSubscribed?: () => void,
   ): Promise<PromptResult> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
-      client.prompt(sessionId, req, signal, clientId, onTurnFrame),
+      client.prompt(
+        sessionId,
+        req,
+        signal,
+        clientId,
+        onTurnFrame,
+        onTurnSubscribed,
+      ),
     );
   }
 
