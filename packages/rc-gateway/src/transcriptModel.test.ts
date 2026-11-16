@@ -25,6 +25,7 @@ interface Item {
   id: number;
   kind: string;
   text?: string;
+  time?: number;
   startedAt?: number;
   live?: boolean;
   durLabel?: string | null;
@@ -63,14 +64,14 @@ interface Model {
   forkItem: Item | null;
   planItem: Item | null;
   subscribe(fn: (ev: Ev) => void): () => void;
-  addUser(text: string): Item;
+  addUser(text: string, time?: number): Item;
   addUserPart(part: unknown, time?: number): { item: Item; merged: boolean };
-  appendAssistant(text: string): void;
-  appendThought(text: string): void;
+  appendAssistant(text: string, time?: number): void;
+  appendThought(text: string, time?: number): void;
   finishThought(): void;
   addSystem(text: string, err?: boolean): void;
   setPlan(entries: unknown[]): void;
-  upsertTool(u: Record<string, unknown>): void;
+  upsertTool(u: Record<string, unknown>, time?: number): void;
   setSubagentType(parentId: string, type: string): void;
   appendSubagentText(parentId: string, text: string): void;
   upsertSubagentTool(u: Record<string, unknown>, parentId: string): void;
@@ -1420,6 +1421,63 @@ describe('TranscriptModel', () => {
         status: 'in_progress',
       });
       expect(m.items[0].sub).toBeNull();
+    });
+  });
+
+  describe('thought and tool server timestamps (#268)', () => {
+    it('appendThought keeps the opening timestamp across chunks and after finishThought', () => {
+      const { m, clock } = setup();
+      m.appendThought('step 1 ', 1_700_000_000_000);
+      m.appendThought('step 2', 1_700_000_005_000);
+      const thought = m.items[0];
+      expect(thought.live).toBe(true);
+      expect(thought.time).toBe(1_700_000_000_000);
+      clock.t = 4_000;
+      m.finishThought();
+      expect(thought.live).toBe(false);
+      expect(thought.durLabel).toBe('3s');
+      expect(thought.time).toBe(1_700_000_000_000);
+    });
+
+    it('appendThought adopts a later chunk timestamp when opened without one, and leaves unstamped thoughts undefined', () => {
+      const { m } = setup();
+      m.appendThought('no clock ');
+      expect(m.items[0].time).toBeUndefined();
+      m.appendThought('now clocked', 1_700_000_002_000);
+      expect(m.items[0].time).toBe(1_700_000_002_000);
+      m.appendThought(' later', 1_700_000_009_000);
+      expect(m.items[0].time).toBe(1_700_000_002_000);
+      m.finishThought();
+
+      m.appendThought('synthetic', Number.NaN);
+      expect(m.items[1].time).toBeUndefined();
+      m.finishThought();
+      expect(m.items[1].time).toBeUndefined();
+    });
+
+    it('upsertTool preserves the earliest start timestamp across updates and omits missing timestamps', () => {
+      const { m } = setup();
+      m.upsertTool(
+        { toolCallId: 't1', title: 'Read file', status: 'in_progress' },
+        1_700_000_010_000,
+      );
+      m.upsertTool(
+        { toolCallId: 't1', status: 'completed' },
+        1_700_000_018_000,
+      );
+      expect(m.items[0].time).toBe(1_700_000_010_000);
+
+      // Out-of-order frames: earlier start timestamp replaces later update timestamp.
+      m.upsertTool({ toolCallId: 't2', status: 'completed' }, 1_700_000_030_000);
+      m.upsertTool(
+        { toolCallId: 't2', title: 'Grep', status: 'in_progress' },
+        1_700_000_022_000,
+      );
+      expect(m.items[1].time).toBe(1_700_000_022_000);
+
+      // Synthetic tool call with no timestamp leaves time undefined.
+      m.upsertTool({ toolCallId: 't3', title: 'Bare', status: 'completed' });
+      expect(m.items[2].time).toBeUndefined();
     });
   });
 });

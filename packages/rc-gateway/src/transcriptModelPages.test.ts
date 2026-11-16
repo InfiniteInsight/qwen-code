@@ -45,14 +45,15 @@ interface Model {
   addUser(text: string, time?: number): Item;
   addUserPart(part: unknown, time?: number): { item: Item; merged: boolean };
   addUserChunk(text: string, time?: number): { item: Item; merged: boolean };
-  appendAssistant(text: string): void;
-  appendThought(text: string): void;
+  appendAssistant(text: string, time?: number): void;
+  appendThought(text: string, time?: number): void;
   setPlan(entries: unknown[]): void;
-  upsertTool(u: Record<string, unknown>): void;
+  upsertTool(u: Record<string, unknown>, time?: number): void;
   upsertSubagentTool(u: Record<string, unknown>, parentId: string): void;
   userTurns(): Item[];
   cutAtUserTurn(keep: number): boolean;
   prependItems(list: Item[], beforeSplice?: () => void): number;
+  subscribe(fn: (ev: { type: string; item?: Item }) => void): () => void;
 }
 interface Api {
   createTranscriptModel(opts?: { now?: () => number }): Model;
@@ -484,5 +485,115 @@ describe('a subagent whose parent call is on an older page (#202)', () => {
       ]),
     );
     expect(m.items[0].sub).toBeNull();
+  });
+});
+
+describe('thought and tool timestamps across stored pages (#268)', () => {
+  function nested(
+    sessionUpdate: string,
+    extra: Record<string, unknown> = {},
+    ts?: number,
+  ): Record<string, unknown> {
+    return {
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate,
+          ...extra,
+          ...(ts ? { _meta: { timestamp: ts } } : {}),
+        },
+      },
+    };
+  }
+
+  for (const [shapeName, mk] of [
+    ['flat', flat],
+    ['nested', nested],
+  ] as const) {
+    it(`replayStoredPage stamps settled thought and tool rows on ${shapeName} pages`, () => {
+      const rows = api.replayStoredPage([
+        mk('agent_thought_chunk', text('first '), 1_700_000_001_000),
+        mk('agent_thought_chunk', text('second'), 1_700_000_004_000),
+        mk(
+          'tool_call',
+          { toolCallId: 'tc1', title: 'Read file', status: 'in_progress' },
+          1_700_000_005_000,
+        ),
+        mk(
+          'tool_call_update',
+          { toolCallId: 'tc1', status: 'completed' },
+          1_700_000_009_000,
+        ),
+      ]);
+      expect(rows.map((r) => r.kind)).toEqual(['thought', 'tool']);
+      expect(rows[0].live).toBe(false);
+      expect(rows[0].durLabel).toBe('4s');
+      expect(rows[0].time).toBe(1_700_000_001_000);
+      expect(rows[1].label).toBe('Read file');
+      expect(rows[1].status).toBe('completed');
+      expect(rows[1].time).toBe(1_700_000_005_000);
+    });
+  }
+
+  it('fillTool adopts the older tool_call start timestamp over a newer tool_call_update timestamp across pages', () => {
+    const m = api.createTranscriptModel();
+    const updates: Item[] = [];
+    m.prependItems(
+      api.replayStoredPage([
+        flat(
+          'tool_call_update',
+          { toolCallId: 't1', status: 'completed' },
+          20_000,
+        ),
+      ]),
+    );
+    expect(m.items[0].time).toBe(20_000);
+    m.subscribe((ev: { type: string; item?: Item }) => {
+      if (ev.type === 'update' && ev.item) updates.push(ev.item);
+    });
+
+    m.prependItems(
+      api.replayStoredPage([
+        flat('tool_call', { toolCallId: 't1', title: 'read_file' }, 10_000),
+      ]),
+    );
+    expect(m.items).toHaveLength(1);
+    expect(updates).toEqual([m.items[0]]);
+    expect(m.items[0]).toMatchObject({
+      kind: 'tool',
+      label: 'read_file',
+      status: 'completed',
+      time: 10_000,
+    });
+  });
+
+  it('trimOverlap deduplicates overlapping tool rows whose tool_call and tool_call_update carry different timestamps', () => {
+    const m = api.createTranscriptModel();
+    m.prependItems(
+      api.replayStoredPage([
+        flat('agent_message_chunk', text('checking'), 15_000),
+        flat(
+          'tool_call_update',
+          { toolCallId: 'x1', status: 'completed' },
+          20_000,
+        ),
+      ]),
+    );
+    const added = m.prependItems(
+      api.replayStoredPage([
+        flat('user_message_chunk', text('go'), 5_000),
+        flat('agent_message_chunk', text('checking'), 15_000),
+        flat('tool_call', { toolCallId: 'x1', title: 'ls' }, 16_000),
+      ]),
+    );
+    expect(added).toBe(1);
+    expect(m.items.map((r) => `${r.kind}:${r.text ?? r.label}`)).toEqual([
+      'user:go',
+      'asst:checking',
+      'tool:ls',
+    ]);
+    expect(m.items[2].status).toBe('completed');
+    expect(m.items[2].time).toBe(16_000);
   });
 });
