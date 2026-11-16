@@ -3684,12 +3684,12 @@ const PAGE_SCENARIOS: PageScenario[] = [
             afterAsst: !!f && items[lastAsst + 1] === f,
             turn: f ? f.turn : -1,
             domNext: !!fRow && !!aRow && aRow.nextElementSibling === fRow,
-            // #184: the row is the turn's three actions; the include/empty
-            // choice the select carried is asked on tap.
-            buttons: fRow
-              ? Array.from(fRow.querySelectorAll('button')).map((b) => b.textContent)
+            // #184, #233: the turn's three actions sit inline in the newest
+            // answer's role line; the standalone fork row stays hidden.
+            buttons: aRow
+              ? Array.from(aRow.querySelectorAll('.role > .turn-acts button')).map((b) => b.textContent)
               : [],
-            select: !!fRow && !!fRow.querySelector('select'),
+            select: !!aRow && !!aRow.querySelector('select'),
             asstText: lastAsst >= 0 ? items[lastAsst]!.text : null,
           };
         });
@@ -3706,7 +3706,7 @@ const PAGE_SCENARIOS: PageScenario[] = [
         'turn 1: fork row is not the next row after the answer',
       );
       expect(
-        s1.buttons.join(',') === 'Fork here,Rewind to here,Copy' && !s1.select,
+        s1.buttons.join(',') === 'Fork,Rewind,Copy' && !s1.select,
         `the turn's actions read ${JSON.stringify(s1.buttons)} (select ${s1.select})`,
       );
       await page.evaluate(() => {
@@ -3768,10 +3768,12 @@ const PAGE_SCENARIOS: PageScenario[] = [
           s3.domNext,
         `late chunk: ${JSON.stringify(s3)}`,
       );
-      // #184: the mode is asked on tap, as a two-option sheet, and kept on
-      // the item. The prompt for a fork name is then dismissed: no request,
-      // no state change beyond the mode.
-      await page.click('#transcript .bubble-fork .act-fork');
+      // #184, #233: the mode is asked on tap from the newest answer's inline
+      // role-line Fork button, as a two-option sheet, and synced to forkItem.
+      await page.evaluate(() => {
+        const btns = document.querySelectorAll<HTMLButtonElement>('#transcript .bubble.asst .act-fork');
+        btns[btns.length - 1]!.click();
+      });
       await page.waitForSelector('#h1-ask', { state: 'visible' });
       const asked = (await page.evaluate(String.raw`Array.from(
         document.querySelectorAll('#h1-ask button[data-value]'),
@@ -16074,26 +16076,21 @@ PAGE_SCENARIOS.push({
           value: (t) => { window.__copied = t; return Promise.resolve(); },
         });
       })()`);
-      type Acts = { text: string; buttons: string[]; gap: number; inRow: boolean } | null;
+      type Acts = { text: string; buttons: string[]; inRoleHead: boolean; inRow: boolean } | null;
       const actsFor = (answer: string) =>
         page.evaluate(String.raw`(() => {
           const items = transcriptModel.items;
           const a = items.find((i) => i.kind === 'asst' && i.text === ${JSON.stringify(answer)});
           const row = a ? __pg.row(a.id) : null;
           if (!row) return null;
-          let box = row.querySelector('.turn-acts');
-          let inRow = !!box;
-          if (!box) {
-            const next = row.nextElementSibling;
-            box = next ? next.querySelector('.turn-acts:not([hidden])') : null;
-          }
-          if (!box) return null;
-          const bubble = row.querySelector('.bubble');
+          const role = row.querySelector('.bubble.asst > .role');
+          const box = role ? role.querySelector(':scope > .turn-acts') : null;
+          if (!box || !role) return null;
           return {
             text: a.text,
             buttons: Array.from(box.querySelectorAll('button')).map((b) => b.textContent),
-            gap: Math.round(box.getBoundingClientRect().top - bubble.getBoundingClientRect().bottom),
-            inRow,
+            inRoleHead: Math.abs(box.getBoundingClientRect().top - role.getBoundingClientRect().top) <= 4,
+            inRow: true,
           };
         })()`) as Promise<Acts>;
       const one = await actsFor('answer one');
@@ -16103,8 +16100,8 @@ PAGE_SCENARIOS.push({
         ['the latest turn', two],
       ] as const) {
         expect(a !== null, `${name}'s answer carries no actions`);
-        expect(a!.buttons.join(',') === 'Fork here,Rewind to here,Copy', `${name}'s actions read ${JSON.stringify(a!.buttons)}`);
-        expect(a!.gap >= -8 && a!.gap <= 2, `${name}'s actions sit ${a!.gap}px from its answer, not under it`);
+        expect(a!.buttons.join(',') === 'Fork,Rewind,Copy', `${name}'s actions read ${JSON.stringify(a!.buttons)}`);
+        expect(a!.inRoleHead, `${name}'s actions did not render inside its top role line`);
       }
       const sel = (answer: string, act: string) =>
         page.evaluate(String.raw`(() => {
@@ -36211,15 +36208,15 @@ PAGE_SCENARIOS.push({
       `shifted turn counters wrong after prepending 2 user turns: ${JSON.stringify(after)}`,
     );
 
-    // Scroll to the latest turn's fork strip and tap Fork here.
+    // Scroll to the latest turn's answer and tap its inline Fork button (#233).
     await page.evaluate(String.raw`(() => {
       const s = document.getElementById('transcript');
       s.scrollTop = s.scrollHeight;
     })()`);
     await settlePage(page);
     await page.evaluate(String.raw`(() => {
-      const btns = Array.from(document.querySelectorAll('#transcript .bubble-fork button'));
-      const forkBtn = btns.find((b) => (b.textContent || '').trim() === 'Fork here');
+      const btns = Array.from(document.querySelectorAll('#transcript .bubble.asst .act-fork'));
+      const forkBtn = btns[btns.length - 1];
       if (forkBtn) forkBtn.click();
     })()`);
     await page.waitForSelector('#h1-ask:not([hidden])', { timeout: 5_000 });
@@ -36240,6 +36237,99 @@ PAGE_SCENARIOS.push({
     );
 
     return `prepended 2 earlier turns shifted counters 2 -> 4; Fork here asked "${askTitle}" and posted fromTurn: ${forks[0]?.fromTurn}`;
+  },
+});
+
+// ---- #233: inline per-turn Fork, Rewind, and Copy beside the timestamp ------
+PAGE_SCENARIOS.push({
+  name: 'P596 Fork, Rewind, and Copy sit inline after the timestamp on one 36px role line at 390px and 320px and remain reachable at the top of a tall reply without scrolling',
+  frames: () => {
+    const f = new Frames();
+    const decStamp = Date.UTC(2026, 11, 28, 17, 45, 0); // Dec 28, 12:45 PM EST (widest 2-digit stamp)
+    const longBody = Array.from(
+      { length: 32 },
+      (_, idx) => `Paragraph ${idx + 1}: detailed architectural notes that push the bottom of this assistant bubble far below the phone fold.`,
+    ).join('\n\n');
+    f.user('give me the full report', { serverTimestamp: decStamp - 5000 });
+    f.asst(longBody, { serverTimestamp: decStamp });
+    f.ev('turn_complete');
+    return f.list;
+  },
+  run: async ({ page, viewer }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 2, 10_000);
+    await settlePage(page);
+
+    // Scroll to the top of the tall reply: inline controls must already be visible in the viewport.
+    await page.evaluate(String.raw`(() => {
+      document.getElementById('transcript').scrollTop = 0;
+    })()`);
+    await settlePage(page);
+
+    const checkViewport = async (vw: number, vh: number) => {
+      await page.setViewportSize({ width: vw, height: vh });
+      await settlePage(page);
+      const m = (await page.evaluate(String.raw`(() => {
+        const bubble = document.querySelector('#transcript .bubble.asst');
+        const role = bubble ? bubble.querySelector(':scope > .role') : null;
+        const stamp = role ? role.querySelector(':scope > .stamp') : null;
+        const acts = role ? role.querySelector(':scope > .turn-acts') : null;
+        const scroller = document.getElementById('transcript');
+        if (!bubble || !role || !stamp || !acts || !scroller) return null;
+        const bRect = bubble.getBoundingClientRect();
+        const rRect = role.getBoundingClientRect();
+        const sRect = scroller.getBoundingClientRect();
+        const btns = Array.from(acts.querySelectorAll('button')).map((b) => {
+          const rc = b.getBoundingClientRect();
+          return { text: b.textContent, h: Math.round(rc.height), w: Math.round(rc.width), top: Math.round(rc.top) };
+        });
+        return {
+          bubbleH: Math.round(bRect.height),
+          roleH: Math.round(rRect.height), roleW: Math.round(rRect.width), stampW: Math.round(stamp.getBoundingClientRect().width), actsW: Math.round(acts.getBoundingClientRect().width),
+          afterStamp: stamp.nextElementSibling === acts,
+          inViewportAtTop: rRect.top >= sRect.top - 1 && rRect.bottom <= sRect.bottom + 1,
+          bubbleBottomBelowFold: bRect.bottom > sRect.bottom + 200,
+          sideways: scroller.scrollWidth > scroller.clientWidth + 1 || rRect.right > window.innerWidth + 0.5,
+          btns,
+        };
+      })()`)) as {
+        bubbleH: number;
+        roleH: number;
+        afterStamp: boolean;
+        inViewportAtTop: boolean;
+        bubbleBottomBelowFold: boolean;
+        sideways: boolean;
+        btns: Array<{ text: string | null; h: number; w: number; top: number }>;
+      } | null;
+      expect(m !== null, `missing assistant role/acts at ${vw}x${vh}`);
+      expect(m!.afterStamp, `turn-acts not placed immediately after .stamp at ${vw}x${vh}`);
+      expect(
+        m!.roleH >= 34 && m!.roleH <= 40,
+        `role line wrapped or shrank at ${vw}x${vh}: roleH=${m!.roleH}px (${JSON.stringify(m)})`,
+      );
+      expect(!m!.sideways, `horizontal overflow at ${vw}x${vh}: ${JSON.stringify(m)}`);
+      expect(
+        m!.btns.map((b) => b.text).join(',') === 'Fork,Rewind,Copy' &&
+          m!.btns.every((b) => b.h >= 36),
+        `buttons invalid at ${vw}x${vh}: ${JSON.stringify(m!.btns)}`,
+      );
+      if (vw === 390) {
+        expect(
+          m!.inViewportAtTop && m!.bubbleBottomBelowFold,
+          `controls not reachable at top of tall (${m!.bubbleH}px) reply: ${JSON.stringify(m)}`,
+        );
+      }
+      const textRows = await readP268TranscriptText(page);
+      for (const row of textRows) {
+        pgShellCheck(row, `P596@${vw}x${vh}`);
+      }
+      return m!;
+    };
+
+    const m390 = await checkViewport(390, 844);
+    const m320 = await checkViewport(320, 600);
+    return `inline Fork,Rewind,Copy stayed on 1 line (390px roleH=${m390.roleH}px, 320px roleH=${m320.roleH}px) at top of ${m390.bubbleH}px reply with 0px overflow`;
   },
 });
 

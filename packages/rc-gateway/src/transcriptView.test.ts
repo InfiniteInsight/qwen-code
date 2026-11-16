@@ -34,6 +34,9 @@ type Item = {
   text?: string;
   time?: number;
   expanded?: boolean;
+  turnEnd?: boolean;
+  busy?: boolean;
+  note?: string;
   sub?: {
     tools: SubTool[];
   } | null;
@@ -673,5 +676,101 @@ describe('subagent tool pruning and prepend reader anchoring (#273)', () => {
       proto.getClientRects = origGetClientRects;
       proto.getBoundingClientRect = origGetBCR;
     }
+  });
+
+  it('places Fork, Rewind, and Copy inline in the assistant role line after the stamp, preserves them across restamp, and excludes turn-acts-note from Find (#233)', () => {
+    const actsCalled: Array<[string, number]> = [];
+    view?.destroy();
+    const TranscriptView = (globalThis as { TranscriptView: never })
+      .TranscriptView as unknown as {
+      createTranscriptView: (o: Record<string, unknown>) => View;
+    };
+    view = TranscriptView.createTranscriptView({
+      model,
+      scroller,
+      virtualCore: null,
+      onTurnAct: (act: string, it: Item) => actsCalled.push([act, it.id]),
+    });
+
+    model.appendAssistant('Forkable reply mentioning Fork in body.', STAMP_START);
+    const asst = model.items[0]!;
+    asst.turnEnd = true;
+    model.touch(asst);
+    tick();
+
+    const bubble = scroller.querySelector('.bubble.asst') as HTMLElement | null;
+    expect(bubble).not.toBeNull();
+    const role = bubble!.querySelector(':scope > .role') as HTMLElement | null;
+    expect(role).not.toBeNull();
+    const stamp = role!.querySelector(':scope > .stamp');
+    const acts = role!.querySelector(':scope > .turn-acts');
+    expect(stamp).not.toBeNull();
+    expect(acts).not.toBeNull();
+    expect(stamp!.nextElementSibling).toBe(acts);
+    expect(
+      Array.from(acts!.querySelectorAll('button')).map((b) => b.textContent),
+    ).toEqual(['Fork', 'Rewind', 'Copy']);
+    // No strip below the bubble on the vrow itself.
+    expect(scroller.querySelector('.vrow > .turn-acts')).toBeNull();
+
+    const noteEl = bubble!.querySelector(
+      ':scope > .turn-acts-note',
+    ) as HTMLElement | null;
+    expect(noteEl).not.toBeNull();
+    expect(noteEl!.hidden).toBe(true);
+
+    (acts!.querySelector('.act-fork') as HTMLButtonElement).click();
+    expect(actsCalled).toEqual([['fork', asst.id]]);
+
+    asst.busy = true;
+    asst.note = 'copied Fork note';
+    model.touch(asst);
+    tick();
+    expect((acts!.querySelector('.act-fork') as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect(noteEl!.hidden).toBe(false);
+    expect(noteEl!.textContent).toBe('copied Fork note');
+
+    // Find-in-conversation matches only the 2 occurrences in the body text (1 active + 1 other),
+    // never the Fork button label or turn-acts-note.
+    view.setFind(findSpec('Fork'));
+    tick();
+    expect(marked('rc-find')).toEqual(['Fork']);
+    expect(marked('rc-find-active')).toEqual(['Fork']);
+    const highlightParents = [
+      ...(registry.get('rc-find-active')?.ranges ?? []),
+      ...(registry.get('rc-find')?.ranges ?? []),
+    ].map((r) => r.startContainer.parentElement?.className ?? '');
+    expect(
+      highlightParents.every(
+        (cls) => !cls.includes('act-') && !cls.includes('turn-acts-note'),
+      ),
+    ).toBe(true);
+
+    // Changing time zone rebuilds the bubble and preserves inline .turn-acts + note.
+    view.setStampZone('UTC');
+    tick();
+    const rebuiltRole = scroller.querySelector(
+      '.bubble.asst > .role',
+    ) as HTMLElement | null;
+    expect(rebuiltRole?.querySelector('.stamp')?.textContent).toBe(
+      ' · Nov 15, 4:26 PM',
+    );
+    expect(
+      Array.from(
+        rebuiltRole?.querySelectorAll(':scope > .turn-acts button') ?? [],
+      ).map((b) => b.textContent),
+    ).toEqual(['Fork', 'Rewind', 'Copy']);
+    expect(
+      scroller.querySelector('.bubble.asst > .turn-acts-note')?.textContent,
+    ).toBe('copied Fork note');
+
+    // Clearing turnEnd removes both inline .turn-acts and .turn-acts-note.
+    asst.turnEnd = false;
+    model.touch(asst);
+    tick();
+    expect(scroller.querySelector('.turn-acts')).toBeNull();
+    expect(scroller.querySelector('.turn-acts-note')).toBeNull();
   });
 });
