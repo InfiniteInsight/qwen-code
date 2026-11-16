@@ -203,6 +203,7 @@ import { createSessionWorkflowActionRoute } from './routes/sessionWorkflowAction
 import { createSessionRenameRoute } from './routes/sessionRename.js';
 import { createSubagentInspectRoute } from './routes/subagentInspect.js';
 import { createSessionTasksRoute } from './routes/sessionTasks.js';
+import { createSessionTaskOutputRoute } from './routes/sessionTaskOutput.js';
 import { createSessionStatsRoute } from './routes/sessionStats.js';
 import { createSessionResourcesRoute } from './routes/sessionResources.js';
 /** #110: the session's agents, their lineage, and one saved workflow. */
@@ -1238,6 +1239,14 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(SESSION_READ, audit),
     enforceSessionLock(audit),
     createSessionTasksRoute(deps.daemon),
+  );
+  // GET /session/:id/tasks/:taskId/output (#110) - read-scope; bounded tail of
+  // a shell, agent or workflow task's output resolved by taskId on the daemon.
+  app.get(
+    '/session/:id/tasks/:taskId/output',
+    requireScope(SESSION_READ, audit),
+    enforceSessionLock(audit),
+    createSessionTaskOutputRoute(deps.daemon),
   );
   // GET /session/:id/stats - read-scope; the daemon's roll-up of one
   // conversation (duration, prompt count, per-model tokens, tool calls, lines

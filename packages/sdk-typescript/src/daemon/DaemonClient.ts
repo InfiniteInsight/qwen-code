@@ -4099,6 +4099,43 @@ export class DaemonClient {
     );
   }
 
+  async sessionTaskOutput(
+    sessionId: string,
+    taskId: string,
+    opts: {
+      kind?: 'agent' | 'shell' | 'monitor' | 'workflow';
+      maxBytes?: number;
+      includeWorkflows?: boolean;
+      clientId?: string;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<import('./types.js').DaemonSessionTaskOutputStatus> {
+    const query = new URLSearchParams();
+    if (opts.kind !== undefined) {
+      query.set('kind', opts.kind);
+    }
+    if (opts.maxBytes !== undefined) {
+      query.set('maxBytes', String(opts.maxBytes));
+    }
+    if (opts.includeWorkflows === true) {
+      query.set('includeWorkflows', 'true');
+    }
+    const suffix = query.size > 0 ? `?${query}` : '';
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks/${urlEncode(taskId)}/output${suffix}`,
+      { headers: this.headers({}, opts.clientId), signal: opts.signal },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /session/:id/tasks/:taskId/output',
+          );
+        }
+        return (await res.json()) as import('./types.js').DaemonSessionTaskOutputStatus;
+      },
+    );
+  }
+
   async sessionAgents(
     sessionId: string,
     clientId?: string,

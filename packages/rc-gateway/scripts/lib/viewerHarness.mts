@@ -310,6 +310,7 @@ export interface BootViewerOptions {
    */
   runs?: {
     tasks?: StubDaemonOptions['tasksResult'];
+    taskOutputs?: StubDaemonOptions['taskOutputsResult'];
     workflowTasks?: StubDaemonOptions['workflowTasksResult'];
     trusted?: boolean;
     cancelVerdict?: StubDaemonOptions['taskCancelVerdict'];
@@ -791,6 +792,7 @@ export async function bootViewer(
     artifactMutationErrorBody: opts.artifactMutationErrorBody,
     goal: opts.goal,
     tasksResult: opts.runs?.tasks,
+    taskOutputsResult: opts.runs?.taskOutputs,
     workflowTasksResult: opts.runs?.workflowTasks,
     workspaceTrusted: opts.runs?.trusted,
     taskCancelVerdict: opts.runs?.cancelVerdict,

@@ -296,6 +296,9 @@ export function createCapabilityRoute(deps: {
       // #267: true when the connected daemon advertises session_subagent_controls
       // (/pause, /resume, /abandon, and structured resume_failed details).
       subagentControls: false,
+      // #110: true when the connected daemon advertises session_task_output
+      // (GET /session/:id/tasks/:taskId/output).
+      sessionTaskOutput: false,
       // #132: POST /rc/sessions/catalog is mounted: one merged order and one
       // cursor across the workspaces, with groups. The page is served from
       // disk and can meet an older gateway, so it reads the catalog only when
@@ -401,6 +404,10 @@ export function createCapabilityRoute(deps: {
         rawDaemon.available === true &&
         Array.isArray(rawDaemon.features) &&
         rawDaemon.features.includes('session_subagent_controls');
+      remoteControl.sessionTaskOutput =
+        rawDaemon.available === true &&
+        Array.isArray(rawDaemon.features) &&
+        rawDaemon.features.includes('session_task_output');
     }
     res.status(200).json({ remoteControl });
   };

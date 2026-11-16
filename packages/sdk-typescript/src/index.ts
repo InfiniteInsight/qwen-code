@@ -288,6 +288,8 @@ export {
   type DaemonSessionTaskStatus,
   type DaemonSessionTaskWithWorkflowStatus,
   type DaemonSessionTasksStatus,
+  type DaemonSessionTaskOutputReason,
+  type DaemonSessionTaskOutputStatus,
   type DaemonSessionAgentsStatus,
   type DaemonAgentTrace,
   type DaemonAgentTraceNode,

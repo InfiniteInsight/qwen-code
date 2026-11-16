@@ -261,6 +261,12 @@ export interface StubDaemon {
    * gateway opted in to workflow rows is `includeWorkflows` here.
    */
   tasksQueries: Array<Record<string, unknown>>;
+  /** #110: every GET /session/:id/tasks/:taskId/output, in order. */
+  taskOutputQueries: Array<{
+    sessionId: string;
+    taskId: string;
+    query: Record<string, unknown>;
+  }>;
   /** #110: every POST .../tasks/:taskId/cancel, in order, with its body. */
   taskCancels: Array<{ sessionId: string; taskId: string; body: unknown }>;
   /** #110: every POST .../tasks/:taskId/workflow-action, in order. */
@@ -926,6 +932,16 @@ export interface StubDaemonOptions {
    */
   tasksResult?: unknown[] | ((sessionId: string) => unknown[]);
   /**
+   * #110: per-task output payload for GET /session/:id/tasks/:taskId/output.
+   */
+  taskOutputsResult?:
+    | Record<string, unknown>
+    | ((
+        sessionId: string,
+        taskId: string,
+        query: Record<string, unknown>,
+      ) => unknown);
+  /**
    * #110: workflow rows (`DaemonSessionWorkflowTaskStatus`). The daemon adds
    * them only when the query says `includeWorkflows=true` AND the workspace is
    * trusted, so the stub does the same: a request that does not opt in, or any
@@ -1188,6 +1204,7 @@ export async function startStubDaemon(
       | { sessionId: string; name: string }
       | undefined,
     tasksQueries: [] as Array<Record<string, unknown>>,
+    taskOutputQueries: [] as StubDaemon['taskOutputQueries'],
     taskCancels: [] as StubDaemon['taskCancels'],
     workflowActions: [] as StubDaemon['workflowActions'],
     subagentMessages: [] as StubDaemon['subagentMessages'],
@@ -2630,6 +2647,58 @@ export async function startStubDaemon(
         ...s110Rows(opts.tasksResult, sessionId),
         ...(withWorkflows ? s110Rows(opts.workflowTasksResult, sessionId) : []),
       ],
+    });
+  });
+
+  app.get('/session/:id/tasks/:taskId/output', (req, res) => {
+    const sessionId = String(req.params.id);
+    const taskId = String(req.params.taskId);
+    const query = Object.fromEntries(
+      Object.entries(req.query as Record<string, unknown>),
+    );
+    state.taskOutputQueries.push({ sessionId, taskId, query });
+    const withWorkflows =
+      s110Trusted() && req.query['includeWorkflows'] === 'true';
+    const allTasks = [
+      ...s110Rows(opts.tasksResult, sessionId),
+      ...(withWorkflows ? s110Rows(opts.workflowTasksResult, sessionId) : []),
+    ] as Array<Record<string, unknown>>;
+    const matched = allTasks.find(
+      (t) =>
+        t['id'] === taskId &&
+        (query['kind'] === undefined || t['kind'] === query['kind']),
+    );
+    const custom =
+      typeof opts.taskOutputsResult === 'function'
+        ? opts.taskOutputsResult(sessionId, taskId, query)
+        : opts.taskOutputsResult?.[taskId];
+    if (!matched && custom === undefined) {
+      res.status(404).json({
+        error: `Task not found: ${taskId}`,
+        code: 'task_not_found',
+        sessionId,
+        taskId,
+      });
+      return;
+    }
+    if (custom !== undefined) {
+      res.status(200).json(custom);
+      return;
+    }
+    const kind = String(matched?.['kind'] ?? 'shell');
+    res.status(200).json({
+      v: 1,
+      sessionId,
+      taskId,
+      kind,
+      label: String(matched?.['label'] ?? taskId),
+      status: String(matched?.['status'] ?? 'running'),
+      available: kind !== 'monitor',
+      ...(kind === 'monitor' ? { reason: 'no_output_file' } : {}),
+      content: '',
+      truncated: false,
+      byteLength: 0,
+      totalBytes: 0,
     });
   });
 

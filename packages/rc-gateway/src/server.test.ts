@@ -2798,3 +2798,53 @@ describe('refused #135 session control families (lsp, shell, cd, branch)', () =>
     }
   });
 });
+
+describe('#110 runs and control closeout (task output relay + refused web-shell callbacks)', () => {
+  it('mounts GET /session/:id/tasks/:taskId/output at session:read and refuses side-task, mcp-app/tools/call, and a2ui-action', async () => {
+    const sid = '11111111-2222-3333-4444-555555555555';
+    const expectedOutput = {
+      v: 1,
+      sessionId: sid,
+      taskId: 'sh-1',
+      kind: 'shell',
+      label: 'echo ok',
+      status: 'completed',
+      available: true,
+      content: 'ok\n',
+      truncated: false,
+      byteLength: 3,
+      totalBytes: 3,
+    };
+    const { url, store } = await boot({
+      taskOutputsResult: { 'sh-1': expectedOutput },
+    });
+    const { token: ownerToken } = await store.issue(['owner'], 'owner-110');
+    const { token: readToken } = await store.issue(['session:read'], 'read-110');
+
+    const noAuth = await fetch(`${url}/session/${sid}/tasks/sh-1/output`);
+    expect(noAuth.status).toBe(401);
+
+    const readRes = await fetch(`${url}/session/${sid}/tasks/sh-1/output`, {
+      headers: { Authorization: `Bearer ${readToken}` },
+    });
+    expect(readRes.status).toBe(200);
+    expect(await readRes.json()).toEqual(expectedOutput);
+
+    const ownerHeaders = {
+      Authorization: `Bearer ${ownerToken}`,
+      'Content-Type': 'application/json',
+    };
+    for (const sub of [
+      'side-task',
+      'mcp-app/tools/call',
+      'a2ui-action',
+    ] as const) {
+      const res = await fetch(`${url}/session/${sid}/${sub}`, {
+        method: 'POST',
+        headers: ownerHeaders,
+        body: '{}',
+      });
+      expect(res.status).toBe(404);
+    }
+  });
+});

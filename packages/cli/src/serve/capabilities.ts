@@ -155,6 +155,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_context_usage: { since: 'v1' },
   session_supported_commands: { since: 'v1' },
   session_tasks: { since: 'v1' },
+  // Daemon supports `GET /session/:id/tasks/:taskId/output` (#110), reading
+  // only the output file recorded on the session's own task registry.
+  session_task_output: { since: 'v1' },
   session_agents: { since: 'v1' },
   // Daemon supports `/session/:id/subagents/:subagentRef/{pause,resume,abandon}`
   // plus structured `code` and `detail` on `/message` `resume_failed` (#267, #260).

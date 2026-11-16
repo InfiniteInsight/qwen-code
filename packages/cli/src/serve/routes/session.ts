@@ -58,6 +58,11 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
+  buildSessionTaskOutputStatus,
+  parseTaskOutputKind,
+  parseTaskOutputMaxBytes,
+} from './session-task-output.js';
+import {
   SESSION_ATTACHMENT_CHUNK_BYTES,
   SessionAttachmentUploadError,
   formatSessionAttachmentLimit,
@@ -7418,6 +7423,61 @@ export function registerSessionRoutes(
               runtime.trusted && req.query['includeWorkflows'] === 'true',
           }),
         );
+      },
+    ),
+  );
+
+  app.get(
+    '/session/:id/tasks/:taskId/output',
+    withOwnerReadSession(
+      'GET /session/:id/tasks/:taskId/output',
+      async (req, res, sessionId, runtime) => {
+        const taskId = req.params['taskId'];
+        if (!taskId) {
+          res.status(400).json({
+            error: '`taskId` route parameter is required',
+            code: 'invalid_task_id',
+          });
+          return;
+        }
+        const parsedMax = parseTaskOutputMaxBytes(req.query['maxBytes']);
+        if (!parsedMax.ok) {
+          res.status(400).json({
+            error: parsedMax.error,
+            code: 'invalid_max_bytes',
+          });
+          return;
+        }
+        const parsedKind = parseTaskOutputKind(req.query['kind']);
+        if (!parsedKind.ok) {
+          res.status(400).json({
+            error: parsedKind.error,
+            code: 'invalid_task_kind',
+          });
+          return;
+        }
+        const status = await runtime.bridge.getSessionTasksStatus(sessionId, {
+          includeWorkflows:
+            runtime.trusted && req.query['includeWorkflows'] === 'true',
+        });
+        const task = status.tasks.find(
+          (entry) =>
+            entry.id === taskId &&
+            (parsedKind.kind === undefined || entry.kind === parsedKind.kind),
+        );
+        if (!task) {
+          res.status(404).json({
+            error: `Task not found: ${taskId}`,
+            code: 'task_not_found',
+            sessionId,
+            taskId,
+          });
+          return;
+        }
+        res
+          .status(200)
+          .set('Cache-Control', 'no-store')
+          .json(buildSessionTaskOutputStatus(sessionId, task, parsedMax.maxBytes));
       },
     ),
   );

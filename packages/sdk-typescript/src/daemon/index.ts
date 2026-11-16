@@ -709,6 +709,8 @@ export type {
   DaemonSessionTaskStatus,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
+  DaemonSessionTaskOutputReason,
+  DaemonSessionTaskOutputStatus,
   DaemonSessionAgentsStatus,
   DaemonAgentTrace,
   DaemonAgentTraceNode,
