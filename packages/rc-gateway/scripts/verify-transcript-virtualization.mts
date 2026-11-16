@@ -34419,6 +34419,56 @@ PAGE_SCENARIOS.push({
       return `rendered 2 liveVoice credential rows, 2 artifact.oss data-sink rows, and 3 parsed project extension rows without leaking prompt bodies`;
     },
   });
+
+  // #265: .lsp.json servers + Git LFS skipped smudge notice on #gh-ask and clean auto-start
+  PAGE_SCENARIOS.push({
+    name: 'P600 cloned repo with .lsp.json and Git LFS tracking lists LSP servers and shows the skipped-smudge notice (#265)',
+    waitView: false,
+    stub: {
+      github: {
+        ghLogins: ['octo-lsp'],
+        repos: { 'gh:octo-lsp': [ghcRepo('octo-lsp/lsp-lfs')] },
+        files: {
+          '.lsp.json': JSON.stringify({
+            typescript: {
+              command: 'typescript-language-server',
+              args: ['--stdio'],
+            },
+          }),
+          '.gitattributes': '*.bin filter=lfs diff=lfs merge=lfs -text\n',
+        },
+      },
+    },
+    run: async ({ page }) => {
+      const dest = join(ghcProjects(), 'lsp-lfs');
+      rmSync(dest, { recursive: true, force: true });
+      const sessions = ghcSessions(page);
+      await ghcOpen(page);
+      await ghcWaitRows(page, 1);
+      await ghcPick(page, 'octo-lsp/lsp-lfs');
+      await page.click('#gh-go');
+      await page.waitForSelector('#gh-ask', { state: 'visible', timeout: 15_000 });
+      await page.waitForTimeout(300);
+      expect(sessions.length === 0, 'started conversation before asking on .lsp.json');
+
+      const cats = await ghcFindings(page);
+      const by = new Map(cats.map((c) => [c.heading, c.items]));
+      const lsp = by.get('LSP servers (.lsp.json)') ?? [];
+      expect(
+        lsp.length === 1 &&
+          lsp[0]!.name === '.lsp.json: typescript' &&
+          lsp[0]!.value === 'typescript-language-server --stdio',
+        `unexpected LSP findings: ${JSON.stringify(lsp)}`,
+      );
+      const askText = await ghcSay(page, 'gh-ask');
+      expect(
+        askText.includes('Git LFS smudge was skipped during clone'),
+        `missing Git LFS skipped notice in #gh-ask: ${JSON.stringify(askText)}`,
+      );
+      await page.click('#gh-cancel');
+      return `rendered .lsp.json server under "LSP servers (.lsp.json)" and displayed Git LFS skipped-smudge notice`;
+    },
+  });
 }
 
 // #267, #260: Subagent Pause, Resume, and Abandon controls in #agents-sheet.

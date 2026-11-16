@@ -287,6 +287,8 @@ describe('CloneJobs with real git', () => {
       '-c',
       'core.askPass=',
       '-c',
+      `core.hooksPath=${process.platform === 'win32' ? 'NUL' : '/dev/null'}`,
+      '-c',
       'http.https://github.com/acme/widget.git.sslVerify=true',
       'clone',
       '--progress',
@@ -297,6 +299,7 @@ describe('CloneJobs with real git', () => {
     expect(args.join(' ')).not.toContain(TOKEN);
     expect(env['QWEN_RC_GIT_TOKEN']).toBe(TOKEN);
     expect(env['GIT_TERMINAL_PROMPT']).toBe('0');
+    expect(env['GIT_LFS_SKIP_SMUDGE']).toBe('1');
   });
 
   it("the owner's credential helpers are not asked, scoped or not", async () => {
@@ -539,6 +542,104 @@ describe('CloneJobs with real git', () => {
 
     expect(get(ours, 'http.sslVerify')).toBe('true');
     expect(get(ours, 'http.followRedirects')).toBe('false');
+  });
+
+  it("disables owner core.hooksPath hooks during clone without persisting core.hooksPath in .git/config (#265)", async () => {
+    const env = gitEnv();
+    const bare = bareRepo(env);
+    const hooksDir = join(env['HOME']!, 'global-hooks');
+    mkdirSync(hooksDir, { recursive: true });
+    const marker = join(env['HOME']!, 'hook-ran');
+    writeFileSync(
+      join(hooksDir, 'post-checkout'),
+      `#!/bin/sh\necho "ran:$QWEN_RC_GIT_TOKEN" >> ${marker}\n`,
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      env['GIT_CONFIG_GLOBAL']!,
+      readFileSync(env['GIT_CONFIG_GLOBAL']!, 'utf8') +
+        `[core]\n\thooksPath = ${hooksDir}\n`,
+    );
+
+    // Control: plain git clone executes the global post-checkout hook.
+    git(env, env['HOME']!, ['clone', '-q', `file://${bare}`, freshDest()]);
+    expect(readFileSync(marker, 'utf8')).toContain('ran:');
+    writeFileSync(marker, '');
+
+    const jobs = new CloneJobs({ env, urlFor: () => `file://${bare}` });
+    const dest = freshDest();
+    const s = await waitDone(
+      jobs,
+      jobIdOf(
+        await jobs.start({ ref: REF, dest, token: TOKEN, account: ACCOUNT }),
+      ),
+    );
+    expect(s.state).toBe('done');
+    expect(readFileSync(marker, 'utf8')).toBe('');
+    expect(readFileSync(join(dest, '.git', 'config'), 'utf8')).not.toContain(
+      'hooksPath',
+    );
+  });
+
+  it('refuses url.*.insteadOf rewrites (same-host and SSH) before git clone runs (#265)', async () => {
+    for (const [rule, rewritten] of [
+      [
+        '[url "https://github.com/other/"]\n\tinsteadOf = https://github.com/acme/\n',
+        'https://github.com/other/widget.git',
+      ],
+      [
+        '[url "git@github.com:"]\n\tinsteadOf = https://github.com/\n',
+        'git@github.com:acme/widget.git',
+      ],
+    ] as const) {
+      const env = gitEnv();
+      writeFileSync(
+        env['GIT_CONFIG_GLOBAL']!,
+        readFileSync(env['GIT_CONFIG_GLOBAL']!, 'utf8') + rule,
+      );
+      const dest = freshDest();
+      const jobs = new CloneJobs({ env });
+      const s = await waitDone(
+        jobs,
+        jobIdOf(
+          await jobs.start({ ref: REF, dest, token: TOKEN, account: ACCOUNT }),
+        ),
+      );
+      expect(s.state).toBe('failed');
+      expect(s.error).toContain('url.*.insteadOf');
+      expect(s.error).toContain(rewritten);
+      expect(existsSync(dest)).toBe(false);
+    }
+  });
+
+  it('marks gitLfsSkipped when .gitattributes declares filter=lfs (#265)', async () => {
+    const env = gitEnv();
+    const work = tmp('lfs-work');
+    git(env, work, ['init', '-q']);
+    writeFileSync(
+      join(work, '.gitattributes'),
+      '*.bin filter=lfs diff=lfs merge=lfs -text\n',
+    );
+    writeFileSync(
+      join(work, 'sample.bin'),
+      'version https://git-lfs.github.com/spec/v1\noid sha256:0123456789abcdef\nsize 12\n',
+    );
+    git(env, work, ['add', '.']);
+    git(env, work, ['commit', '-q', '-m', 'lfs']);
+    const bare = join(tmp('lfs-bare'), 'lfs.git');
+    git(env, work, ['clone', '-q', '--bare', work, bare]);
+
+    const jobs = new CloneJobs({ env, urlFor: () => `file://${bare}` });
+    const dest = freshDest();
+    const s = await waitDone(
+      jobs,
+      jobIdOf(
+        await jobs.start({ ref: REF, dest, token: TOKEN, account: ACCOUNT }),
+      ),
+    );
+    expect(s.state).toBe('done');
+    expect(s.gitLfsSkipped).toBe(true);
+    expect(s.hasFindings).toBe(false);
   });
 });
 
