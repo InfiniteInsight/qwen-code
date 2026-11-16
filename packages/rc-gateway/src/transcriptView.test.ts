@@ -21,12 +21,22 @@ const pub = (f: string) => join(here, '..', 'public', f);
 const STAMP_START = Date.UTC(2026, 10, 15, 16, 26, 0);
 const STAMP_END = Date.UTC(2026, 10, 15, 16, 29, 0);
 
+type SubTool = {
+  id: string;
+  label: string;
+  status: string;
+  textAt?: number;
+};
+
 type Item = {
   id: number;
   kind: string;
   text?: string;
   time?: number;
   expanded?: boolean;
+  sub?: {
+    tools: SubTool[];
+  } | null;
 };
 
 type Model = {
@@ -36,7 +46,8 @@ type Model = {
   appendThought: (t: string, time?: number) => void;
   finishThought: () => void;
   upsertTool: (u: Record<string, unknown>, time?: number) => void;
-  prependItems: (list: Item[]) => number;
+  upsertSubagentTool: (u: Record<string, unknown>, parentId: string) => void;
+  prependItems: (list: Item[], beforeInsert?: () => void) => number;
   touch: (item: Item) => void;
   search: (q: string) => Array<{ id: number; item: Item }>;
 };
@@ -50,6 +61,8 @@ type View = {
   destroy: () => void;
   setStampZone: (zone?: string) => void;
   setFind: (spec: unknown) => void;
+  anchorReader: () => void;
+  readerAnchor: () => { end?: boolean; item?: Item; top?: number };
 };
 
 let rafQueue = new Map<number, () => void>();
@@ -90,6 +103,17 @@ beforeEach(async () => {
   rafId = 0;
   clockMs = STAMP_START;
   registry = new Map();
+  const reqRaf = (fn: () => void) => {
+    rafQueue.set(++rafId, fn);
+    return rafId;
+  };
+  const cancelRaf = (id: number) => {
+    rafQueue.delete(id);
+  };
+  Object.assign(w, {
+    requestAnimationFrame: reqRaf,
+    cancelAnimationFrame: cancelRaf,
+  });
   Object.assign(globalThis, {
     window: w,
     document: w.document,
@@ -102,13 +126,8 @@ beforeEach(async () => {
         this.ranges = ranges;
       }
     },
-    requestAnimationFrame: (fn: () => void) => {
-      rafQueue.set(++rafId, fn);
-      return rafId;
-    },
-    cancelAnimationFrame: (id: number) => {
-      rafQueue.delete(id);
-    },
+    requestAnimationFrame: reqRaf,
+    cancelAnimationFrame: cancelRaf,
   });
   scroller = w.document.createElement('div');
   w.document.body.appendChild(scroller);
@@ -421,5 +440,238 @@ describe('thought and tool header timestamps (#268)', () => {
     expect(scroller.querySelector('.bubble.tool .tool-head')?.textContent).toBe(
       '🔧 Read split.ts  [completed] \u00b7 Nov 15, 11:26 AM ▸',
     );
+  });
+});
+
+describe('subagent tool pruning and prepend reader anchoring (#273)', () => {
+  it('prunes excess .subtool DOM elements when item.sub.tools shrinks and grows cleanly again', () => {
+    model.upsertTool({
+      toolCallId: 'tc-sub',
+      title: 'Agent',
+      status: 'in_progress',
+    });
+    model.upsertSubagentTool(
+      { toolCallId: 'st-1', title: 'Read a.ts', status: 'completed' },
+      'tc-sub',
+    );
+    model.upsertSubagentTool(
+      { toolCallId: 'st-2', title: 'Read b.ts', status: 'completed' },
+      'tc-sub',
+    );
+    model.upsertSubagentTool(
+      { toolCallId: 'st-3', title: 'Read c.ts', status: 'in_progress' },
+      'tc-sub',
+    );
+    tick();
+
+    const subtoolsBefore = Array.from(
+      scroller.querySelectorAll('.subagent .subtool'),
+    ).map((n) => n.textContent);
+    expect(subtoolsBefore).toEqual([
+      '🔧 Read a.ts  [completed]',
+      '🔧 Read b.ts  [completed]',
+      '🔧 Read c.ts  [in_progress]',
+    ]);
+
+    const item = model.items[0]!;
+    item.sub!.tools.splice(1);
+    model.touch(item);
+    tick();
+
+    const subtoolsShrunk = Array.from(
+      scroller.querySelectorAll('.subagent .subtool'),
+    ).map((n) => n.textContent);
+    expect(subtoolsShrunk).toEqual(['🔧 Read a.ts  [completed]']);
+
+    model.upsertSubagentTool(
+      { toolCallId: 'st-4', title: 'Grep d.ts', status: 'completed' },
+      'tc-sub',
+    );
+    tick();
+
+    const subtoolsRegrown = Array.from(
+      scroller.querySelectorAll('.subagent .subtool'),
+    ).map((n) => n.textContent);
+    expect(subtoolsRegrown).toEqual([
+      '🔧 Read a.ts  [completed]',
+      '🔧 Grep d.ts  [completed]',
+    ]);
+  });
+
+  it('restores the anchored row via pendingPlace when prependItems splices older pages above a virtualized reader', async () => {
+    if (view) view.destroy();
+    view = null;
+
+    const virtualCoreMod = (await import(
+      pathToFileURL(pub(join('vendor', 'virtual-core.js'))).href
+    )) as Record<string, unknown>;
+
+    const rectOf = (top: number, height: number): DOMRect =>
+      ({
+        top,
+        bottom: top + height,
+        left: 0,
+        right: 390,
+        width: 390,
+        height,
+        x: 0,
+        y: top,
+        toJSON: () => ({}),
+      }) as DOMRect;
+
+    const vScroller = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(vScroller);
+    let scrollTopVal = 0;
+    let scrollEventQueued = false;
+    Object.defineProperties(vScroller, {
+      clientHeight: { get: () => 200 },
+      clientWidth: { get: () => 390 },
+      scrollTop: {
+        get: () => scrollTopVal,
+        set: (v: number) => {
+          const clamped = Math.max(0, Math.round(v));
+          if (clamped !== scrollTopVal) {
+            scrollTopVal = clamped;
+            if (!scrollEventQueued) {
+              scrollEventQueued = true;
+              requestAnimationFrame(() => {
+                scrollEventQueued = false;
+                vScroller.dispatchEvent(new dom.window.Event('scroll'));
+              });
+            }
+          }
+        },
+      },
+      scrollHeight: {
+        get: () => {
+          const host = vScroller.querySelector(
+            '.vsizer, .vlist',
+          ) as HTMLElement | null;
+          const parsed = host ? parseFloat(host.style.height) : NaN;
+          return Number.isFinite(parsed) && parsed > 0 ? parsed : 2000;
+        },
+      },
+    });
+    vScroller.getClientRects = () =>
+      [rectOf(0, 200)] as unknown as DOMRectList;
+    vScroller.getBoundingClientRect = () => rectOf(0, 200);
+    vScroller.scrollTo = ((opts: unknown) => {
+      if (
+        opts &&
+        typeof opts === 'object' &&
+        typeof (opts as { top?: unknown }).top === 'number'
+      ) {
+        vScroller.scrollTop = (opts as { top: number }).top;
+      }
+    }) as typeof vScroller.scrollTo;
+
+    const proto = dom.window.HTMLElement.prototype;
+    const origOffsetHeight = Object.getOwnPropertyDescriptor(
+      proto,
+      'offsetHeight',
+    );
+    const origGetClientRects = proto.getClientRects;
+    const origGetBCR = proto.getBoundingClientRect;
+    Object.defineProperty(proto, 'offsetHeight', {
+      configurable: true,
+      get(this: HTMLElement) {
+        if (this.classList.contains('vrow')) return 59;
+        return 0;
+      },
+    });
+    proto.getClientRects = function (this: HTMLElement) {
+      if (this === vScroller) {
+        return [rectOf(0, 200)] as unknown as DOMRectList;
+      }
+      if (this.classList.contains('vrow')) {
+        return [rectOf(0, 59)] as unknown as DOMRectList;
+      }
+      return origGetClientRects.call(this);
+    };
+    proto.getBoundingClientRect = function (this: HTMLElement) {
+      if (this === vScroller) return rectOf(0, 200);
+      if (this.classList.contains('vrow')) {
+        const m = /translateY\(([-\d.]+)px\)/.exec(this.style.transform || '');
+        const y = m ? parseFloat(m[1]!) : 0;
+        return rectOf(y - scrollTopVal, 59);
+      }
+      return origGetBCR.call(this);
+    };
+
+    try {
+      const vModel = modelApi.createTranscriptModel({ now: () => clockMs });
+      for (let i = 0; i < 40; i++) {
+        vModel.addUser(`live-${i}`, STAMP_START + i * 1000);
+      }
+      const TranscriptView = (globalThis as { TranscriptView: never })
+        .TranscriptView as unknown as {
+        createTranscriptView: (o: Record<string, unknown>) => View;
+      };
+      const vView = TranscriptView.createTranscriptView({
+        model: vModel,
+        scroller: vScroller,
+        virtualCore: {
+          Virtualizer: virtualCoreMod['Virtualizer'],
+          observeElementRect: (
+            _inst: unknown,
+            cb: (r: { width: number; height: number }) => void,
+          ) => {
+            cb({ width: 390, height: 200 });
+            return () => {};
+          },
+          observeElementOffset: virtualCoreMod['observeElementOffset'],
+          elementScroll: virtualCoreMod['elementScroll'],
+        },
+      });
+      view = vView;
+      tick();
+      tick();
+
+      // Scroll away from the bottom to the top of the currently loaded window
+      // (live-0 sits at viewport top = 8px because paddingStart is 8px).
+      vScroller.scrollTop = 0;
+      vScroller.dispatchEvent(new dom.window.Event('scroll'));
+      tick();
+
+      const anchorBefore = vView.readerAnchor();
+      expect(Boolean(anchorBefore.end)).toBe(false);
+      expect(anchorBefore.item?.text).toBe('live-0');
+      expect(anchorBefore.top).toBe(8);
+
+      // Prepend 20 older rows (far beyond overscan: 8). Without pendingPlace,
+      // scrollTop = 0 would mount older-0..older-11, unmounting live-0 so hold/keepHeld
+      // could not find it and the reader would jump to older-0.
+      const olderEvents = Array.from({ length: 20 }, (_, idx) => ({
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'user_message_chunk',
+          content: { text: `older-${idx}` },
+          _meta: {
+            timestamp: STAMP_START - (20 - idx) * 1000,
+            'qwen.session.recordId': `older-rec-${idx}`,
+          },
+        },
+      }));
+      const olderRows = modelApi.replayStoredPage(olderEvents);
+      const added = vModel.prependItems(olderRows, () => {
+        vView.anchorReader();
+      });
+      expect(added).toBe(20);
+      tick();
+
+      const mountedRow = vScroller.querySelector(
+        `.vrow[data-id="${anchorBefore.item!.id}"]`,
+      ) as HTMLElement | null;
+      expect(mountedRow).not.toBeNull();
+      expect(mountedRow!.getBoundingClientRect().top).toBe(8);
+      expect(vScroller.scrollTop).toBeGreaterThan(1200);
+    } finally {
+      if (origOffsetHeight) {
+        Object.defineProperty(proto, 'offsetHeight', origOffsetHeight);
+      }
+      proto.getClientRects = origGetClientRects;
+      proto.getBoundingClientRect = origGetBCR;
+    }
   });
 });

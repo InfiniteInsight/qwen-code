@@ -7554,6 +7554,7 @@ PAGE_SCENARIOS.push({
         })),
         users: userTurnsSeen,
         forks: forkTurnCount,
+        running: turnRunning(),
         footer: document.getElementById('session-footer')?.textContent ?? '',
         pill: (document.getElementById('jump-bottom') as HTMLElement).hidden,
       }));
@@ -7632,11 +7633,14 @@ PAGE_SCENARIOS.push({
 
     // The live turn. A stored page carries user records and answers in the same
     // envelope a live frame does, so this is where a wiring that reused
-    // renderFrame would show up: the turn counter arms, and the footer restates
-    // a token total this read never produced.
+    // renderFrame would show up: the turn spinner arms, and the footer restates
+    // a token total this read never produced. (#273 shifts userTurnsSeen and
+    // forkTurnCount by the 1 prepended user turn so Fork here stays aligned.)
     expect(
-      after.users === before.users && after.forks === before.forks,
-      `the read moved the turn: ${before.users}/${before.forks} -> ${after.users}/${after.forks}`,
+      !after.running &&
+        after.users === before.users + 1 &&
+        after.forks === before.forks + 1,
+      `the read armed a turn or miscounted turns: ${before.users}/${before.forks} -> ${after.users}/${after.forks} (running=${after.running})`,
     );
     expect(
       after.footer === before.footer,
@@ -35661,6 +35665,581 @@ PAGE_SCENARIOS.push({
     );
 
     return `clock digits ("11:26") found No match; "Nov" matched only expanded thought body and tool detail (2 rows, 0 ranges inside .stamp)`;
+  },
+});
+
+// ---- #273: viewer resilience, folder navigation, subagent parity, fork shift --
+
+PAGE_SCENARIOS.push({
+  name: 'P592 folder picker Show conversations in this folder (#dir-open-list) and conversation list Browse folders (#list-folders-browse) round-trip at 390x844 with 44px+ tap targets',
+  waitView: false,
+  run: async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const sessionCreates: string[] = [];
+    await page.route('**/session', async (route) => {
+      if (route.request().method() === 'POST') {
+        sessionCreates.push(route.request().postData() || '');
+        await route.fulfill({
+          status: 500,
+          contentType: 'application/json',
+          body: '{"error":"unexpected create in P592"}',
+        });
+        return;
+      }
+      await route.continue();
+    });
+    await h190ListFixture(
+      page,
+      {
+        '/p592/alpha': [
+          {
+            sessionId: '59200000-0000-0000-0000-000000000001',
+            title: 'alpha session',
+            updatedAt: h190Now,
+          },
+        ],
+        '/p592/beta': [
+          {
+            sessionId: '59200000-0000-0000-0000-000000000002',
+            title: 'beta first',
+            updatedAt: h190Now,
+          },
+          {
+            sessionId: '59200000-0000-0000-0000-000000000003',
+            title: 'beta second',
+            updatedAt: h190Now,
+          },
+        ],
+      },
+      {
+        '/p592': { parent: '/', entries: ['alpha', 'beta'] },
+        '/p592/alpha': { parent: '/p592', entries: [] },
+        '/p592/beta': { parent: '/p592', entries: [] },
+      },
+    );
+    await page.evaluate(h190At('/p592/alpha'));
+    await page.waitForFunction(
+      `document.querySelectorAll('#past-list .srow').length >= 1`,
+      null,
+      { timeout: 5_000 },
+    );
+    await openList(page);
+    await page.click('#list-folder');
+    await page.waitForSelector('#list-folders:not([hidden])', { timeout: 5_000 });
+
+    const browseBox = (await page.evaluate(String.raw`(() => {
+      const b = document.getElementById('list-folders-browse');
+      if (!b || b.hidden || b.getClientRects().length === 0) return null;
+      const r = b.getBoundingClientRect();
+      return {
+        text: (b.textContent || '').trim(),
+        w: Math.round(r.width),
+        h: Math.round(r.height),
+        right: Math.round(r.right),
+      };
+    })()`)) as { text: string; w: number; h: number; right: number } | null;
+    expect(
+      browseBox !== null &&
+        browseBox.text.startsWith('Browse folders') &&
+        browseBox.h >= 44 &&
+        browseBox.w >= 44 &&
+        browseBox.right <= 391,
+      `#list-folders-browse ergonomics failed at 390x844: ${JSON.stringify(browseBox)}`,
+    );
+
+    await page.click('#list-folders-browse');
+    await page.waitForFunction(
+      `document.getElementById('list-folders').hidden && !document.getElementById('dir-picker').hidden`,
+      null,
+      { timeout: 5_000 },
+    );
+    await page.waitForFunction(
+      `document.getElementById('dir-current').textContent === '/p592/alpha'`,
+      null,
+      { timeout: 5_000 },
+    );
+
+    // Navigate up to /p592 and into /p592/beta.
+    await page.click('#dir-list button');
+    await page.waitForFunction(
+      `document.getElementById('dir-current').textContent === '/p592'`,
+      null,
+      { timeout: 5_000 },
+    );
+    await page.evaluate(String.raw`(() => {
+      const btn = Array.from(document.querySelectorAll('#dir-list button')).find(
+        (b) => (b.textContent || '').trim() === 'beta/',
+      );
+      if (btn) btn.click();
+    })()`);
+    await page.waitForFunction(
+      `document.getElementById('dir-current').textContent === '/p592/beta'`,
+      null,
+      { timeout: 5_000 },
+    );
+
+    const openListBox = (await page.evaluate(String.raw`(() => {
+      const b = document.getElementById('dir-open-list');
+      if (!b || b.hidden || b.getClientRects().length === 0) return null;
+      const r = b.getBoundingClientRect();
+      return {
+        text: (b.textContent || '').trim(),
+        w: Math.round(r.width),
+        h: Math.round(r.height),
+        right: Math.round(r.right),
+      };
+    })()`)) as { text: string; w: number; h: number; right: number } | null;
+    expect(
+      openListBox !== null &&
+        openListBox.text === 'Show conversations in this folder' &&
+        openListBox.h >= 44 &&
+        openListBox.w >= 44 &&
+        openListBox.right <= 391,
+      `#dir-open-list ergonomics failed at 390x844: ${JSON.stringify(openListBox)}`,
+    );
+
+    await page.click('#dir-open-list');
+    await page.waitForFunction(
+      `document.getElementById('dir-picker').hidden && !document.getElementById('list-screen').hidden`,
+      null,
+      { timeout: 5_000 },
+    );
+    await page.waitForFunction(
+      `Array.from(document.querySelectorAll('#past-list .srow .tt')).map((e) => e.textContent).join('|') === 'beta first|beta second'`,
+      null,
+      { timeout: 5_000 },
+    );
+
+    const after = (await page.evaluate(String.raw`({
+      folderTitle: document.getElementById('list-folder').title,
+      savedFolder: localStorage.getItem('qwen-rc:ui:list-folder'),
+      recent: JSON.parse(localStorage.getItem('qwen-rc-workspaces') || '[]'),
+      titles: Array.from(document.querySelectorAll('#past-list .srow .tt')).map((e) => e.textContent),
+    })`)) as {
+      folderTitle: string;
+      savedFolder: string | null;
+      recent: string[];
+      titles: string[];
+    };
+    expect(
+      after.folderTitle === '/p592/beta' &&
+        after.savedFolder === JSON.stringify('/p592/beta') &&
+        after.recent[0] === '/p592/beta' &&
+        after.titles.join('|') === 'beta first|beta second' &&
+        sessionCreates.length === 0,
+      `round-trip state wrong: ${JSON.stringify({ after, sessionCreates })}`,
+    );
+
+    return `#list-folders-browse (${browseBox!.w}x${browseBox!.h}) opened #dir-picker; #dir-open-list (${openListBox!.w}x${openListBox!.h}) filtered list to /p592/beta (${after.titles.join(', ')}) with 0 session creates`;
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P593 autoResumeGoneSession coalesces concurrent 404 session_not_found probes onto one /resume and clearPersistedWatch keeps a WINDOW_KEY null sentinel across reload',
+  frames: () => new Frames().user('p593 initial').asst('p593 initial reply').done().list,
+  run: async ({ page, viewer }) => {
+    const sid = viewer.sessionId;
+    await page.waitForFunction('caps && caps.remoteControl', null, { timeout: 15_000 });
+    await watch(page, sid);
+    await waitForFrame(page, 3, 15_000);
+    await page.evaluate(String.raw`(() => {
+      watchedSessionCwd = '/p593/proj';
+      persistWatch();
+    })()`);
+
+    let daemonLoaded = false;
+    let resumeCalls = 0;
+    let events404s = 0;
+    let status404s = 0;
+
+    await page.route(new RegExp(`/session/${sid}/events$`), async (route) => {
+      if (!daemonLoaded) {
+        events404s += 1;
+        await route.fulfill({
+          status: 404,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            code: 'session_not_found',
+            message: 'session evicted after restart',
+          }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+    await page.route(new RegExp(`/session/${sid}/status$`), async (route) => {
+      if (!daemonLoaded) {
+        status404s += 1;
+        await route.fulfill({
+          status: 404,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            code: 'session_not_found',
+            message: 'session evicted after restart',
+          }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ pendingPermission: null }),
+      });
+    });
+    await page.route(new RegExp(`/session/${sid}/resume$`), async (route) => {
+      resumeCalls += 1;
+      await new Promise((r) => setTimeout(r, 250));
+      daemonLoaded = true;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          sessionId: sid,
+          compactedReplay: [
+            h150Frame(1, 'user_message_chunk', 'p593 resumed question'),
+            h150Frame(2, 'agent_message_chunk', 'p593 resumed answer'),
+          ],
+          liveJournal: [],
+          lastEventId: 3,
+        }),
+      });
+    });
+
+    // Fire startWatch and refreshPendingCards concurrently while the session is gone:
+    // both hit 404 session_not_found, and autoResumeGoneSession coalesces onto one POST /resume.
+    await page.evaluate(
+      String.raw`(() => {
+        goneResumed.clear();
+        void startWatch(${JSON.stringify(sid)}, 3, 'p593 session');
+        void refreshPendingCards(${JSON.stringify(sid)});
+      })()`,
+    );
+
+    await page.waitForFunction(
+      String.raw`watchedSessionId === ${JSON.stringify(sid)} && watchStreamAlive === true && transcriptModel.items.some((i) => i.kind === 'asst' && i.text === 'p593 resumed answer')`,
+      null,
+      { timeout: 10_000 },
+    );
+    expect(
+      events404s >= 1 && status404s >= 1 && resumeCalls === 1,
+      `expected concurrent 404s to coalesce onto 1 /resume, got events404s=${events404s}, status404s=${status404s}, resumeCalls=${resumeCalls}`,
+    );
+
+    // Explicit unwatch writes WINDOW_KEY {"sessionId":null} sentinel so another tab's
+    // shared localStorage pointer does not resurrect a session when this tab reloads.
+    await page.evaluate(String.raw`(() => {
+      document.getElementById('stop').onclick();
+    })()`);
+    const sentinel = (await page.evaluate(String.raw`({
+      watched: watchedSessionId,
+      winRaw: sessionStorage.getItem('qwen-rc:window-session'),
+      sharedRaw: localStorage.getItem('qwen-rc:watched-session'),
+    })`)) as {
+      watched: string | null;
+      winRaw: string | null;
+      sharedRaw: string | null;
+    };
+    expect(
+      sentinel.watched === null &&
+        sentinel.winRaw === JSON.stringify({ sessionId: null }) &&
+        sentinel.sharedRaw === null,
+      `clearPersistedWatch sentinel wrong: ${JSON.stringify(sentinel)}`,
+    );
+
+    // Simulate another tab writing localStorage['qwen-rc:watched-session'] while this tab reloads.
+    await page.evaluate(
+      String.raw`localStorage.setItem('qwen-rc:watched-session', JSON.stringify({ sessionId: ${JSON.stringify(sid)}, cwd: '/p593/proj' }))`,
+    );
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(
+      String.raw`Boolean(caps && caps.remoteControl)`,
+      null,
+      { timeout: 10_000 },
+    );
+    await page.waitForTimeout(300);
+    const afterReload = (await page.evaluate(String.raw`({
+      watched: watchedSessionId,
+      winRaw: sessionStorage.getItem('qwen-rc:window-session'),
+    })`)) as { watched: string | null; winRaw: string | null };
+    expect(
+      afterReload.watched === null &&
+        afterReload.winRaw === JSON.stringify({ sessionId: null }),
+      `reloaded unwatched tab resurrected session: ${JSON.stringify(afterReload)}`,
+    );
+
+    return `concurrent /events (${events404s}) + /status (${status404s}) 404s coalesced onto ${resumeCalls} /resume; unwatch wrote WINDOW_KEY {"sessionId":null} and stayed unwatched across reload`;
+  },
+});
+
+const P594_STATE = { status: 'running' as 'running' | 'paused' };
+PAGE_SCENARIOS.push({
+  name: 'P594 background subagent inline .subagent row and #agents-sheet stay in parity across turn_complete, agentsRead, Pause, and Resume',
+  frames: () => {
+    const f = new Frames();
+    f.user('audit background auth');
+    f.toolCall('tc-bg-594', 'Agent', 'in_progress');
+    f.upd(
+      childUpdate('tc-bg-594', {
+        sessionUpdate: 'agent_message_chunk',
+        content: { text: 'scanning auth handlers' },
+      }),
+    );
+    f.asst('Background agent launched.');
+    f.done();
+    return f.list;
+  },
+  stub: {
+    capabilitiesFeatures: [...AGENT_FEATURES, 'session_subagent_controls'],
+    sessionAgentsResult: (sid: string) =>
+      agentRoster(sid, [
+        agentTask({
+          id: 'agent-bg-594',
+          toolUseId: 'tc-bg-594',
+          subagentType: 'general-purpose',
+          description: 'scan auth handlers',
+          status: P594_STATE.status,
+          isBackgrounded: true,
+          canPause: P594_STATE.status === 'running',
+          startTime: AG_T0,
+          ...(P594_STATE.status === 'paused' ? { endTime: AG_T0 + 15_000 } : {}),
+        }),
+      ]),
+    subagentPauseResult: ({ sessionId, subagentRef }) => {
+      P594_STATE.status = 'paused';
+      return {
+        sessionId,
+        subagentRef,
+        agentId: 'agent-bg-594',
+        outcome: 'paused',
+        status: 'paused',
+      };
+    },
+    subagentResumeResult: ({ sessionId, subagentRef }) => {
+      P594_STATE.status = 'running';
+      return {
+        sessionId,
+        subagentRef,
+        agentId: 'agent-bg-594',
+        outcome: 'resumed',
+        status: 'running',
+      };
+    },
+  },
+  run: async ({ page, viewer }) => {
+    P594_STATE.status = 'running';
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 5, 15_000);
+    // Even though parent turn_complete called settleAllSubagents(), agentsRead sees
+    // status === 'running' and reopens the inline .subagent row.
+    await waitChip(page, '1 agent');
+    await page.waitForFunction(
+      String.raw`(() => {
+        const sub = document.querySelector('#transcript .subagent');
+        const cancel = document.querySelector('#transcript .subagent-cancel');
+        return !!sub && (sub.textContent || '').includes('running') && !!cancel && !cancel.hidden;
+      })()`,
+      null,
+      { timeout: 10_000 },
+    );
+
+    await openAgentsFromChip(page);
+    await waitSheetRows(page, 1);
+
+    // Pause the background subagent: #agents-sheet transitions to paused (Resume + Abandon),
+    // and the inline .subagent row settles in #transcript (NOT running, Stop hidden),
+    // staying settled even after a fresh agentsRead().
+    await page.click('#agents-body .ag-pause[data-ref="tc-bg-594"]');
+    await page.waitForFunction(
+      String.raw`document.querySelector('#agents-body .ag-row[data-key="tc-bg-594"]')?.getAttribute('data-state') === 'paused'`,
+      null,
+      { timeout: 10_000 },
+    );
+    const readAfterPause = Date.now();
+    await page.evaluate(String.raw`void agentsRead()`);
+    await waitAgentsRead(page, readAfterPause);
+    await settlePage(page, 200);
+
+    const pausedState = (await page.evaluate(String.raw`(() => {
+      const sub = document.querySelector('#transcript .subagent');
+      const cancel = document.querySelector('#transcript .subagent-cancel');
+      const row = document.querySelector('#agents-body .ag-row[data-key="tc-bg-594"]');
+      const chip = document.getElementById('agents-chip');
+      return {
+        subText: sub ? sub.textContent || '' : '',
+        cancelHidden: !cancel || cancel.hidden === true,
+        sheetState: row ? row.getAttribute('data-state') : null,
+        hasResume: !!row && !!row.querySelector('.ag-resume:not([hidden])'),
+        hasAbandon: !!row && !!row.querySelector('.ag-abandon:not([hidden])'),
+        hasPause: !!row && !!row.querySelector('.ag-pause:not([hidden])'),
+        hasStop: !!row && !!row.querySelector('.ag-stop:not([hidden])'),
+        chipHidden: !chip || chip.hidden === true,
+      };
+    })()`)) as {
+      subText: string;
+      cancelHidden: boolean;
+      sheetState: string | null;
+      hasResume: boolean;
+      hasAbandon: boolean;
+      hasPause: boolean;
+      hasStop: boolean;
+      chipHidden: boolean;
+    };
+    expect(
+      pausedState.subText.includes('done in') &&
+        !pausedState.subText.includes('running') &&
+        pausedState.cancelHidden &&
+        pausedState.sheetState === 'paused' &&
+        pausedState.hasResume &&
+        pausedState.hasAbandon &&
+        !pausedState.hasPause &&
+        !pausedState.hasStop &&
+        pausedState.chipHidden,
+      `paused inline/sheet parity failed: ${JSON.stringify(pausedState)}`,
+    );
+
+    // Resume the paused background subagent: both #agents-sheet and inline .subagent reopen.
+    await page.click('#agents-body .ag-resume[data-ref="tc-bg-594"]');
+    await page.waitForFunction(
+      String.raw`document.querySelector('#agents-body .ag-row[data-key="tc-bg-594"]')?.getAttribute('data-state') === 'running'`,
+      null,
+      { timeout: 10_000 },
+    );
+    await waitChip(page, '1 agent');
+    await page.waitForFunction(
+      String.raw`(() => {
+        const sub = document.querySelector('#transcript .subagent');
+        const cancel = document.querySelector('#transcript .subagent-cancel');
+        return !!sub && (sub.textContent || '').includes('running') && !!cancel && !cancel.hidden;
+      })()`,
+      null,
+      { timeout: 10_000 },
+    );
+
+    return 'reopened inline .subagent after turn_complete while running; Pause settled inline .subagent (Stop hidden) while keeping paused + Resume/Abandon in #agents-sheet across agentsRead; Resume reopened both';
+  },
+});
+
+PAGE_SCENARIOS.push({
+  name: 'P595 Load earlier shifts userTurnsSeen, forkTurnCount, and forkItem.turn by prepended user turns so Fork here posts the shifted fromTurn',
+  frames: () => {
+    const f = new Frames();
+    f.user('q3').asst('a3').done().user('q4').asst('a4').done();
+    return f.list;
+  },
+  stub: {
+    transcriptPage: {
+      v: 1,
+      events: [
+        storedEvent(
+          1,
+          'user_message_chunk',
+          { content: { text: 'q1' } },
+          1_700_000_000_000,
+        ),
+        storedEvent(
+          2,
+          'agent_message_chunk',
+          { content: { text: 'a1' } },
+          1_700_000_001_000,
+        ),
+        storedEvent(
+          3,
+          'user_message_chunk',
+          { content: { text: 'q2' } },
+          1_700_000_002_000,
+        ),
+        storedEvent(
+          4,
+          'agent_message_chunk',
+          { content: { text: 'a2' } },
+          1_700_000_003_000,
+        ),
+      ],
+      hasMore: false,
+    },
+  },
+  run: async ({ page, viewer }) => {
+    const forks: Array<{ fromTurn?: number; transcript?: string }> = [];
+    await page.route(/\/session\/[^/]+\/fork$/, async (route) => {
+      forks.push(
+        JSON.parse(route.request().postData() || '{}') as {
+          fromTurn?: number;
+          transcript?: string;
+        },
+      );
+      await route.fulfill({
+        status: 403,
+        contentType: 'application/json',
+        body: '{"error":"refused by P595"}',
+      });
+    });
+
+    await watch(page, viewer.sessionId);
+    await waitForFrame(page, 6, 15_000);
+    await settlePage(page);
+    await page.evaluate(String.raw`(() => { window.prompt = () => ''; })()`);
+
+    const before = (await page.evaluate(String.raw`({
+      users: userTurnsSeen,
+      forks: forkTurnCount,
+      forkItemTurn: transcriptModel.forkItem ? transcriptModel.forkItem.turn : -1,
+    })`)) as { users: number; forks: number; forkItemTurn: number };
+    expect(
+      before.users === 2 && before.forks === 2 && before.forkItemTurn === 2,
+      `initial turn counters wrong: ${JSON.stringify(before)}`,
+    );
+
+    await page.evaluate(String.raw`(() => {
+      document.getElementById('transcript').scrollTop = 0;
+    })()`);
+    await settlePage(page);
+    await page.click('#load-earlier');
+    await page.waitForFunction(
+      String.raw`transcriptModel.items.some((i) => i.kind === 'user' && i.text === 'q1')`,
+      null,
+      { timeout: 10_000 },
+    );
+    await settlePage(page);
+
+    const after = (await page.evaluate(String.raw`({
+      users: userTurnsSeen,
+      forks: forkTurnCount,
+      forkItemTurn: transcriptModel.forkItem ? transcriptModel.forkItem.turn : -1,
+    })`)) as { users: number; forks: number; forkItemTurn: number };
+    expect(
+      after.users === 4 && after.forks === 4 && after.forkItemTurn === 4,
+      `shifted turn counters wrong after prepending 2 user turns: ${JSON.stringify(after)}`,
+    );
+
+    // Scroll to the latest turn's fork strip and tap Fork here.
+    await page.evaluate(String.raw`(() => {
+      const s = document.getElementById('transcript');
+      s.scrollTop = s.scrollHeight;
+    })()`);
+    await settlePage(page);
+    await page.evaluate(String.raw`(() => {
+      const btns = Array.from(document.querySelectorAll('#transcript .bubble-fork button'));
+      const forkBtn = btns.find((b) => (b.textContent || '').trim() === 'Fork here');
+      if (forkBtn) forkBtn.click();
+    })()`);
+    await page.waitForSelector('#h1-ask:not([hidden])', { timeout: 5_000 });
+    const askTitle = await page.textContent('#h1-ask-title');
+    expect(
+      askTitle === 'Fork from turn 4',
+      `#h1-ask-title was ${JSON.stringify(askTitle)}, expected "Fork from turn 4"`,
+    );
+    await page.click('#h1-ask button[data-value="include"]');
+    await page.waitForFunction(() => true);
+    const deadline = Date.now() + 5_000;
+    while (forks.length < 1 && Date.now() < deadline) {
+      await page.waitForTimeout(50);
+    }
+    expect(
+      forks.length === 1 && forks[0]?.fromTurn === 4,
+      `Fork here posted ${JSON.stringify(forks)}, expected fromTurn: 4`,
+    );
+
+    return `prepended 2 earlier turns shifted counters 2 -> 4; Fork here asked "${askTitle}" and posted fromTurn: ${forks[0]?.fromTurn}`;
   },
 });
 

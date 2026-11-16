@@ -1002,6 +1002,10 @@
           '🔧 ' + t.label + (t.status ? '  [' + t.status + ']' : ''),
         );
       }
+      while (r.tools.length > s.tools.length) {
+        var extra = r.tools.pop();
+        if (extra && extra.parentNode) extra.parentNode.removeChild(extra);
+      }
     }
 
     function buildProcessing(m, now) {
@@ -2213,7 +2217,7 @@
       anchorReader: function () {
         var place = readerPlace();
         if (place.end) pendingEnd = true;
-        else if (place.item) hold = place;
+        else if (place.item) pendingPlace = place;
       },
       // #182. Where the reader is, for a page that saves it across a reload:
       // { end: true } while following the end, else { item, top } for the

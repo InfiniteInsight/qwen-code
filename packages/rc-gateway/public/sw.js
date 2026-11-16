@@ -183,8 +183,16 @@ async function openApp(url) {
     includeUncontrolled: true,
   });
   for (const c of all) {
+    try {
+      const p = new URL(c.url).pathname;
+      if (p.startsWith('/ui/share/')) continue;
+    } catch {
+      /* ignore malformed client url */
+    }
     if ('focus' in c) {
-      c.navigate?.(url);
+      if (typeof c.navigate === 'function') {
+        await c.navigate(url).catch(() => null);
+      }
       return c.focus();
     }
   }

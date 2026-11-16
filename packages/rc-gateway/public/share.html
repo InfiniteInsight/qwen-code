@@ -138,9 +138,15 @@
         var authed = function (path) {
           return fetch(path, { headers: { Authorization: 'Bearer ' + tok } });
         };
+        var LOG_CAP = 500;
+        var logLines = [];
         var log = function (m) {
           var el = $('log');
-          el.textContent += m + '\n';
+          logLines.push(m);
+          if (logLines.length > LOG_CAP) {
+            logLines.splice(0, logLines.length - LOG_CAP);
+          }
+          el.textContent = logLines.join('\n') + '\n';
           el.scrollTop = el.scrollHeight;
         };
 
@@ -154,6 +160,11 @@
         // The token rides the Authorization header (token-in-URL hygiene).
         function vote(sessionId, requestId, outcome, optionId) {
           var entry = cards[requestId];
+          if (entry && entry.busy) return;
+          if (entry) {
+            entry.busy = true;
+            entry.disable();
+          }
           var body =
             outcome === 'selected'
               ? { outcome: outcome, optionId: optionId }
@@ -174,15 +185,23 @@
           )
             .then(function (res) {
               if (!entry) return;
-              entry.disable();
+              entry.busy = false;
               if (res.status === 200) entry.note('voted: ' + outcome);
-              else if (res.status === 404) entry.note('already resolved');
+              else if (res.status === 404 || res.status === 409)
+                entry.note('already resolved');
               else if (res.status === 401 || res.status === 403)
                 entry.note('not authorized');
-              else entry.note('vote failed (' + res.status + ')');
+              else {
+                if (entry.enable) entry.enable();
+                entry.note('vote failed (' + res.status + ')');
+              }
             })
             .catch(function (e) {
-              if (entry) entry.note('vote error: ' + e);
+              if (entry) {
+                entry.busy = false;
+                if (entry.enable) entry.enable();
+                entry.note('vote error: ' + e);
+              }
             });
         }
 
@@ -238,6 +257,10 @@
             disable: function () {
               for (var j = 0; j < buttons.length; j++)
                 buttons[j].disabled = true;
+            },
+            enable: function () {
+              for (var j = 0; j < buttons.length; j++)
+                buttons[j].disabled = false;
             },
             note: function (m) {
               note.textContent = m;

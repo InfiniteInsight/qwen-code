@@ -2757,4 +2757,20 @@ describe('public/index.html regression checks (#469, #470, #471)', () => {
       "else if (res.status === 409) {\n              const failBody = await res.json().catch(() => null);\n              setStatus(describeFailure(res, failBody, 'sending the prompt'));\n              refused = (failBody && failBody.code) || 'session not loaded';",
     );
   });
+
+  it('coalesces concurrent 404 session_not_found auto-resumes and keeps a per-window sentinel on clearPersistedWatch so unloaded tabs do not adopt another tab conversation', async () => {
+    const { url } = await boot();
+    const html = await (await fetch(`${url}/ui/index.html`)).text();
+    expect(html).toContain('async function autoResumeGoneSession(sessionId, title)');
+    expect(html).toContain(
+      'if (resumeInFlight && resumeInFlight.sessionId === sessionId) {\n          return resumeInFlight.promise;\n        }',
+    );
+    expect(html).toContain(
+      'if (!early && resumeInFlight && resumeInFlight.sessionId === sessionId) {\n          return;\n        }',
+    );
+    expect(html).toContain(
+      'const emptyPointer = JSON.stringify({ sessionId: null });\n        sessionStorage.setItem(WINDOW_KEY, emptyPointer);',
+    );
+    expect(html).not.toContain('sessionStorage.removeItem(WINDOW_KEY);');
+  });
 });

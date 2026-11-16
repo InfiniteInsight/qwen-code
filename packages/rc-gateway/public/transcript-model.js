@@ -587,6 +587,7 @@
         endedAt: null,
         done: false,
         failed: false,
+        settledBySweep: false,
         type: subagentTypes.get(parentId) || '',
         text: '',
         tools: [],
@@ -616,24 +617,26 @@
     }
 
     // Returns the tool item when something changed (caller emits).
-    function settle(parentId, status) {
+    function settle(parentId, status, settledBySweep) {
       var tool = toolIndex.get(parentId);
       var s = tool && tool.sub;
       if (!s || s.done) return null;
       s.done = true;
       s.failed = status === 'failed';
       s.endedAt = now();
+      s.settledBySweep = !!settledBySweep;
       return tool;
     }
     function finishSubagent(parentId, status) {
-      var tool = settle(parentId, status);
+      var tool = settle(parentId, status, false);
       if (tool) emitUpdate(tool);
     }
     function settleAllSubagents() {
       // A turn can't end while an Agent tool is still in flight: settle any
       // indicator whose terminal update never arrived.
       toolIndex.forEach(function (tool, pid) {
-        finishSubagent(pid, 'completed');
+        var settled = settle(pid, 'completed', true);
+        if (settled) emitUpdate(settled);
       });
     }
 
