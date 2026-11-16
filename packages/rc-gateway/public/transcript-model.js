@@ -237,6 +237,7 @@
     // Orphans carried by earlier pages that no row on screen has claimed yet.
     var pendingOrphans = new Map();
     var items = [];
+    var itemSet = new Set(); // exact membership mirror of `items` (#137)
     var listeners = [];
     var nextId = 1;
 
@@ -291,14 +292,20 @@
     }
     function push(item) {
       items.push(item);
+      itemSet.add(item);
       emitAppend(item);
       return item;
     }
     // Remove without emitting; returns whether it was present.
     function detach(item) {
+      if (!itemSet.has(item)) return false;
       var i = items.lastIndexOf(item);
-      if (i < 0) return false;
+      if (i < 0) {
+        itemSet.delete(item);
+        return false;
+      }
       items.splice(i, 1);
+      itemSet.delete(item);
       return true;
     }
 
@@ -870,7 +877,7 @@
       // The parent agent tool reaching a terminal status settles the nested
       // subagent indicator.
       if (id && TERMINAL_TOOL_STATUSES[status]) settle(id, status);
-      if (items.lastIndexOf(tool) < 0) push(tool);
+      if (!itemSet.has(tool)) push(tool);
       else emitUpdate(tool);
     }
 
@@ -941,6 +948,7 @@
       if (ai >= 0 && items[ai + 1] !== forkItem) {
         detach(forkItem);
         items.push(forkItem);
+        itemSet.add(forkItem);
         emit({ type: 'reset' });
       }
     }
@@ -973,6 +981,9 @@
       if (cut) {
         var at = items.lastIndexOf(users[keep]);
         var dropped = items.splice(at);
+        for (var di = 0; di < dropped.length; di++) {
+          itemSet.delete(dropped[di]);
+        }
         if (curThought && dropped.indexOf(curThought) >= 0) curThought = null;
       }
       var f = forkItem;
@@ -985,7 +996,7 @@
       // it standing: keep pointing at it, or the next frame would push a second
       // row under the old one. If the cut did drop it, stay null and let the
       // next frame start a fresh one.
-      if (pl && items.lastIndexOf(pl) >= 0) planItem = pl;
+      if (pl && itemSet.has(pl)) planItem = pl;
       // A live thought that survived (no cut) folds like any turn reset.
       finishThought();
       emit({ type: 'reset' });
@@ -994,6 +1005,7 @@
 
     function clear() {
       items.splice(0, items.length);
+      itemSet.clear();
       dropBookkeeping();
       curThought = null;
       emit({ type: 'reset' });
@@ -1330,6 +1342,7 @@
         fillTool(on, r);
         if (wasNameless) {
           items.splice(at, 1);
+          itemSet.delete(on);
           adopted.push(on);
           fresh.push(on);
         } else {
@@ -1352,6 +1365,9 @@
       // reassigned array would leave it rendering a list the model no longer
       // holds.
       items.splice(0, 0, ...list);
+      for (var si = 0; si < list.length; si++) {
+        itemSet.add(list[si]);
+      }
       for (var a = 0; a < adopted.length; a++) {
         emitUpdate(adopted[a]);
       }
