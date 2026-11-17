@@ -2353,6 +2353,7 @@ describe('SessionTranscriptReader', () => {
   });
 
   it('rejects oversized snapshots before indexing', async () => {
+    expect(SESSION_TRANSCRIPT_MAX_INDEX_BYTES).toBe(16 * 1024 * 1024 * 1024);
     const filePath = await writeRecords([record('u1', null, 'hello')]);
     await fs.truncate(filePath, SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1);
     await expect(readPage()).rejects.toMatchObject({
@@ -2361,6 +2362,31 @@ describe('SessionTranscriptReader', () => {
       snapshotSize: SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1,
       maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
     });
+  });
+
+  it('honors QWEN_TRANSCRIPT_MAX_INDEX_BYTES override including 0 for unlimited', async () => {
+    const prev = process.env['QWEN_TRANSCRIPT_MAX_INDEX_BYTES'];
+    try {
+      const filePath = await writeRecords([record('u1', null, 'hello')]);
+      const st = await fs.stat(filePath);
+      process.env['QWEN_TRANSCRIPT_MAX_INDEX_BYTES'] = String(st.size - 1);
+      await expect(readPage()).rejects.toMatchObject({
+        name: 'SessionTranscriptTooLargeError',
+        sessionId,
+        snapshotSize: st.size,
+        maxBytes: st.size - 1,
+      });
+
+      process.env['QWEN_TRANSCRIPT_MAX_INDEX_BYTES'] = '0';
+      const page = await readPage();
+      expect(page.records).toHaveLength(1);
+    } finally {
+      if (prev === undefined) {
+        delete process.env['QWEN_TRANSCRIPT_MAX_INDEX_BYTES'];
+      } else {
+        process.env['QWEN_TRANSCRIPT_MAX_INDEX_BYTES'] = prev;
+      }
+    }
   });
 
   it('shares an oversized in-flight index without retaining its completion', async () => {

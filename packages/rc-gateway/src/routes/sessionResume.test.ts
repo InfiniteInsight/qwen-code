@@ -87,13 +87,27 @@ function post(body: unknown): RequestInit {
 
 /** A fake pool whose resumeSession echoes back a restored session. */
 function fakePool(): Pick<SessionDaemon, 'resumeSession'> & {
-  calls: Array<{ sessionId: string; workspaceCwd: string }>;
+  calls: Array<{
+    sessionId: string;
+    workspaceCwd: string;
+    historyPageSize?: number;
+  }>;
 } {
-  const calls: Array<{ sessionId: string; workspaceCwd: string }> = [];
+  const calls: Array<{
+    sessionId: string;
+    workspaceCwd: string;
+    historyPageSize?: number;
+  }> = [];
   return {
     calls,
     async resumeSession(sessionId, req) {
-      calls.push({ sessionId, workspaceCwd: req.workspaceCwd });
+      calls.push({
+        sessionId,
+        workspaceCwd: req.workspaceCwd,
+        ...(req.historyPageSize !== undefined
+          ? { historyPageSize: req.historyPageSize }
+          : {}),
+      });
       return {
         sessionId,
         workspaceCwd: req.workspaceCwd,
@@ -320,5 +334,27 @@ describe('POST /session/:id/resume', () => {
     expect('liveJournal' in body).toBe(false);
     expect('lastEventId' in body).toBe(false);
     expect('eventEpoch' in body).toBe(false);
+  });
+
+  it('forwards optional valid historyPageSize and rejects out-of-range values (#277)', async () => {
+    const dir = makeTmpDir('qwen-session-resume-pagesize-');
+    const pool = fakePool();
+    const url = await mountGateway(pool);
+
+    const bad = await fetch(
+      `${url}/session/${SID}/resume`,
+      post({ cwd: dir, historyPageSize: 0 }),
+    );
+    expect(bad.status).toBe(400);
+    expect(pool.calls).toHaveLength(0);
+
+    const ok = await fetch(
+      `${url}/session/${SID}/resume`,
+      post({ cwd: dir, historyPageSize: 120 }),
+    );
+    expect(ok.status).toBe(200);
+    expect(pool.calls).toEqual([
+      { sessionId: SID, workspaceCwd: dir, historyPageSize: 120 },
+    ]);
   });
 });

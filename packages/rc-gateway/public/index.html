@@ -3503,6 +3503,8 @@
         display: flex;
         flex-direction: column;
         justify-content: flex-end;
+        box-sizing: border-box;
+        padding-top: env(safe-area-inset-top, 0px);
         background: rgba(1, 4, 9, 0.6);
       }
       #agents-sheet[hidden] {
@@ -3523,34 +3525,48 @@
         border-radius: 16px 16px 0 0;
         color: var(--g1-ink);
       }
+      :root.kb-open #agents-sheet {
+        bottom: auto;
+        height: var(--app-h, 100dvh);
+      }
+      :root.kb-open #agents-sheet .ag-card {
+        height: calc(var(--app-h, 100dvh) - env(safe-area-inset-top, 0px) - 8px);
+        max-height: calc(var(--app-h, 100dvh) - env(safe-area-inset-top, 0px) - 8px);
+        min-height: 0;
+        padding-bottom: 0;
+      }
       #agents-sheet .ag-head {
         flex: none;
         height: 56px;
         box-sizing: border-box;
         display: flex;
         align-items: center;
-        gap: 4px;
+        gap: 6px;
         padding: 0 8px;
         border-bottom: 1px solid var(--g1-line);
         color: var(--g1-ink-hi);
       }
       #agents-sheet .ag-head > button {
-        width: 44px;
+        min-width: 44px;
         height: 44px;
         flex: none;
-        display: flex;
+        display: inline-flex;
         align-items: center;
         justify-content: center;
-        padding: 0;
-        border: 0;
+        gap: 4px;
+        padding: 0 10px;
+        border: 1px solid var(--g1-line);
         border-radius: 10px;
-        background: transparent;
-        color: inherit;
+        background: var(--g1-page);
+        color: var(--g1-ink-hi);
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
       }
       /* The way back keeps its place when there is nowhere to go back to, so
          the title stays centred. */
       #agents-sheet .ag-head > button[hidden] {
-        display: flex;
+        display: inline-flex;
         visibility: hidden;
       }
       #agents-title {
@@ -5892,12 +5908,14 @@
       <div id="agents-sheet" role="dialog" aria-modal="true" aria-labelledby="agents-title" hidden>
         <div class="ag-card">
           <div class="ag-head">
-            <button id="agents-back" type="button" aria-label="Back to all agents" hidden>
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6" /></svg>
+            <button id="agents-back" type="button" aria-label="Back to conversation">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6" /></svg>
+              <span id="agents-back-label">Back</span>
             </button>
             <strong id="agents-title">Agents</strong>
             <button id="agents-close" type="button" aria-label="Close">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+              <span>Close</span>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
             </button>
           </div>
           <div id="agents-body"></div>
@@ -9462,9 +9480,15 @@
       // edge sits at offsetTop + height in that same space.
       function keepComposerInView() {
         const vv = window.visualViewport;
-        const box = $('composer');
+        const agSheet = $('agents-sheet');
+        const inAgents = !!(
+          agSheet &&
+          !agSheet.hidden &&
+          agSheet.contains(document.activeElement)
+        );
+        const box = inAgents ? $('agents-foot') || agSheet : $('composer');
         if (!vv || keyboardCovers === 0 || !box) return;
-        if (!box.contains(document.activeElement)) return;
+        if (!inAgents && !box.contains(document.activeElement)) return;
         const over = box.getBoundingClientRect().bottom - (vv.offsetTop + vv.height);
         if (over > 1) window.scrollBy(0, Math.ceil(over));
         else if (over < -1 && window.scrollY > 0) {
@@ -9504,6 +9528,7 @@
       // pin, and a page of history has to leave all three alone.
       const TRANSCRIPT_PAGE_SIZE = 80;
       let transcriptCursor = null; // opaque; only ever sent back as received
+      let transcriptAnchorRecordId = null; // historyAnchorRecordId from paged resume (#277)
       let transcriptExhausted = false; // a read proved there is nothing older
       let transcriptPaging = false; // one page in flight at a time
       // #129: what the load-earlier pill says while a jump to a turn is reading
@@ -9531,11 +9556,18 @@
       // has gone (#172), and throws when the read fails, leaving the cursor
       // where it was so the next ask retries the same page.
       async function readEarlierPage(id, gen, size) {
-        const q = new URLSearchParams({
-          direction: 'backward',
-          limit: String(size),
-        });
-        if (transcriptCursor) q.set('cursor', transcriptCursor);
+        // #277: the daemon treats cursor, beforeRecordId and direction as
+        // mutually exclusive anchors. Carry cursor once paging has started,
+        // beforeRecordId on the first page after a chunked resume, and
+        // direction=backward only when starting from the tail unanchored.
+        const q = new URLSearchParams({ limit: String(size) });
+        if (transcriptCursor) {
+          q.set('cursor', transcriptCursor);
+        } else if (transcriptAnchorRecordId) {
+          q.set('beforeRecordId', transcriptAnchorRecordId);
+        } else {
+          q.set('direction', 'backward');
+        }
         const res = await fetch(
           '/session/' + encodeURIComponent(id) + '/transcript?' + q,
           { headers: { Authorization: 'Bearer ' + token() } },
@@ -9549,6 +9581,7 @@
         if (gen !== switchGen) return null;
         const rows = TranscriptModel.replayStoredPage(page.events);
         markStoredTurnEnds(rows); // #184: their finished turns get actions
+        transcriptAnchorRecordId = null;
         transcriptCursor = strOr(page.nextCursor, '') || null;
         // Continuing needs the cursor as much as the daemon saying there is
         // more: without one a second tap would re-read the same newest page
@@ -9928,6 +9961,7 @@
         // The cursor belongs to the conversation, not to the window: a page
         // read from one session must never be sent as a position in another.
         transcriptCursor = null;
+        transcriptAnchorRecordId = null;
         transcriptExhausted = false;
         transcriptPaging = false;
         renderLoadEarlier();
@@ -17059,6 +17093,8 @@
       var agentSheet = {
         open: false,
         view: 'list',
+        fromList: false, // true when opened from Agents roster; false from inline trace (#276)
+        pushedHistory: false,
         key: null, // the agent the trace view shows
         opener: null, // what had focus when the sheet opened
         lineage: null, // { key, nodes } from the last lineage read
@@ -18296,7 +18332,15 @@
           : '';
         agentSheet.pending = false;
         body.textContent = '';
-        $('agents-back').hidden = !trace;
+        const backBtn = $('agents-back');
+        const backLbl = $('agents-back-label');
+        const backToList = !!(trace && agentSheet.fromList);
+        backBtn.hidden = false;
+        if (backLbl) h1Text(backLbl, backToList ? 'Agents' : 'Back');
+        backBtn.setAttribute(
+          'aria-label',
+          backToList ? 'Back to all agents' : 'Back to conversation',
+        );
         h1Text($('agents-title'), trace ? (v ? v.name : 'Agent') : 'Agents');
         if (!trace) {
           agentListBody(body);
@@ -18419,8 +18463,18 @@
           agentSheet.open = true;
           sheet.hidden = false;
           agentSheet.clock = setInterval(agentsTick, 1000);
+          try {
+            history.pushState(
+              Object.assign({}, history.state || {}, { qwenAgentsSheet: true }),
+              '',
+            );
+            agentSheet.pushedHistory = true;
+          } catch (_e) {
+            agentSheet.pushedHistory = false;
+          }
         }
         closeH1Menu(false);
+        agentSheet.fromList = view === 'list';
         agentSheet.view = view;
         agentSheet.key = key || null;
         agentSheet.expanded.clear();
@@ -18433,6 +18487,19 @@
       function closeAgentsSheet(refocus) {
         if (!agentSheet.open) return;
         agentSheet.open = false;
+        agentSheet.fromList = false;
+        if (agentSheet.pushedHistory) {
+          agentSheet.pushedHistory = false;
+          try {
+            if (history.state && history.state.qwenAgentsSheet) {
+              const nextState = Object.assign({}, history.state);
+              delete nextState.qwenAgentsSheet;
+              history.replaceState(nextState, '');
+            }
+          } catch (_e) {
+            // Ignore history state errors in restricted embeds.
+          }
+        }
         $('agents-sheet').hidden = true;
         $('agents-body').textContent = '';
         if (agentSheet.clock) clearInterval(agentSheet.clock);
@@ -18442,6 +18509,12 @@
         if (refocus && back && back.isConnected) back.focus({ preventScroll: true });
         // The poll falls back to its closed-sheet pace on its next turn.
       }
+      window.addEventListener('popstate', () => {
+        if (agentSheet.open) {
+          agentSheet.pushedHistory = false;
+          closeAgentsSheet(true);
+        }
+      });
       function openAgentTrace(key) {
         if (!key) return;
         openAgentsSheet('trace', key);
@@ -18852,10 +18925,14 @@
       });
       $('agents-close').addEventListener('click', () => closeAgentsSheet(true));
       $('agents-back').addEventListener('click', () => {
-        agentSheet.view = 'list';
-        agentSheet.key = null;
-        renderAgentSheet();
-        $('agents-close').focus({ preventScroll: true });
+        if (agentSheet.view === 'trace' && agentSheet.fromList) {
+          agentSheet.view = 'list';
+          agentSheet.key = null;
+          renderAgentSheet();
+          $('agents-close').focus({ preventScroll: true });
+          return;
+        }
+        closeAgentsSheet(true);
       });
       $('agent-pause').addEventListener('click', () => {
         const v = agentFind(agentSheet.key);
@@ -18920,6 +18997,7 @@
           return;
         }
         if (t.classList.contains('ag-open') && t.dataset.key) {
+          agentSheet.fromList = true;
           agentSheet.view = 'trace';
           agentSheet.key = t.dataset.key;
           agentSheet.expanded.clear();
@@ -29208,6 +29286,22 @@
                   : null,
                 title,
               );
+              // #277: chunked loadSession replay supplies historyAnchorRecordId
+              // when older stored records precede the resumed tail, so the
+              // first Load earlier tap fetches immediately before that anchor.
+              if (
+                j.historyHasMore === true &&
+                typeof j.historyAnchorRecordId === 'string' &&
+                j.historyAnchorRecordId
+              ) {
+                transcriptAnchorRecordId = j.historyAnchorRecordId;
+                transcriptExhausted = false;
+                renderLoadEarlier();
+              } else if (j.historyHasMore === false && replay.length > 0) {
+                transcriptAnchorRecordId = null;
+                transcriptExhausted = true;
+                renderLoadEarlier();
+              }
               if (j.hasActivePrompt === true) {
                 daemonTurnActive = true;
                 if (!turnOpen) showProcessing();

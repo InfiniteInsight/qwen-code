@@ -278,11 +278,23 @@ describe('DaemonPool', () => {
       workspaceCwd: '/proj/a',
     });
     expect(r.sessionId).toBe('sess-old');
-    // The daemon's load action seeds the session's event bus with the full
-    // transcript before responding; ACP's resume action never replays
-    // history, so a cursor-0 watcher after resume would see an empty stream.
+    // The daemon's load action seeds the session's event bus with a bounded
+    // recent chunk (historyPageSize: 200 by default, #277) before responding;
+    // ACP's resume action never replays history, so a cursor-0 watcher after
+    // resume would see an empty stream.
     expect(resumeCalls).toEqual([]);
-    expect(loadCalls).toEqual([['sess-old', { workspaceCwd: '/proj/a' }]]);
+    expect(loadCalls).toEqual([
+      ['sess-old', { workspaceCwd: '/proj/a', historyPageSize: 200 }],
+    ]);
+
+    await pool.resumeSession('sess-custom', {
+      workspaceCwd: '/proj/a',
+      historyPageSize: 75,
+    });
+    expect(loadCalls[1]).toEqual([
+      'sess-custom',
+      { workspaceCwd: '/proj/a', historyPageSize: 75 },
+    ]);
   });
 
   it('does not evict an entry mid-resumeSession; the pending reservation protects it from a concurrent cap eviction', async () => {

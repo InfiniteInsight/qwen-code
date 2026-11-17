@@ -124,6 +124,13 @@ import type {
   SessionSourceUpsertResult,
 } from '@qwen-code/sdk';
 
+/**
+ * Default number of latest persisted conversation records included in the
+ * initial `loadSession` replay when resuming a session (#277). Older records
+ * remain reachable via `GET /session/:id/transcript?beforeRecordId=<anchor>`.
+ */
+export const DEFAULT_RESUME_HISTORY_PAGE_SIZE = 200;
+
 /** What {@link deleteWorkspaceFileOnPrimary} needs from a client. */
 export type PrimaryWorkspaceDeleteClient = Pick<
   DaemonClient,
@@ -628,7 +635,7 @@ export interface SessionDaemon {
   ): Promise<DaemonRestoredSession>;
   resumeSession(
     sessionId: string,
-    req: { workspaceCwd: string },
+    req: { workspaceCwd: string; historyPageSize?: number },
   ): Promise<DaemonRestoredSession>;
   cancelSubagentSession(
     sessionId: string,
@@ -2347,16 +2354,24 @@ export class DaemonPool implements SessionDaemon {
    * `getOrSpawn`'s cap eviction could reclaim this entry mid-registration. */
   async resumeSession(
     sessionId: string,
-    req: { workspaceCwd: string },
+    req: { workspaceCwd: string; historyPageSize?: number },
   ): Promise<DaemonRestoredSession> {
     const key = this.keyFor(req.workspaceCwd);
+    const historyPageSize =
+      req.historyPageSize ?? DEFAULT_RESUME_HISTORY_PAGE_SIZE;
     const release = this.hold(key);
     try {
       const entry = await this.resolveEntry(req.workspaceCwd);
       // `load`, not `resume`: see the doc above -- the history travels in the
       // load response (in-band frames + lastEventId), not the bus ring.
+      // Bound initial replay via `historyPageSize` (#277) so multi-hundred-MiB
+      // transcripts restore in a bounded chunk (`<= 4 MiB`) and expose
+      // `historyHasMore` + `historyAnchorRecordId` for backward paging.
       const restored = await this.callOn(key, entry, (client) =>
-        client.loadSession(sessionId, { workspaceCwd: key }),
+        client.loadSession(sessionId, {
+          workspaceCwd: key,
+          historyPageSize,
+        }),
       );
       this.trackSession(key, sessionId);
       this.bindClient(sessionId, entry, restored.clientId); // #110
