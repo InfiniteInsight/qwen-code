@@ -99,8 +99,19 @@ export const SESSION_TRANSCRIPT_DEFAULT_LIMIT = 100;
 export const SESSION_TRANSCRIPT_MAX_LIMIT = 500;
 export const SESSION_TRANSCRIPT_CURSOR_VERSION = 1 as const;
 export const SESSION_TRANSCRIPT_TURN_INDEX_VERSION = 1 as const;
-export const SESSION_TRANSCRIPT_MAX_INDEX_BYTES = 256 * 1024 * 1024;
+export const SESSION_TRANSCRIPT_MAX_INDEX_BYTES = 16 * 1024 * 1024 * 1024;
 export const SESSION_TRANSCRIPT_MAX_PAGE_BYTES = 4 * 1024 * 1024;
+
+export function getSessionTranscriptMaxIndexBytes(): number {
+  const raw = process.env['QWEN_TRANSCRIPT_MAX_INDEX_BYTES'];
+  if (raw !== undefined && raw.trim().length > 0) {
+    const parsed = Number(raw.trim());
+    if (Number.isSafeInteger(parsed) && parsed >= 0) {
+      return parsed;
+    }
+  }
+  return SESSION_TRANSCRIPT_MAX_INDEX_BYTES;
+}
 // Hard source-byte ceiling for one backward page, counting everything the
 // turn-alignment and pair extensions add above the soft `maxBytes`
 // selection budget. It is a backstop, not the only bound: each expansion is
@@ -2164,15 +2175,16 @@ async function buildIndex(params: {
   const { filePath, fileIdentity, snapshotSize, lastUpdated } = params;
   const sessionId = path.basename(filePath, '.jsonl');
   const executionEngine = new SessionExecutionEngineAccumulator(sessionId);
-  if (snapshotSize > SESSION_TRANSCRIPT_MAX_INDEX_BYTES) {
+  const maxIndexBytes = getSessionTranscriptMaxIndexBytes();
+  if (maxIndexBytes > 0 && snapshotSize > maxIndexBytes) {
     debugLogger.warn(
       `index rejected: snapshot too large session=${sessionId} ` +
-        `snapshotSize=${snapshotSize} max=${SESSION_TRANSCRIPT_MAX_INDEX_BYTES}`,
+        `snapshotSize=${snapshotSize} max=${maxIndexBytes}`,
     );
     throw new SessionTranscriptTooLargeError(
       sessionId,
       snapshotSize,
-      SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+      maxIndexBytes,
     );
   }
   debugLogger.debug(

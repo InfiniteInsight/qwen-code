@@ -37774,6 +37774,306 @@ PAGE_SCENARIOS.push({
   },
 });
 
+// #276: subagent sheet back-out UX across direct inline trace, roster trace,
+// mobile keyboard (:root.kb-open), and browser/phone Back (popstate).
+PAGE_SCENARIOS.push({
+  name: 'P609 interacting with a subagent keeps labeled Back and Close controls visible under :root.kb-open and backs out directly to chat or via popstate',
+  frames: () => runningAgentFrames(),
+  stub: {
+    capabilitiesFeatures: SUBAGENT_CTRL_FEATURES,
+    sessionAgentsResult: (sid: string) =>
+      agentRoster(sid, [
+        agentTask({
+          id: 'agent-a',
+          toolUseId: 'tc-1',
+          subagentType: 'Explore',
+          description: 'audit subagent sheet back-out',
+          isBackgrounded: true,
+          canPause: true,
+        }),
+      ]),
+  },
+  run: async ({ page, viewer }) => {
+    await watch(page, viewer.sessionId);
+    await page.waitForSelector('.subagent-trace', {
+      state: 'visible',
+      timeout: 15_000,
+    });
+
+    // 1. Open directly from inline .subagent-trace: #agents-back says "Back"
+    //    and closes straight back to the conversation.
+    await page.click('.subagent-trace');
+    await page.waitForSelector('#agents-sheet:not([hidden])', {
+      timeout: 5_000,
+    });
+    const directHead = (await page.evaluate(String.raw`(() => {
+      const b = document.getElementById('agents-back');
+      const c = document.getElementById('agents-close');
+      const br = b.getBoundingClientRect();
+      const cr = c.getBoundingClientRect();
+      return {
+        backHidden: b.hidden,
+        backText: (b.textContent || '').trim(),
+        closeText: (c.textContent || '').trim(),
+        backW: Math.round(br.width),
+        backH: Math.round(br.height),
+        closeW: Math.round(cr.width),
+        closeH: Math.round(cr.height),
+      };
+    })()`)) as {
+      backHidden: boolean;
+      backText: string;
+      closeText: string;
+      backW: number;
+      backH: number;
+      closeW: number;
+      closeH: number;
+    };
+    expect(
+      !directHead.backHidden &&
+        directHead.backText === 'Back' &&
+        directHead.closeText === 'Close' &&
+        directHead.backW >= 44 &&
+        directHead.backH >= 44 &&
+        directHead.closeW >= 44 &&
+        directHead.closeH >= 44,
+      `direct trace header controls invalid: ${JSON.stringify(directHead)}`,
+    );
+
+    // 2. Simulate mobile keyboard (:root.kb-open with --app-h: 420px) while
+    //    focusing #agent-msg: .ag-head (#agents-back & #agents-close) AND
+    //    #agent-msg must remain simultaneously inside [0, 420].
+    const kbMetrics = (await page.evaluate(String.raw`(() => {
+      const root = document.documentElement;
+      root.style.setProperty('--app-h', '420px');
+      root.classList.add('kb-open');
+      const msg = document.getElementById('agent-msg');
+      if (msg) msg.focus({ preventScroll: true });
+      const back = document.getElementById('agents-back').getBoundingClientRect();
+      const close = document.getElementById('agents-close').getBoundingClientRect();
+      const msgRect = msg ? msg.getBoundingClientRect() : null;
+      root.classList.remove('kb-open');
+      root.style.removeProperty('--app-h');
+      return {
+        backTop: Math.round(back.top),
+        backBottom: Math.round(back.bottom),
+        closeTop: Math.round(close.top),
+        msgBottom: msgRect ? Math.round(msgRect.bottom) : null,
+      };
+    })()`)) as {
+      backTop: number;
+      backBottom: number;
+      closeTop: number;
+      msgBottom: number | null;
+    };
+    expect(
+      kbMetrics.backTop >= 0 &&
+        kbMetrics.closeTop >= 0 &&
+        kbMetrics.backBottom <= 420 &&
+        kbMetrics.msgBottom !== null &&
+        kbMetrics.msgBottom <= 420,
+      `kb-open pushed subagent header or input off screen: ${JSON.stringify(kbMetrics)}`,
+    );
+
+    await page.click('#agents-back');
+    await page.waitForSelector('#agents-sheet', {
+      state: 'hidden',
+      timeout: 5_000,
+    });
+
+    // 3. Open from Agents chip -> trace -> #agents-back ("Agents") -> list ->
+    //    #agents-back ("Back") -> closes to chat.
+    await openAgentsFromChip(page);
+    await waitSheetRows(page, 1);
+    await page.click('#agents-body .ag-open[data-key="tc-1"]');
+    await page.waitForFunction(
+      () =>
+        (document.getElementById('agents-back')?.textContent ?? '').trim() ===
+        'Agents',
+      null,
+      { timeout: 5_000 },
+    );
+    await page.click('#agents-back');
+    await waitSheetRows(page, 1);
+    const listBackText = await page.evaluate(() =>
+      (document.getElementById('agents-back')?.textContent ?? '').trim(),
+    );
+    expect(
+      listBackText === 'Back',
+      `expected list back button to read Back, got ${JSON.stringify(listBackText)}`,
+    );
+    await page.click('#agents-back');
+    await page.waitForSelector('#agents-sheet', {
+      state: 'hidden',
+      timeout: 5_000,
+    });
+
+    // 4. Phone/browser Back (history.back() -> popstate) dismisses #agents-sheet.
+    await page.click('.subagent-trace');
+    await page.waitForSelector('#agents-sheet:not([hidden])', {
+      timeout: 5_000,
+    });
+    await page.evaluate(() => history.back());
+    await page.waitForSelector('#agents-sheet', {
+      state: 'hidden',
+      timeout: 5_000,
+    });
+
+    return 'direct Back->chat, kb-open header+input pinned inside 420px, roster Agents->Back->chat, and popstate dismissal verified';
+  },
+});
+
+// #277: chunked resumeConversation + mutually exclusive beforeRecordId / cursor
+// backward paging (no direction=backward combined with beforeRecordId or cursor).
+PAGE_SCENARIOS.push({
+  name: 'P610 chunked resumeConversation uses historyAnchorRecordId (beforeRecordId) on first load-earlier tap and bare cursor on second tap without direction=backward',
+  run: async ({ page, viewer }) => {
+    const sid = viewer.sessionId;
+    const transcriptQueries: string[] = [];
+    await page.route(`**/session/${sid}/resume`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          sessionId: sid,
+          workspaceCwd: '/stub/workspace',
+          compactedReplay: [
+            h150Frame(10, 'user_message_chunk', 'recent q2'),
+            h150Frame(11, 'agent_message_chunk', 'recent a2'),
+          ],
+          liveJournal: [],
+          lastEventId: 11,
+          historyHasMore: true,
+          historyAnchorRecordId: 'rec-tail-start',
+        }),
+      });
+    });
+    await page.route(
+      (u) => u.pathname === `/session/${sid}/transcript`,
+      async (route) => {
+        const u = new URL(route.request().url());
+        transcriptQueries.push(u.search);
+        // Enforce the real daemon's mutual-exclusion rule (#277):
+        if (
+          u.searchParams.has('direction') &&
+          (u.searchParams.has('beforeRecordId') || u.searchParams.has('cursor'))
+        ) {
+          await route.fulfill({
+            status: 400,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              error: 'Invalid transcript paging parameters',
+              code: 'invalid_transcript_query',
+            }),
+          });
+          return;
+        }
+        if (u.searchParams.get('beforeRecordId') === 'rec-tail-start') {
+          await route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              v: 1,
+              events: [
+                {
+                  id: 5,
+                  v: 1,
+                  type: 'session_update',
+                  data: {
+                    sessionUpdate: 'user_message_chunk',
+                    content: { type: 'text', text: 'middle q1' },
+                    _meta: { timestamp: 1_700_000_010_000 },
+                  },
+                },
+                {
+                  id: 6,
+                  v: 1,
+                  type: 'session_update',
+                  data: {
+                    sessionUpdate: 'agent_message_chunk',
+                    content: { type: 'text', text: 'middle a1' },
+                    _meta: { timestamp: 1_700_000_011_000 },
+                  },
+                },
+              ],
+              nextCursor: 'cursor-chunk-0',
+              hasMore: true,
+            }),
+          });
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            v: 1,
+            events: [
+              {
+                id: 1,
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'oldest q0' },
+                  _meta: { timestamp: 1_700_000_000_000 },
+                },
+              },
+              {
+                id: 2,
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'oldest a0' },
+                  _meta: { timestamp: 1_700_000_001_000 },
+                },
+              },
+            ],
+            hasMore: false,
+          }),
+        });
+      },
+    );
+
+    const resumed = await page.evaluate(
+      (id) => resumeConversation(id, '/stub/workspace', 'Chunked'),
+      sid,
+    );
+    expect(resumed === true, `resumeConversation returned ${String(resumed)}`);
+    await settlePage(page);
+
+    await page.click('#load-earlier');
+    await page.waitForFunction(
+      () => transcriptModel.items.some((i) => i.text === 'middle q1'),
+      null,
+      { timeout: 10_000 },
+    );
+    await page.click('#load-earlier');
+    await page.waitForFunction(
+      () => transcriptModel.items.some((i) => i.text === 'oldest q0'),
+      null,
+      { timeout: 10_000 },
+    );
+    const texts = await page.evaluate(() =>
+      transcriptModel.items
+        .filter((i) => i.kind === 'user' || i.kind === 'asst')
+        .map((i) => i.text),
+    );
+    expect(
+      texts.join('|') ===
+        'oldest q0|oldest a0|middle q1|middle a1|recent q2|recent a2',
+      `unexpected paged order: ${JSON.stringify(texts)}`,
+    );
+    expect(
+      transcriptQueries.length === 2 &&
+        transcriptQueries[0] === '?limit=80&beforeRecordId=rec-tail-start' &&
+        transcriptQueries[1] === '?limit=80&cursor=cursor-chunk-0',
+      `unexpected transcript queries: ${JSON.stringify(transcriptQueries)}`,
+    );
+    return `chunked resume paged backward cleanly via ${transcriptQueries.join(' -> ')}`;
+  },
+});
+
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));
   const results: Result[] = [];

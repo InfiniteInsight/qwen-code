@@ -65,11 +65,30 @@ export function createSessionResumeRoute(
       return;
     }
 
-    const body = (req.body ?? {}) as { cwd?: unknown };
+    const body = (req.body ?? {}) as {
+      cwd?: unknown;
+      historyPageSize?: unknown;
+    };
     const workspaceCwd =
       typeof body.cwd === 'string' && body.cwd.length > 0
         ? body.cwd
         : undefined;
+    const rawPageSize = body.historyPageSize;
+    if (
+      rawPageSize !== undefined &&
+      (typeof rawPageSize !== 'number' ||
+        !Number.isSafeInteger(rawPageSize) ||
+        rawPageSize < 1 ||
+        rawPageSize > 500)
+    ) {
+      res.status(400).json({
+        error: 'historyPageSize must be an integer between 1 and 500',
+        code: 'invalid_request',
+      });
+      return;
+    }
+    const historyPageSize =
+      typeof rawPageSize === 'number' ? rawPageSize : undefined;
     const actorTokenId = req.rcClient?.id;
 
     // A resumed session's workspace was never in this process's memory -
@@ -95,7 +114,10 @@ export function createSessionResumeRoute(
 
     let restored;
     try {
-      restored = await daemon.resumeSession(sessionId, { workspaceCwd });
+      restored = await daemon.resumeSession(sessionId, {
+        workspaceCwd,
+        ...(historyPageSize !== undefined ? { historyPageSize } : {}),
+      });
     } catch (err) {
       // A full workspace daemon pool (max concurrent workspace daemons, all
       // busy) is a distinct, RETRYABLE condition - surface it as its own 503
