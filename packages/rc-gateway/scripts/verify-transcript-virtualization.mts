@@ -38252,28 +38252,97 @@ PAGE_SCENARIOS.push({
     // 3. Real-time tok/s indicator on #footer-tps in the sheet (not on #h1-status)
     await page.evaluate(() => {
       showProcessing();
+      const t0 = Date.now() - 2000;
+      // Stale historical replay chunk (>15s old) is ignored and must not spike tok/s.
       renderFrame({
         type: 'session_update',
+        _meta: { serverTimestamp: Date.now() - 60000 },
         data: {
           update: {
             sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: 'a'.repeat(400) },
+            content: { type: 'text', text: 'z'.repeat(8000) },
+          },
+        },
+      });
+      // First live chunk (40 chars = 10 tokens at t0) + second chunk (400 chars = 100 tokens at t0 + 2000ms) -> 100 tokens / 2.0s = 50 tok/s
+      renderFrame({
+        type: 'session_update',
+        _meta: { serverTimestamp: t0 },
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'a'.repeat(40) },
+          },
+        },
+      });
+      renderFrame({
+        type: 'session_update',
+        _meta: { serverTimestamp: t0 + 2000 },
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'b'.repeat(400) },
           },
         },
       });
     });
     await page.waitForFunction(
-      () => (document.getElementById('footer-tps')?.textContent ?? '').endsWith('tok/s'),
+      () =>
+        (document.getElementById('footer-tps')?.textContent ?? '') ===
+        '50 tok/s',
       null,
       { timeout: 5_000 },
     );
-    const hasMainTps = await page.evaluate(() => !!document.getElementById('h1-tps'));
+    // Round 2: short intro text + large tool-call round with fewer outputTokens than a prior round (120 output + 30 thought = 150 tokens in durationMs = 2500ms -> 60 tok/s)
+    await page.evaluate(() => {
+      renderFrame({
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: {
+              usage: { inputTokens: 1000, outputTokens: 800, totalTokens: 1800 },
+              durationMs: 8000,
+            },
+          },
+        },
+      });
+      renderFrame({
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: {
+              usage: {
+                inputTokens: 1200,
+                outputTokens: 120,
+                thoughtTokens: 30,
+                totalTokens: 1350,
+              },
+              durationMs: 2500,
+            },
+          },
+        },
+      });
+    });
+    await page.waitForFunction(
+      () =>
+        (document.getElementById('footer-tps')?.textContent ?? '') ===
+        '60 tok/s',
+      null,
+      { timeout: 5_000 },
+    );
+    const hasMainTps = await page.evaluate(
+      () => !!document.getElementById('h1-tps'),
+    );
     const footerTps = await page.textContent('#footer-tps');
     expect(
-      !hasMainTps && !!footerTps && footerTps.endsWith('tok/s'),
-      `expected live tok/s only on #footer-tps in the sheet, got ${JSON.stringify({ hasMainTps, footerTps })}`,
+      !hasMainTps && footerTps === '60 tok/s',
+      `expected live tok/s 60 tok/s on #footer-tps in the sheet, got ${JSON.stringify({ hasMainTps, footerTps })}`,
     );
-    return `thinking effort -> xhigh, Open tab -> POST /rc/terminals, sheet speed ${footerTps}`;
+    return `thinking effort -> xhigh, Open tab -> POST /rc/terminals, sheet speed 50 tok/s -> ${footerTps}`;
   },
 });
 

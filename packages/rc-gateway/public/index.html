@@ -9937,6 +9937,9 @@
         if (!id) return;
         if (status === 'completed' || status === 'failed' || status === 'cancelled') {
           runningToolIds.delete(id);
+          if (runningToolIds.size === 0 && typeof tpsState === 'object') {
+            tpsState.stepStartAt = Date.now();
+          }
           // The row just settled, so the transcript went quiet. That is exactly
           // the gap this indicator exists for, so restart the beat.
           noteFrameActivity();
@@ -10232,21 +10235,21 @@
       // char estimate (chars / 4, matching the CLI's LoadingIndicator) while
       // chunks arrive and _meta.usage.outputTokens when the daemon reports it.
       const tpsState = {
+        stepStartAt: 0,
         burstStartAt: 0,
         burstLastAt: 0,
+        burstFirstChars: 0,
         burstChars: 0,
-        burstBaseOut: 0,
-        burstOut: 0,
         lastRate: 0,
         afterTool: false,
         rafTimer: null,
       };
       function resetTps(clearLast) {
+        tpsState.stepStartAt = Date.now();
         tpsState.burstStartAt = 0;
         tpsState.burstLastAt = 0;
+        tpsState.burstFirstChars = 0;
         tpsState.burstChars = 0;
-        tpsState.burstBaseOut = 0;
-        tpsState.burstOut = 0;
         tpsState.afterTool = false;
         if (clearLast) tpsState.lastRate = 0;
         if (tpsState.rafTimer) {
@@ -10261,53 +10264,42 @@
         return rounded + ' tok/s';
       }
       function computeLiveTps() {
-        const running = typeof turnRunning === 'function' && turnRunning();
         if (tpsState.burstStartAt > 0) {
-          const endAt = running
-            ? Math.max(tpsState.burstLastAt, Date.now())
-            : tpsState.burstLastAt;
-          const elapsedSec = Math.max(
-            0.15,
-            (endAt - tpsState.burstStartAt) / 1000,
-          );
-          const charTokens = Math.max(1, Math.round(tpsState.burstChars / 4));
-          const usageDelta = Math.max(
+          const spanMs = Math.max(
             0,
-            tpsState.burstOut - tpsState.burstBaseOut,
+            tpsState.burstLastAt - tpsState.burstStartAt,
           );
-          const tokens =
-            tpsState.burstChars > 0
-              ? Math.max(charTokens, usageDelta)
-              : usageDelta;
-          if (tokens > 0 && elapsedSec > 0) {
-            const rate = tokens / elapsedSec;
+          const postFirstChars = Math.max(
+            0,
+            tpsState.burstChars - tpsState.burstFirstChars,
+          );
+          if (spanMs >= 120 && postFirstChars > 0) {
+            const rate = postFirstChars / 4 / (spanMs / 1000);
             tpsState.lastRate = rate;
             return rate;
           }
+          if (tpsState.lastRate > 0) {
+            return tpsState.lastRate;
+          }
+          const baseAt = tpsState.stepStartAt || tpsState.burstStartAt;
+          const stepSec = Math.max(
+            1,
+            (Math.max(tpsState.burstLastAt, Date.now()) - baseAt) / 1000,
+          );
+          const estTokens = Math.max(1, Math.round(tpsState.burstChars / 4));
+          const rate = estTokens / stepSec;
+          tpsState.lastRate = rate;
+          return rate;
         }
         return tpsState.lastRate;
       }
       function finishTpsBurst() {
         if (tpsState.burstStartAt > 0) {
-          const elapsedSec = Math.max(
-            0.15,
-            (Math.max(tpsState.burstLastAt, tpsState.burstStartAt) -
-              tpsState.burstStartAt) /
-              1000,
-          );
-          const charTokens =
-            tpsState.burstChars > 0
-              ? Math.max(1, Math.round(tpsState.burstChars / 4))
-              : 0;
-          const usageDelta = Math.max(
-            0,
-            tpsState.burstOut - tpsState.burstBaseOut,
-          );
-          const tokens = Math.max(charTokens, usageDelta);
-          if (tokens > 0 && elapsedSec > 0) {
-            tpsState.lastRate = tokens / elapsedSec;
-          }
+          computeLiveTps();
           tpsState.burstStartAt = 0;
+          tpsState.burstLastAt = 0;
+          tpsState.burstFirstChars = 0;
+          tpsState.burstChars = 0;
         }
       }
       function tpsText() {
@@ -10320,25 +10312,37 @@
           h1Text($('footer-tps'), tpsText());
         }, 120);
       }
-      function noteTpsChunk(text) {
+      function noteTpsChunk(text, sentAt) {
         if (insideReplay || typeof text !== 'string' || !text) return;
         const now = Date.now();
-        if (!tpsState.burstStartAt || tpsState.afterTool) {
-          tpsState.burstStartAt = now;
-          tpsState.burstChars = 0;
-          tpsState.burstBaseOut = tpsState.burstOut;
-          tpsState.afterTool = false;
+        // Ignore stale ring-buffer replay frames (>15s old) arriving on an
+        // unanchored cursor-0 stream attach so historical text never spikes tok/s.
+        if (typeof sentAt === 'number' && sentAt > 0 && now - sentAt > 15000) {
+          return;
         }
-        tpsState.burstLastAt = now;
-        tpsState.burstChars += text.length;
+        const stamp = typeof sentAt === 'number' && sentAt > 0 ? sentAt : now;
+        if (!tpsState.burstStartAt || tpsState.afterTool) {
+          tpsState.burstStartAt = stamp;
+          tpsState.burstLastAt = stamp;
+          tpsState.burstFirstChars = text.length;
+          tpsState.burstChars = text.length;
+          tpsState.afterTool = false;
+        } else {
+          tpsState.burstLastAt =
+            stamp >= tpsState.burstLastAt
+              ? stamp
+              : Math.max(tpsState.burstLastAt, now);
+          tpsState.burstChars += text.length;
+        }
         scheduleTpsRender();
       }
       function noteTpsToolBoundary() {
         if (insideReplay) return;
         if (tpsState.burstStartAt > 0) {
           finishTpsBurst();
-          tpsState.afterTool = true;
         }
+        tpsState.afterTool = true;
+        tpsState.stepStartAt = Date.now();
       }
       // { total, window, estimated } from GET /session/:id/context-usage, or
       // null when that read has not answered or reported no window.
@@ -16264,25 +16268,60 @@
 
       // A usage-bearing frame (_meta.usage) updates the live token counts. The
       // footer only shows once we know a model, so an early usage frame is kept.
-      function updateLiveTokens(usage) {
+      function updateLiveTokens(usage, meta) {
         if (!usage) return;
         const i = usage.inputTokens;
         const o = usage.outputTokens;
+        const th = usage.thoughtTokens;
         let changed = false;
         if (typeof i === 'number' && i >= 0 && i !== liveIn) {
           liveIn = i;
           changed = true;
         }
-        if (typeof o === 'number' && o >= 0 && o !== liveOut) {
-          liveOut = o;
-          if (!insideReplay) {
-            tpsState.burstOut = o;
-            if (tpsState.burstStartAt > 0) {
-              tpsState.burstLastAt = Date.now();
-              computeLiveTps();
+        if (typeof o === 'number' && o >= 0) {
+          if (o !== liveOut) {
+            liveOut = o;
+            changed = true;
+          }
+          const serverDurationMs =
+            meta && typeof meta.durationMs === 'number' && meta.durationMs > 0
+              ? meta.durationMs
+              : 0;
+          if (!insideReplay && serverDurationMs > 0) {
+            const roundTokens =
+              o + (typeof th === 'number' && th > 0 ? th : 0);
+            if (roundTokens > 0) {
+              const streamSpanMs =
+                tpsState.burstStartAt > 0
+                  ? Math.max(0, tpsState.burstLastAt - tpsState.burstStartAt)
+                  : 0;
+              const charTokens = Math.round(tpsState.burstChars / 4);
+              const useStreamSpan =
+                streamSpanMs >= 250 &&
+                charTokens > 0 &&
+                roundTokens <= charTokens * 1.25 &&
+                tpsState.burstChars > tpsState.burstFirstChars;
+              if (useStreamSpan) {
+                const postFirstFraction =
+                  (tpsState.burstChars - tpsState.burstFirstChars) /
+                  tpsState.burstChars;
+                const postFirstTokens = Math.max(
+                  1,
+                  roundTokens * postFirstFraction,
+                );
+                tpsState.lastRate = postFirstTokens / (streamSpanMs / 1000);
+              } else {
+                tpsState.lastRate = roundTokens / (serverDurationMs / 1000);
+              }
+              tpsState.burstStartAt = 0;
+              tpsState.burstLastAt = 0;
+              tpsState.burstFirstChars = 0;
+              tpsState.burstChars = 0;
+              tpsState.stepStartAt = Date.now();
+              scheduleTpsRender();
+              changed = true;
             }
           }
-          changed = true;
         }
         if (changed && ctxInfo) renderFooter();
       }
@@ -16662,7 +16701,7 @@
         }
         // Token usage rides on agent_message_chunk _meta.usage (the frame may
         // carry empty text), so read it before the text guard below.
-        updateLiveTokens(u._meta && u._meta.usage);
+        updateLiveTokens(u._meta && u._meta.usage, u._meta);
         // Counted on every path: each user record arms the next turn
         // boundary. Drawn unless it is this window's own echo (#114), which
         // the send path already put on screen at the moment you typed it.
@@ -16758,7 +16797,7 @@
           return;
         }
         if (su === 'agent_message_chunk' && text) {
-          noteTpsChunk(text);
+          noteTpsChunk(text, sentAt);
           // #71: the hide that used to sit here is now the quiet beat's job. It
           // runs once at the top of this function for every frame, which is
           // what the two separate hides here could not do: they stopped the
@@ -16776,7 +16815,7 @@
           return;
         }
         if (su === 'agent_thought_chunk' && text) {
-          noteTpsChunk(text);
+          noteTpsChunk(text, sentAt);
           return appendThought(text, sentAt);
         }
         if (su === 'tool_call' || su === 'tool_call_update') {
