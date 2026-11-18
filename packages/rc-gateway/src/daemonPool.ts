@@ -18,6 +18,8 @@ import type {
   DaemonSessionSupportedCommandsStatus,
   DaemonApprovalMode,
   DaemonApprovalModeResult,
+  DaemonSessionConfigOptionResult,
+  ReasoningSelection,
   SetModelResult,
   RestoreSessionRequest,
   DaemonRestoredSession,
@@ -509,6 +511,12 @@ export interface SessionDaemon {
     modelId: string,
     clientId?: string,
   ): Promise<SetModelResult>;
+  setSessionConfigOption?(
+    sessionId: string,
+    configId: 'reasoning_effort',
+    value: ReasoningSelection,
+    clientOrOptions?: string | { clientId?: string; persist?: boolean },
+  ): Promise<DaemonSessionConfigOptionResult>;
   sessionContext(
     sessionId: string,
     clientId?: string,
@@ -2591,7 +2599,8 @@ export class DaemonPool implements SessionDaemon {
     // daemon. Recorded after the call, because a failed transfer produced no
     // replacement to record.
     const replacementId = (result as { sessionId?: unknown } | null)?.sessionId;
-    const replacementClientId = (result as { clientId?: unknown } | null)?.clientId;
+    const replacementClientId = (result as { clientId?: unknown } | null)
+      ?.clientId;
     if (
       ownerKey !== undefined &&
       typeof replacementId === 'string' &&
@@ -2921,6 +2930,22 @@ export class DaemonPool implements SessionDaemon {
   ): Promise<SetModelResult> {
     return this.withSessionDeathTrigger(sessionId, (client) =>
       client.setSessionModel(sessionId, modelId, clientId),
+    );
+  }
+
+  async setSessionConfigOption(
+    sessionId: string,
+    configId: 'reasoning_effort',
+    value: ReasoningSelection,
+    clientOrOptions?: string | { clientId?: string; persist?: boolean },
+  ): Promise<DaemonSessionConfigOptionResult> {
+    return this.withSessionDeathTrigger(sessionId, (client) =>
+      client.setSessionConfigOption(
+        sessionId,
+        configId,
+        value,
+        clientOrOptions,
+      ),
     );
   }
 

@@ -1719,7 +1719,10 @@ export async function startStubDaemon(
     const name = String(body['name'] ?? '');
     const description = String(body['description'] ?? '');
     const systemPrompt = String(body['systemPrompt'] ?? '');
-    if (dynamicAgents.some((a) => a['name'] === name) || (name === 'reviewer' && !deletedAgentNames.has('reviewer'))) {
+    if (
+      dynamicAgents.some((a) => a['name'] === name) ||
+      (name === 'reviewer' && !deletedAgentNames.has('reviewer'))
+    ) {
       res.status(409).json({
         error: `Agent already exists: ${name}`,
         code: 'agent_already_exists',
@@ -3240,12 +3243,10 @@ export async function startStubDaemon(
     }
     const scope = body['scope'];
     if (scope !== 'workspace' && scope !== 'global') {
-      res
-        .status(400)
-        .json({
-          error: '`scope` must be "workspace" or "global"',
-          code: 'invalid_scope',
-        });
+      res.status(400).json({
+        error: '`scope` must be "workspace" or "global"',
+        code: 'invalid_scope',
+      });
       return;
     }
     const modeRaw = body['mode'];
@@ -3254,12 +3255,10 @@ export async function startStubDaemon(
       modeRaw !== 'append' &&
       modeRaw !== 'replace'
     ) {
-      res
-        .status(400)
-        .json({
-          error: '`mode` must be "append", "replace", or omitted',
-          code: 'invalid_mode',
-        });
+      res.status(400).json({
+        error: '`mode` must be "append", "replace", or omitted',
+        code: 'invalid_mode',
+      });
       return;
     }
     const mode: 'append' | 'replace' =
@@ -3272,12 +3271,10 @@ export async function startStubDaemon(
       return;
     }
     if (Buffer.byteLength(content, 'utf8') > 1024 * 1024) {
-      res
-        .status(400)
-        .json({
-          error: '`content` exceeds the 1048576-byte limit',
-          code: 'content_too_large',
-        });
+      res.status(400).json({
+        error: '`content` exceeds the 1048576-byte limit',
+        code: 'content_too_large',
+      });
       return;
     }
     const cwd = opts.workspaceCwd ?? '/proj';
@@ -4343,6 +4340,30 @@ export async function startStubDaemon(
     res.status(200).json(opts.setModelResult ?? { modelId: req.body?.modelId });
   });
 
+  app.post('/session/:id/config-option', express.json(), (req, res) => {
+    const value =
+      typeof req.body?.value === 'string' ? req.body.value : 'default';
+    res.status(200).json({
+      configOptions: [
+        {
+          id: 'reasoning_effort',
+          name: 'Reasoning effort',
+          currentValue: value,
+          options: [
+            { value: 'none', name: 'Thinking off' },
+            { value: 'default', name: 'Default' },
+            { value: 'low', name: 'Low' },
+            { value: 'medium', name: 'Medium' },
+            { value: 'high', name: 'High' },
+            { value: 'xhigh', name: 'Extra high' },
+            { value: 'max', name: 'Max' },
+          ],
+        },
+      ],
+      persisted: req.body?.persist === true,
+    });
+  });
+
   app.post('/session/:id/prompt', (req, res) => {
     const status = opts.promptStatus ?? 200;
     state.lastPromptBody = req.body;
@@ -4354,14 +4375,17 @@ export async function startStubDaemon(
     const respond = () => {
       const sessionId = String(req.params.id);
       if (status === 200 && opts.promptBroadcastsEvents) {
-        const rawPrompt = (req.body as { prompt?: unknown } | undefined)?.prompt;
+        const rawPrompt = (req.body as { prompt?: unknown } | undefined)
+          ?.prompt;
         const promptText =
           typeof rawPrompt === 'string'
             ? rawPrompt
             : Array.isArray(rawPrompt)
               ? rawPrompt
                   .map((b) =>
-                    b && typeof b === 'object' && typeof (b as { text?: unknown }).text === 'string'
+                    b &&
+                    typeof b === 'object' &&
+                    typeof (b as { text?: unknown }).text === 'string'
                       ? (b as { text: string }).text
                       : '',
                   )
@@ -4891,13 +4915,11 @@ export async function startStubDaemon(
       previous['title'] === checked.title &&
       previous['description'] === description
     ) {
-      res
-        .status(200)
-        .json({
-          revision: held.revision,
-          source: previous,
-          change: 'unchanged',
-        });
+      res.status(200).json({
+        revision: held.revision,
+        source: previous,
+        change: 'unchanged',
+      });
       return;
     }
     if (!previous && held.sources.length >= 200) {
@@ -5054,12 +5076,10 @@ export async function startStubDaemon(
       return;
     }
     if (opts.goal?.untrusted) {
-      res
-        .status(403)
-        .json({
-          error: 'Workspace is not trusted.',
-          code: 'untrusted_workspace',
-        });
+      res.status(403).json({
+        error: 'Workspace is not trusted.',
+        code: 'untrusted_workspace',
+      });
       return;
     }
     const current = s135Goal(sessionId);

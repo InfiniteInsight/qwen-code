@@ -1052,6 +1052,7 @@
         content: '\00b7';
         margin-right: 8px;
       }
+      #h1-tps,
       #h1-tokens,
       #h1-mode {
         flex: none;
@@ -1147,13 +1148,18 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      #session-footer .seg {
+      #session-footer .seg,
+      #session-footer .seg-effort {
         display: flex;
         border: 1px solid var(--g1-edge);
         border-radius: 8px;
         overflow: hidden;
       }
-      #session-footer .seg button {
+      #session-footer .seg-effort {
+        flex-wrap: wrap;
+      }
+      #session-footer .seg button,
+      #session-footer .seg-effort button {
         flex: 1 1 0;
         min-height: 36px;
         padding: 0 10px;
@@ -1163,17 +1169,39 @@
         color: var(--g1-ink-hi);
         font-size: 14px;
       }
-      #session-footer .seg button + button {
+      #session-footer .seg-effort button {
+        flex: 1 1 auto;
+        white-space: nowrap;
+      }
+      #session-footer .seg button + button,
+      #session-footer .seg-effort button + button {
         border-left: 1px solid var(--g1-edge);
       }
-      #session-footer .seg button[aria-pressed='true'] {
+      #session-footer .seg button[aria-pressed='true'],
+      #session-footer .seg-effort button[aria-pressed='true'] {
         background: var(--g1-accent);
         color: #fff;
       }
-      #footer-mode-note:empty {
+      #session-footer .sh-ef-lbl,
+      #session-footer .sh-ht-lbl {
+        font-size: 12px;
+        color: var(--g1-ink-mid);
+      }
+      #footer-tps {
+        margin-left: 8px;
+        font-size: 12px;
+        color: var(--g1-ink-mid);
+        white-space: nowrap;
+      }
+      #footer-tps:empty {
         display: none;
       }
-      #footer-mode-note {
+      #footer-mode-note:empty,
+      #footer-effort-note:empty {
+        display: none;
+      }
+      #footer-mode-note,
+      #footer-effort-note {
         font-size: 12px;
         color: var(--g1-ink-mid);
       }
@@ -1280,6 +1308,28 @@
       }
       #h1-host-tab #host-tab-remove {
         color: var(--g1-danger);
+      }
+      /* #278. Open a WSL host tab when the watched conversation has no live or
+         crashed host tab on screen. */
+      #h1-open-host-tab[hidden] {
+        display: none;
+      }
+      #h1-open-host-tab .ha-go {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-left: auto;
+      }
+      #h1-open-host-tab .ha-state {
+        color: var(--g1-ink-mid);
+      }
+      #h1-open-host-tab button {
+        min-height: 36px;
+        padding: 0 14px;
+        border-radius: 8px;
+        background: var(--g1-page);
+        color: var(--g1-ink-hi);
+        font-size: 14px;
       }
       /* #256. More > Host > Closed tabs: one entry per conversation, its
          title, folder and how the tab ended, and a 44px Reopen. */
@@ -4751,6 +4801,10 @@
               <span class="lbl">Search across conversations</span><span class="val"></span>
               <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
             </button>
+            <button type="button" class="row" id="more-open-host-tab" data-action="open-host-tab" hidden>
+              <span class="lbl">Open in WSL tab</span><span class="val" id="more-open-host-tab-val"></span>
+              <span class="chev" aria-hidden="true"></span>
+            </button>
           </div>
           <div class="mgrp" role="group" aria-labelledby="more-g-ws">
             <div class="grp" id="more-g-ws">Workspace<span id="more-ws"></span></div>
@@ -6336,6 +6390,7 @@
             <span class="dot" id="h1-dot" aria-hidden="true"></span>
             <span id="h1-state">no conversation</span>
             <span class="f" id="h1-model"></span>
+            <span class="f" id="h1-tps"></span>
             <span class="f" id="h1-tokens"></span>
             <span class="f" id="h1-mode"></span>
             <span class="sp"></span>
@@ -9857,6 +9912,7 @@
       // the indicator cannot be left claiming work that stopped.
       let daemonTurnActive = false;
       function endTurn() {
+        if (typeof finishTpsBurst === 'function') finishTpsBurst();
         turnOpen = false;
         daemonTurnActive = false;
         runningToolIds.clear();
@@ -9881,6 +9937,7 @@
         setProcessing(false);
       }
       function showProcessing() {
+        if (typeof resetTps === 'function') resetTps(false);
         turnOpen = true;
         stopQuietWatch();
         setProcessing(true);
@@ -9972,6 +10029,7 @@
         ctxInfo = null;
         liveIn = 0;
         liveOut = 0;
+        if (typeof resetTps === 'function') resetTps(true);
         ctxUsage = null;
         // A new watch starts with a fresh turn count (replayed history
         // re-establishes it frame by frame) and no placed fork button.
@@ -10151,10 +10209,129 @@
       // daemon, per conversation, and the drawer's persist box (see renderFooter).
       const MODE_NAME = 'approval-mode';
       const MODE_PERSIST_NAME = 'approval-persist';
+      const EFFORT_NAME = 'reasoning-effort';
+      const EFFORT_PERSIST_NAME = 'reasoning-effort-persist';
       let caps = null; // GET /rc/capabilities body (task #27 gating)
-      let ctxInfo = null; // { modelName, modeName, currentModeId, availableModes, cwd }
+      let ctxInfo = null; // { modelName, modeName, currentModeId, availableModes, currentEffort, effortName, availableEfforts, cwd }
       let liveIn = 0; // last turn's prompt (input) tokens
       let liveOut = 0; // last turn's completion (output) tokens
+      // #278. Real-time generation speed (tok/s) on the status line beside the
+      // model name and in the status sheet. Measured per active streaming burst
+      // (reset when a new prompt starts or after a tool call settles, so tool
+      // execution time does not dilute generation speed), using the streaming
+      // char estimate (chars / 4, matching the CLI's LoadingIndicator) while
+      // chunks arrive and _meta.usage.outputTokens when the daemon reports it.
+      const tpsState = {
+        burstStartAt: 0,
+        burstLastAt: 0,
+        burstChars: 0,
+        burstBaseOut: 0,
+        burstOut: 0,
+        lastRate: 0,
+        afterTool: false,
+        rafTimer: null,
+      };
+      function resetTps(clearLast) {
+        tpsState.burstStartAt = 0;
+        tpsState.burstLastAt = 0;
+        tpsState.burstChars = 0;
+        tpsState.burstBaseOut = 0;
+        tpsState.burstOut = 0;
+        tpsState.afterTool = false;
+        if (clearLast) tpsState.lastRate = 0;
+        if (tpsState.rafTimer) {
+          clearTimeout(tpsState.rafTimer);
+          tpsState.rafTimer = null;
+        }
+      }
+      function formatTps(rate) {
+        if (!Number.isFinite(rate) || rate <= 0) return '';
+        const rounded =
+          rate >= 10 ? String(Math.round(rate)) : rate.toFixed(1);
+        return rounded + ' tok/s';
+      }
+      function computeLiveTps() {
+        const running = typeof turnRunning === 'function' && turnRunning();
+        if (tpsState.burstStartAt > 0) {
+          const endAt = running
+            ? Math.max(tpsState.burstLastAt, Date.now())
+            : tpsState.burstLastAt;
+          const elapsedSec = Math.max(
+            0.15,
+            (endAt - tpsState.burstStartAt) / 1000,
+          );
+          const charTokens = Math.max(1, Math.round(tpsState.burstChars / 4));
+          const usageDelta = Math.max(
+            0,
+            tpsState.burstOut - tpsState.burstBaseOut,
+          );
+          const tokens =
+            tpsState.burstChars > 0
+              ? Math.max(charTokens, usageDelta)
+              : usageDelta;
+          if (tokens > 0 && elapsedSec > 0) {
+            const rate = tokens / elapsedSec;
+            tpsState.lastRate = rate;
+            return rate;
+          }
+        }
+        return tpsState.lastRate;
+      }
+      function finishTpsBurst() {
+        if (tpsState.burstStartAt > 0) {
+          const elapsedSec = Math.max(
+            0.15,
+            (Math.max(tpsState.burstLastAt, tpsState.burstStartAt) -
+              tpsState.burstStartAt) /
+              1000,
+          );
+          const charTokens =
+            tpsState.burstChars > 0
+              ? Math.max(1, Math.round(tpsState.burstChars / 4))
+              : 0;
+          const usageDelta = Math.max(
+            0,
+            tpsState.burstOut - tpsState.burstBaseOut,
+          );
+          const tokens = Math.max(charTokens, usageDelta);
+          if (tokens > 0 && elapsedSec > 0) {
+            tpsState.lastRate = tokens / elapsedSec;
+          }
+          tpsState.burstStartAt = 0;
+        }
+      }
+      function tpsText() {
+        return formatTps(computeLiveTps());
+      }
+      function scheduleTpsRender() {
+        if (tpsState.rafTimer) return;
+        tpsState.rafTimer = setTimeout(() => {
+          tpsState.rafTimer = null;
+          renderStatusLine();
+          const ft = $('footer-tps');
+          if (ft) h1Text(ft, tpsText());
+        }, 120);
+      }
+      function noteTpsChunk(text) {
+        if (insideReplay || typeof text !== 'string' || !text) return;
+        const now = Date.now();
+        if (!tpsState.burstStartAt || tpsState.afterTool) {
+          tpsState.burstStartAt = now;
+          tpsState.burstChars = 0;
+          tpsState.burstBaseOut = tpsState.burstOut;
+          tpsState.afterTool = false;
+        }
+        tpsState.burstLastAt = now;
+        tpsState.burstChars += text.length;
+        scheduleTpsRender();
+      }
+      function noteTpsToolBoundary() {
+        if (insideReplay) return;
+        if (tpsState.burstStartAt > 0) {
+          finishTpsBurst();
+          tpsState.afterTool = true;
+        }
+      }
       // { total, window, estimated } from GET /session/:id/context-usage, or
       // null when that read has not answered or reported no window.
       let ctxUsage = null;
@@ -10409,6 +10586,9 @@
       // owner event stream carries a tab's start or end.
       const hostTabs = {
         bySession: new Map(), // sessionId -> the crashed or lost record shown
+        liveSessions: new Set(), // #278: sessionIds with a live WSL tab
+        loaded: false,
+        openBusy: new Set(), // sessionIds whose Open tab is in flight
         closed: [], // #256: each conversation's newest closed or quit record, newest first
         launcher: null, // { state, seenMsAgo } from the last read
         autoReopen: false,
@@ -10440,9 +10620,13 @@
       }
       async function readHostTabs() {
         if (!token() || !hostTabsOn()) {
+          hostTabs.loaded = false;
+          hostTabs.liveSessions = new Set();
           if (hostTabs.bySession.size) {
             hostTabs.bySession = new Map();
             renderHostTabs();
+          } else {
+            renderHostTabLine();
           }
           if (hostTabs.closed.length) hostTabs.closed = [];
           renderClosedTabs();
@@ -10459,7 +10643,9 @@
         }
         if (seq !== hostTabs.seq) return;
         if (res.status === 404 || res.status === 403 || res.status === 401) {
+          hostTabs.loaded = false;
           hostTabs.bySession = new Map();
+          hostTabs.liveSessions = new Set();
           hostTabs.closed = [];
           renderHostTabs();
           renderClosedTabs();
@@ -10470,9 +10656,14 @@
         if (seq !== hostTabs.seq) return;
         if (!body || !Array.isArray(body.tabs)) return;
         const by = new Map();
+        const liveSet = new Set();
         for (const t of body.tabs) {
           if (!t || typeof t.tabId !== 'string') continue;
           if (typeof t.sessionId !== 'string') continue;
+          if (t.state === 'live') {
+            liveSet.add(t.sessionId);
+            continue;
+          }
           // Live, quit, closed and replaced draw no badge on the list (closed
           // and quit ones are listed by closedTabsOf below); a dismissed
           // record keeps its place on the host and loses its badge here.
@@ -10483,7 +10674,9 @@
             by.set(t.sessionId, t);
           }
         }
+        hostTabs.loaded = true;
         hostTabs.bySession = by;
+        hostTabs.liveSessions = liveSet;
         hostTabs.closed = closedTabsOf(body.tabs, body.now);
         hostTabs.launcher =
           body.launcher && typeof body.launcher.state === 'string'
@@ -10575,7 +10768,86 @@
         if (state === 'never') return 'no launcher has ever checked in here';
         return 'the launcher cannot be read';
       }
+      // #278. Open a WSL tab from the status sheet (or More > This
+      // conversation) when the watched conversation is open in the Web UI with
+      // a daemon, is not running in WSL, and has no crashed/lost tab line.
+      const openHostTabSheet = document.createElement('div');
+      openHostTabSheet.id = 'h1-open-host-tab';
+      openHostTabSheet.className = 'sh-row';
+      openHostTabSheet.hidden = true;
+      {
+        const lbl = document.createElement('span');
+        lbl.className = 'sh-ht-lbl';
+        lbl.textContent = 'WSL tab';
+        const go = document.createElement('span');
+        go.className = 'ha-go';
+        const st = document.createElement('span');
+        st.id = 'open-host-tab-state';
+        st.className = 'ha-state';
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.id = 'open-host-tab-btn';
+        btn.textContent = 'Open tab';
+        btn.addEventListener('click', () => {
+          if (watchedSessionId) void openHostTabForSession(watchedSessionId);
+        });
+        go.append(st, btn);
+        openHostTabSheet.append(lbl, go);
+      }
+      async function openHostTabForSession(sessionId) {
+        if (!sessionId || hostTabs.openBusy.has(sessionId)) return;
+        hostTabs.openBusy.add(sessionId);
+        renderHostTabLine();
+        try {
+          await requestHostTerminal(sessionId);
+        } finally {
+          hostTabs.openBusy.delete(sessionId);
+          renderHostTabLine();
+          await readHostTabs();
+        }
+      }
+      {
+        const moreOpenBtn = $('more-open-host-tab');
+        if (moreOpenBtn) {
+          moreOpenBtn.addEventListener('click', () => {
+            if (!watchedSessionId) return;
+            setMoreOpen(false);
+            void openHostTabForSession(watchedSessionId);
+          });
+        }
+      }
+      function renderOpenHostTabControls() {
+        const can = hostTabsOn() && !!watchedSessionId;
+        const crashed = can ? hostTabFor(watchedSessionId) : null;
+        const live = can && hostTabs.liveSessions.has(watchedSessionId);
+        const busy = can && hostTabs.openBusy.has(watchedSessionId);
+        const moreRow = $('more-open-host-tab');
+        const moreVal = $('more-open-host-tab-val');
+        if (moreRow) {
+          moreRow.hidden = !can || live;
+          moreRow.disabled = busy;
+          if (moreVal) {
+            h1Text(moreVal, busy ? 'opening…' : 'not open on host');
+          }
+        }
+        // In the status sheet, #h1-host-tab already renders Reopen when the
+        // tab crashed or was lost; #h1-open-host-tab covers conversations that
+        // have no crashed/lost record and are not running in WSL (or shows
+        // "open on the host" when live).
+        if (!can || !hostTabs.loaded || crashed) {
+          openHostTabSheet.hidden = true;
+          return;
+        }
+        openHostTabSheet.hidden = false;
+        const st = openHostTabSheet.querySelector('#open-host-tab-state');
+        const btn = openHostTabSheet.querySelector('#open-host-tab-btn');
+        h1Text(st, live ? 'open on the host' : 'not running');
+        btn.hidden = live;
+        btn.disabled = busy;
+        h1Text(btn, busy ? 'opening…' : 'Open tab');
+      }
       function renderHostTabLine() {
+        renderOpenHostTabControls();
         const t = hostTabsOn() ? hostTabFor(watchedSessionId) : null;
         hostTabSheet.hidden = !t;
         if (!t) return;
@@ -11427,6 +11699,7 @@
       // drawer's select did; the select stays in the box, unshown, as that
       // handler's input. Export moved to the ⋯ menu.
       let footerModeCache = null; // { sig, col, keep }, see renderFooter
+      let footerEffortCache = null; // { sig, col, keep }, see renderFooter
       function renderFooter() {
         const f = $('session-footer');
         renderStatusLine();
@@ -11443,6 +11716,9 @@
         const hasModels =
           Array.isArray(ctxInfo.availableModels) &&
           ctxInfo.availableModels.length > 1;
+        const hasEfforts =
+          Array.isArray(ctxInfo.availableEfforts) &&
+          ctxInfo.availableEfforts.length > 1;
         // #173: what had focus in the sheet, to give it back if the redraw
         // keeps that very node.
         const hadFocus = f.contains(document.activeElement)
@@ -11450,7 +11726,9 @@
           : null;
         f.innerHTML = '';
         if (!hasModes) footerModeCache = null;
+        if (!hasEfforts) footerEffortCache = null;
         let keep = null; // the keep-this-mode box, drawn after the folder
+        let keepEffort = null; // the keep-this-effort box, drawn after the folder
         const row = (label, ...kids) => {
           const r = document.createElement('div');
           r.className = 'sh-row';
@@ -11478,7 +11756,10 @@
           model.textContent = modelText;
         }
         if (!ctxInfo.modelName) model.classList.add('none');
-        f.append(row('Model', model));
+        const ftps = document.createElement('span');
+        ftps.id = 'footer-tps';
+        ftps.textContent = tpsText();
+        f.append(row('Model', model, ftps));
         if (hasModes) {
           // #182. The daemon's mode is what the control shows: it is the mode
           // the session is actually in, and the page never sends one on the
@@ -11580,6 +11861,109 @@
           t.textContent = ctxInfo.modeName;
           f.append(row('Mode', t));
         }
+        if (hasEfforts) {
+          const knownEffort = (id) =>
+            ctxInfo.availableEfforts.find((m) => m.id === id);
+          const chosenEffort = uiSessionRead(
+            EFFORT_NAME,
+            watchedSessionId,
+            (v) => typeof v === 'string' && !!knownEffort(v),
+          );
+          const shownEffort = knownEffort(ctxInfo.currentEffort)
+            ? ctxInfo.currentEffort
+            : chosenEffort;
+          const effortSig = JSON.stringify([
+            ctxInfo.availableEfforts.map((m) => [m.id, m.name]),
+            shownEffort,
+            chosenEffort &&
+            knownEffort(ctxInfo.currentEffort) &&
+            chosenEffort !== shownEffort
+              ? knownEffort(chosenEffort).name
+              : '',
+            watchedSessionId,
+          ]);
+          if (footerEffortCache && footerEffortCache.sig === effortSig) {
+            f.append(footerEffortCache.col);
+            keepEffort = footerEffortCache.keep;
+          } else {
+            const sel = document.createElement('select');
+            sel.id = 'footer-effort';
+            sel.hidden = true;
+            sel.setAttribute('aria-hidden', 'true');
+            sel.tabIndex = -1;
+            const seg = document.createElement('div');
+            seg.className = 'seg-effort';
+            seg.setAttribute('role', 'group');
+            seg.setAttribute('aria-label', 'Thinking effort');
+            for (const m of ctxInfo.availableEfforts) {
+              const o = document.createElement('option');
+              o.value = m.id;
+              o.textContent = m.name;
+              if (m.id === shownEffort) o.selected = true;
+              sel.appendChild(o);
+              const b = document.createElement('button');
+              b.type = 'button';
+              b.dataset.effort = m.id;
+              b.textContent = m.name;
+              b.setAttribute('aria-pressed', String(m.id === shownEffort));
+              b.addEventListener('click', () => {
+                if (m.id === sel.value) return;
+                sel.value = m.id;
+                void changeReasoningEffort(sel, cb);
+              });
+              seg.appendChild(b);
+            }
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.id = 'footer-effort-persist';
+            cb.title =
+              'persist this thinking effort for future sessions in this workspace';
+            cb.checked =
+              uiRead(EFFORT_PERSIST_NAME, (v) => v === true) === true;
+            cb.addEventListener('change', () =>
+              uiWrite(EFFORT_PERSIST_NAME, cb.checked ? true : undefined),
+            );
+            const note = document.createElement('span');
+            note.id = 'footer-effort-note';
+            if (
+              chosenEffort &&
+              knownEffort(ctxInfo.currentEffort) &&
+              chosenEffort !== shownEffort
+            ) {
+              note.textContent =
+                'last set here: ' + knownEffort(chosenEffort).name;
+            }
+            sel.addEventListener('change', () =>
+              changeReasoningEffort(sel, cb),
+            );
+            const col = document.createElement('div');
+            col.className = 'sh-col';
+            const l = document.createElement('span');
+            l.className = 'sh-ef-lbl';
+            l.textContent = 'Thinking';
+            col.append(l, seg, note, sel);
+            f.append(col);
+            keepEffort = document.createElement('label');
+            keepEffort.className = 'keep';
+            keepEffort.append(
+              cb,
+              document.createTextNode(
+                ' Keep this thinking effort for new conversations here',
+              ),
+            );
+            footerEffortCache = { sig: effortSig, col, keep: keepEffort };
+          }
+        } else if (ctxInfo.effortName) {
+          const r = document.createElement('div');
+          r.className = 'sh-row';
+          const l = document.createElement('span');
+          l.className = 'sh-ef-lbl';
+          l.textContent = 'Thinking';
+          const t = document.createElement('span');
+          t.textContent = ctxInfo.effortName;
+          r.append(l, t);
+          f.append(r);
+        }
         const fill = fillWords();
         // #190: what the conversation has spent beside its fill
         // (sessionUsageParts); with nothing recorded the line is the fill.
@@ -11666,7 +12050,9 @@
         // #212: this conversation's crashed or lost tab on the host, if any.
         renderHostTabLine();
         f.append(hostTabSheet);
+        f.append(openHostTabSheet);
         if (keep) f.append(keep);
+        if (keepEffort) f.append(keepEffort);
         f.style.display = '';
         if (hadFocus && hadFocus.isConnected && document.activeElement !== hadFocus) {
           hadFocus.focus({ preventScroll: true });
@@ -11997,6 +12383,7 @@
         const modelShort = ctxInfo ? shortModel(ctxInfo.modelName) : '';
         h1Text(modelEl, ctxInfo ? modelShort || 'no model' : '');
         modelEl.classList.toggle('none', !!ctxInfo && !modelShort);
+        h1Text($('h1-tps'), tpsText());
         h1Text($('h1-tokens'), fillText());
         h1Text($('h1-mode'), ctxInfo ? ctxInfo.modeName || '' : '');
         renderRunControls(running);
@@ -12286,9 +12673,81 @@
             ctxInfo.modelName = m ? m.name : modelId;
             renderFooter();
           }
+          void fetchContext(id);
         } catch (err) {
           if (gen !== switchGen) return;
           setStatus('model switch failed: ' + err.message);
+        }
+      }
+
+      // #278. Reasoning-effort switcher: POST /session/:id/config-option with
+      // { configId: 'reasoning_effort', value, persist }.
+      async function changeReasoningEffort(sel, persistCb) {
+        const id = watchedSessionId;
+        if (!id) return;
+        const gen = switchGen;
+        const effort = sel.value;
+        const prev = ctxInfo ? ctxInfo.currentEffort : effort;
+        const setNote = (msg) => {
+          const n = $('footer-effort-note');
+          if (n) n.textContent = msg;
+        };
+        setNote('');
+        try {
+          const res = await fetch(
+            '/session/' + encodeURIComponent(id) + '/config-option',
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer ' + token(),
+              },
+              body: JSON.stringify({
+                configId: 'reasoning_effort',
+                value: effort,
+                persist: persistCb ? !!persistCb.checked : false,
+              }),
+            },
+          );
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            if (gen !== switchGen) return;
+            sel.value = prev;
+            const detail =
+              res.status === 401 || res.status === 403
+                ? 'not authorized - needs an owner token to persist'
+                : (body.error || 'failed (' + res.status + ')') +
+                  (body.code ? ' (' + body.code + ')' : '');
+            setNote(detail);
+            setStatus(detail);
+            return;
+          }
+          const out = await res.json().catch(() => ({}));
+          if (gen !== switchGen) return;
+          if (ctxInfo) {
+            if (Array.isArray(out.configOptions)) {
+              applyConfigOptionsUpdate(out.configOptions);
+            } else {
+              ctxInfo.currentEffort = effort;
+              const found = (ctxInfo.availableEfforts || []).find(
+                (x) => x.id === effort,
+              );
+              ctxInfo.effortName = found ? found.name : effort;
+            }
+            uiSessionWrite(EFFORT_NAME, id, ctxInfo.currentEffort || effort);
+            renderFooter();
+          }
+          setNote(
+            'thinking: ' +
+              (ctxInfo ? ctxInfo.effortName || effort : effort) +
+              (out.persisted ? ' (persisted)' : ''),
+          );
+        } catch (err) {
+          if (gen !== switchGen) return;
+          sel.value = prev;
+          const detail = 'thinking effort change failed: ' + err.message;
+          setNote(detail);
+          setStatus(detail);
         }
       }
 
@@ -15808,9 +16267,61 @@
         }
         if (typeof o === 'number' && o >= 0 && o !== liveOut) {
           liveOut = o;
+          if (!insideReplay) {
+            tpsState.burstOut = o;
+            if (tpsState.burstStartAt > 0) {
+              tpsState.burstLastAt = Date.now();
+              computeLiveTps();
+            }
+          }
           changed = true;
         }
         if (changed && ctxInfo) renderFooter();
+      }
+
+      function parseReasoningOption(configOptions) {
+        if (!Array.isArray(configOptions)) {
+          return { currentEffort: '', effortName: '', availableEfforts: [] };
+        }
+        const opt = configOptions.find(
+          (o) => o && typeof o === 'object' && o.id === 'reasoning_effort',
+        );
+        if (!opt) {
+          return { currentEffort: '', effortName: '', availableEfforts: [] };
+        }
+        const rawOpts = Array.isArray(opt.options) ? opt.options : [];
+        const availableEfforts = rawOpts
+          .flatMap((c) =>
+            c && typeof c === 'object'
+              ? 'value' in c
+                ? [c]
+                : Array.isArray(c.options)
+                  ? c.options
+                  : []
+              : [],
+          )
+          .filter((c) => c && typeof c.value === 'string' && c.value)
+          .map((c) => ({
+            id: c.value,
+            name: clean(c.name || c.value),
+          }));
+        const currentEffort =
+          typeof opt.currentValue === 'string' ? opt.currentValue : '';
+        const found = availableEfforts.find((x) => x.id === currentEffort);
+        const effortName = found ? found.name : currentEffort;
+        return {
+          currentEffort,
+          effortName: clean(effortName),
+          availableEfforts,
+        };
+      }
+
+      function applyConfigOptionsUpdate(configOptions) {
+        if (!ctxInfo || !Array.isArray(configOptions)) return;
+        const parsed = parseReasoningOption(configOptions);
+        ctxInfo.currentEffort = parsed.currentEffort;
+        ctxInfo.effortName = parsed.effortName;
+        ctxInfo.availableEfforts = parsed.availableEfforts;
       }
 
       // Pull the current model name and approval mode out of the daemon's
@@ -15840,6 +16351,7 @@
           (x) => x && x.id === modes.currentModeId,
         );
         const modeName = found ? found.name : modes.currentModeId || '';
+        const effort = parseReasoningOption(st.configOptions);
         return {
           modelName: clean(modelName),
           availableModels,
@@ -15850,6 +16362,9 @@
           availableModes: (modes.availableModes || [])
             .filter((m) => m && typeof m.id === 'string')
             .map((m) => ({ id: m.id, name: clean(m.name || m.id) })),
+          currentEffort: effort.currentEffort,
+          effortName: effort.effortName,
+          availableEfforts: effort.availableEfforts,
           cwd: clean(cwd),
         };
       }
@@ -16227,7 +16742,15 @@
         ) {
           return addAssistantImage(u.content.mimeType, u.content.data);
         }
+        if (su === 'config_options_update' && Array.isArray(u.configOptions)) {
+          if (ctxInfo) {
+            applyConfigOptionsUpdate(u.configOptions);
+            renderFooter();
+          }
+          return;
+        }
         if (su === 'agent_message_chunk' && text) {
+          noteTpsChunk(text);
           // #71: the hide that used to sit here is now the quiet beat's job. It
           // runs once at the top of this function for every frame, which is
           // what the two separate hides here could not do: they stopped the
@@ -16245,9 +16768,11 @@
           return;
         }
         if (su === 'agent_thought_chunk' && text) {
+          noteTpsChunk(text);
           return appendThought(text, sentAt);
         }
         if (su === 'tool_call' || su === 'tool_call_update') {
+          if (su === 'tool_call') noteTpsToolBoundary();
           // #71: a running tool row is the better indicator while it lasts, and
           // the moment it settles is one of the gaps this indicator exists for,
           // so the frame carries its id and status to the quiet beat.
@@ -16356,6 +16881,7 @@
               ctxInfo.modelName = mid;
               ctxInfo.currentModelId = mid;
               renderFooter();
+              if (watchedSessionId) void fetchContext(watchedSessionId);
             }
             return addSystem('model switched to ' + (mid || '?'), false);
           }
@@ -27779,6 +28305,13 @@
         // the daemon's live-state says the conversation is open, and a past
         // row shows no item that could only fail.
         if (s.live) items.push(['Rename', false, () => renameFromList(s)]);
+        if (s.live && hostTabsOn() && !hostTabs.liveSessions.has(s.sessionId)) {
+          items.push([
+            'Open in WSL tab',
+            false,
+            () => openHostTabForSession(s.sessionId),
+          ]);
+        }
         // A live-only row has no transcript to file away or remove, which is
         // why the past rows never offered it either (issue #111).
         // #193: in the folder the row was read from.
