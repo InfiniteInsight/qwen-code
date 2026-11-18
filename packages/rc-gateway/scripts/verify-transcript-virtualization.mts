@@ -38075,7 +38075,7 @@ PAGE_SCENARIOS.push({
 });
 
 PAGE_SCENARIOS.push({
-  name: 'P611 thinking effort control posts /session/:id/config-option, open WSL tab button queues /rc/terminals when not in Closed tabs, and #h1-tps displays live tok/s (#278)',
+  name: 'P611 thinking effort control posts /session/:id/config-option, open WSL tab button queues /rc/terminals when not in Closed tabs, and #footer-tps displays live tok/s in the sheet (#278)',
   waitView: false,
   stub: { hostTabs: {} },
   run: async ({ page, viewer }) => {
@@ -38227,7 +38227,7 @@ PAGE_SCENARIOS.push({
       `unexpected /rc/terminals bodies: ${JSON.stringify(terminalBodies)}`,
     );
 
-    // 3. Real-time tok/s indicator on #h1-tps and #footer-tps
+    // 3. Real-time tok/s indicator on #footer-tps in the sheet (not on #h1-status)
     await page.evaluate(() => {
       showProcessing();
       renderFrame({
@@ -38241,17 +38241,17 @@ PAGE_SCENARIOS.push({
       });
     });
     await page.waitForFunction(
-      () => (document.getElementById('h1-tps')?.textContent ?? '').endsWith('tok/s'),
+      () => (document.getElementById('footer-tps')?.textContent ?? '').endsWith('tok/s'),
       null,
       { timeout: 5_000 },
     );
-    const tps = await page.textContent('#h1-tps');
+    const hasMainTps = await page.evaluate(() => !!document.getElementById('h1-tps'));
     const footerTps = await page.textContent('#footer-tps');
     expect(
-      !!tps && tps.endsWith('tok/s') && footerTps === tps,
-      `expected live tok/s on #h1-tps and #footer-tps, got ${JSON.stringify({ tps, footerTps })}`,
+      !hasMainTps && !!footerTps && footerTps.endsWith('tok/s'),
+      `expected live tok/s only on #footer-tps in the sheet, got ${JSON.stringify({ hasMainTps, footerTps })}`,
     );
-    return `thinking effort -> xhigh, Open tab -> POST /rc/terminals, live speed ${tps}`;
+    return `thinking effort -> xhigh, Open tab -> POST /rc/terminals, sheet speed ${footerTps}`;
   },
 });
 

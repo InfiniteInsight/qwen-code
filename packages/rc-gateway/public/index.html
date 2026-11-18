@@ -1052,7 +1052,6 @@
         content: '\00b7';
         margin-right: 8px;
       }
-      #h1-tps,
       #h1-tokens,
       #h1-mode {
         flex: none;
@@ -6390,7 +6389,6 @@
             <span class="dot" id="h1-dot" aria-hidden="true"></span>
             <span id="h1-state">no conversation</span>
             <span class="f" id="h1-model"></span>
-            <span class="f" id="h1-tps"></span>
             <span class="f" id="h1-tokens"></span>
             <span class="f" id="h1-mode"></span>
             <span class="sp"></span>
@@ -10307,9 +10305,7 @@
         if (tpsState.rafTimer) return;
         tpsState.rafTimer = setTimeout(() => {
           tpsState.rafTimer = null;
-          renderStatusLine();
-          const ft = $('footer-tps');
-          if (ft) h1Text(ft, tpsText());
+          h1Text($('footer-tps'), tpsText());
         }, 120);
       }
       function noteTpsChunk(text) {
@@ -12383,7 +12379,7 @@
         const modelShort = ctxInfo ? shortModel(ctxInfo.modelName) : '';
         h1Text(modelEl, ctxInfo ? modelShort || 'no model' : '');
         modelEl.classList.toggle('none', !!ctxInfo && !modelShort);
-        h1Text($('h1-tps'), tpsText());
+        h1Text($('footer-tps'), tpsText());
         h1Text($('h1-tokens'), fillText());
         h1Text($('h1-mode'), ctxInfo ? ctxInfo.modeName || '' : '');
         renderRunControls(running);
