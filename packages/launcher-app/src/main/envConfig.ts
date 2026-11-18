@@ -8,10 +8,9 @@ import type { RunWsl } from './wsl.js';
 export interface ProviderEnv {
   OPENAI_BASE_URL?: string;
   OPENAI_API_KEY?: string;
-  OPENAI_MODEL?: string;
 }
 
-const KEYS = ['OPENAI_BASE_URL', 'OPENAI_API_KEY', 'OPENAI_MODEL'] as const;
+const KEYS = ['OPENAI_BASE_URL', 'OPENAI_API_KEY'] as const;
 
 export function parseEnv(raw: string): Record<string, string> {
   const out: Record<string, string> = {};

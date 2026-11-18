@@ -10,7 +10,7 @@ import * as QRCode from 'qrcode';
 // that outlives the DOM node it's rendered into. Read them straight from
 // `window.launcher` responses / form inputs into the DOM and nothing else.
 
-type TabName = 'control' | 'logs' | 'config';
+type TabName = 'control' | 'logs';
 
 const tabButtons = document.querySelectorAll<HTMLButtonElement>('.tab-button');
 const panels = document.querySelectorAll<HTMLElement>('.panel');
@@ -170,51 +170,4 @@ const logOutput = document.getElementById('log-output') as HTMLElement;
 window.launcher.onLog((line) => {
   logOutput.textContent += line.endsWith('\n') ? line : `${line}\n`;
   logOutput.scrollTop = logOutput.scrollHeight;
-});
-
-// ---- Config tab ----
-
-const configForm = document.getElementById('config-form') as HTMLFormElement;
-const configStatus = document.getElementById('config-status') as HTMLElement;
-const baseUrlInput = document.getElementById(
-  'cfg-base-url',
-) as HTMLInputElement;
-const apiKeyInput = document.getElementById('cfg-api-key') as HTMLInputElement;
-const modelInput = document.getElementById('cfg-model') as HTMLInputElement;
-
-async function loadConfigForm(): Promise<void> {
-  const config = await window.launcher.getConfig();
-  baseUrlInput.value = config.OPENAI_BASE_URL ?? '';
-  apiKeyInput.value = config.OPENAI_API_KEY ?? '';
-  modelInput.value = config.OPENAI_MODEL ?? '';
-}
-
-void loadConfigForm();
-
-configForm.addEventListener('submit', (event) => {
-  event.preventDefault();
-  showBanner(configStatus, undefined);
-
-  // Read straight from the form inputs at save time; nothing is cached in a
-  // module-level variable beyond this call.
-  void window.launcher
-    .saveConfig({
-      OPENAI_BASE_URL: baseUrlInput.value || undefined,
-      OPENAI_API_KEY: apiKeyInput.value || undefined,
-      OPENAI_MODEL: modelInput.value || undefined,
-    })
-    .then(async (result) => {
-      if (!result.ok) {
-        showBanner(configStatus, 'Save failed');
-        return;
-      }
-      showBanner(configStatus, 'Saved.');
-      const shouldRestart = window.confirm(
-        'Configuration saved. Restart the remote-control service to apply it now?',
-      );
-      if (shouldRestart) {
-        await window.launcher.down();
-        await window.launcher.up();
-      }
-    });
 });
