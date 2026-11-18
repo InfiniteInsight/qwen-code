@@ -63,6 +63,19 @@ describe('status', () => {
       url: 'https://h.ts.net:8443/ui/',
     });
   });
+  it('tolerates leading wsl.exe stdout warnings before JSON (#279)', async () => {
+    const run = stub({
+      'qwen-rc status --json': ok(
+        'wsl: Processing /etc/fstab with mount -a failed.\n' +
+          JSON.stringify({ running: true, url: 'https://h.ts.net:8443/ui/' }) +
+          '\n',
+      ),
+    });
+    expect(await status(run)).toEqual({
+      running: true,
+      url: 'https://h.ts.net:8443/ui/',
+    });
+  });
   it('reports stopped on an unparseable/failed status', async () => {
     const run: RunWsl = async () => ({ code: 1, stdout: '', stderr: 'x' });
     expect(await status(run)).toEqual({ running: false });

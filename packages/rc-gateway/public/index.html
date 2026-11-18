@@ -16619,7 +16619,7 @@
         }
       }
 
-      function renderSessionUpdate(u, sentAt) {
+      function renderSessionUpdate(u, sentAt, ev) {
         if (!u || typeof u !== 'object') return;
         // #71: every frame that reaches here is proof that work is happening,
         // so it both stands the indicator down and restarts the quiet beat.
@@ -16658,7 +16658,7 @@
           // #129: the record this frame came from, which the resume's replay
           // stamps (a live frame carries none), so the turn index can name the
           // row. Undefined is the ordinary case and draws the row all the same.
-          const userRecordId = TranscriptModel.recordIdOf(null, u);
+          const userRecordId = TranscriptModel.recordIdOf(ev || null, u);
           // #190: a message that joined a running turn (the resume's replay
           // marks its record so) is a row of that turn, not a new one: no turn
           // is counted for it and the turn above it is not closed.
@@ -16795,8 +16795,18 @@
       function renderFrame(ev) {
         if (!ev || typeof ev !== 'object') return;
         switch (ev.type) {
-          case 'session_update':
-            return renderSessionUpdate(ev.data && ev.data.update, frameStamp(ev));
+          case 'session_update': {
+            const d = ev.data;
+            const u =
+              d && typeof d === 'object'
+                ? d.update && typeof d.update === 'object' && !Array.isArray(d.update)
+                  ? d.update
+                  : typeof d.sessionUpdate === 'string'
+                    ? d
+                    : null
+                : null;
+            return renderSessionUpdate(u, frameStamp(ev), ev);
+          }
           case 'stream_error': {
             // #71: these three end a session without ever sending
             // turn_complete, so without this the indicator would keep claiming
@@ -30495,7 +30505,7 @@
                   body && body.data && typeof body.data === 'object'
                     ? body.data
                     : {};
-                const cwd = watchedSessionCwd;
+                const cwd = resolveWatchedSessionCwd(id);
                 if (
                   data.recovery === 'reload' &&
                   cwd &&
@@ -30627,7 +30637,7 @@
                     noReplayResynced.add(id);
                     noReplayFallbackSessionId = null;
                   }
-                  pendingResyncCwd = watchedSessionCwd;
+                  pendingResyncCwd = resolveWatchedSessionCwd(id);
                   // #230: the bus epoch changed, so whatever the roster is
                   // showing missed everything between here and the reload.
                   if (roster.sessionId === id) rosterGap();

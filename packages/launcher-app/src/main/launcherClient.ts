@@ -22,10 +22,27 @@ export interface StatusResult {
 
 function parseJson(stdout: string): Record<string, unknown> | null {
   try {
-    return JSON.parse(stdout) as Record<string, unknown>;
+    const parsed = JSON.parse(stdout);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
   } catch {
-    return null;
+    // Fall through to line scan when wsl.exe or a login shell emits banner lines.
   }
+  const lines = stdout.split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line.startsWith('{')) continue;
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 
 export async function up(run: RunWsl): Promise<UpResult> {

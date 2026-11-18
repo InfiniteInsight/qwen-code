@@ -8250,6 +8250,16 @@ export function createSessionControlPlane(
             lifecycleReplay.splice(0, lifecycleReplay.length - 1024);
             lifecycleReplayIncomplete = true;
           }
+          let historyAnchorRecordId: string | undefined;
+          if (page.hasMore) {
+            for (const event of page.events) {
+              const recordId = transcriptEventRecordId(event);
+              if (recordId !== undefined) {
+                historyAnchorRecordId = recordId;
+                break;
+              }
+            }
+          }
           return {
             compactedReplay,
             liveJournal: [],
@@ -8262,6 +8272,9 @@ export function createSessionControlPlane(
               ? { replayError: page.replayError }
               : {}),
             ...(page.hasMore ? { historyHasMore: true as const } : {}),
+            ...(historyAnchorRecordId !== undefined
+              ? { historyAnchorRecordId }
+              : {}),
           };
         }
         // Not transient: only a human answer, a cancel or a timeout clears

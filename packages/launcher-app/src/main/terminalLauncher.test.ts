@@ -56,6 +56,16 @@ describe('parsePending', () => {
     });
     expect(parsePending(raw, 0).requests.map((r) => r.id)).toEqual(['r1']);
   });
+
+  it('tolerates leading wsl.exe or login-shell stdout banner lines (#279)', () => {
+    const raw =
+      'wsl: Processing /etc/fstab with mount -a failed.\n' +
+      page([req({ id: 'r-fstab' })], 151) +
+      '\n';
+    const out = parsePending(raw, 145);
+    expect(out.cursor).toBe(151);
+    expect(out.requests.map((r) => r.id)).toEqual(['r-fstab']);
+  });
 });
 
 describe('buildWtArgs', () => {

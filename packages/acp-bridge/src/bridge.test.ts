@@ -7631,6 +7631,7 @@ describe('createAcpSessionBridge', () => {
     expect(refreshed).toMatchObject({
       attached: true,
       historyHasMore: true,
+      historyAnchorRecordId: 'record-latest',
       lastEventId: loaded.lastEventId,
       eventEpoch: loaded.eventEpoch,
       compactedReplay: [

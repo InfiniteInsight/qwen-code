@@ -37938,8 +37938,30 @@ PAGE_SCENARIOS.push({
           sessionId: sid,
           workspaceCwd: '/stub/workspace',
           compactedReplay: [
-            h150Frame(10, 'user_message_chunk', 'recent q2'),
-            h150Frame(11, 'agent_message_chunk', 'recent a2'),
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'recent q2' },
+                _meta: {
+                  'qwen.session.recordId': 'rec-tail-start',
+                  timestamp: 1_700_000_020_000,
+                },
+              },
+            },
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'recent a2' },
+                _meta: {
+                  'qwen.session.recordId': 'rec-tail-end',
+                  timestamp: 1_700_000_021_000,
+                },
+              },
+            },
           ],
           liveJournal: [],
           lastEventId: 11,

@@ -98,25 +98,52 @@ function stampOf(value: unknown): number | null {
     : null;
 }
 
+function parseJsonObjectFromStdout(
+  raw: string,
+): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Fall through to line scan when wsl.exe or a login shell emits banner lines
+    // (such as "wsl: Processing /etc/fstab with mount -a failed.") on stdout.
+  }
+  const lines = raw.split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line.startsWith('{')) continue;
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 /**
  * Parse `qwen-rc terminals pending --json` output. Unparseable output yields an
  * empty page at the SAME cursor we asked about, so a transient failure retries
  * next tick rather than silently dropping requests or skipping ahead.
  */
 export function parsePending(raw: string, fallbackCursor: number): PendingPage {
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const cursor =
-      typeof parsed.cursor === 'number' && parsed.cursor >= 0
-        ? parsed.cursor
-        : fallbackCursor;
-    const requests = Array.isArray(parsed.requests)
-      ? (parsed.requests as TerminalRequest[]).filter(isRequest)
-      : [];
-    return { cursor, requests };
-  } catch {
+  const parsed = parseJsonObjectFromStdout(raw);
+  if (!parsed) {
     return { cursor: fallbackCursor, requests: [] };
   }
+  const cursor =
+    typeof parsed.cursor === 'number' && parsed.cursor >= 0
+      ? parsed.cursor
+      : fallbackCursor;
+  const requests = Array.isArray(parsed.requests)
+    ? (parsed.requests as TerminalRequest[]).filter(isRequest)
+    : [];
+  return { cursor, requests };
 }
 
 function isRequest(r: unknown): r is TerminalRequest {
