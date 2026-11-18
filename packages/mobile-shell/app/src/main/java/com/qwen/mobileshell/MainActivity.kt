@@ -111,7 +111,16 @@ class MainActivity : AppCompatActivity() {
             val storage = store ?: AndroidProfileStore(this).also { store = it }
             state = storage.vault.load()
             retireBrowserProfiles()
-            if (snapshot == null) showProfiles() else restoreConnection(snapshot)
+            if (snapshot != null) {
+                restoreConnection(snapshot)
+            } else {
+                val singlePaired = state.profiles.singleOrNull()?.takeIf { !it.token.isNullOrBlank() }
+                if (singlePaired != null) {
+                    connect(singlePaired, ConnectionNavigation(ui = true))
+                } else {
+                    showProfiles()
+                }
+            }
         } catch (_: Exception) { showStorageError() }
     }
 
@@ -433,17 +442,13 @@ class MainActivity : AppCompatActivity() {
                 return true
             }
         }
-        showWebView(view, profile)
+        showWebView(view)
         view.loadUrl(loadUrl)
     }
 
-    private fun showWebView(view: WebView, profile: ConnectionProfile) {
+    private fun showWebView(view: WebView) {
         (view.parent as? ViewGroup)?.removeView(view)
-        setContentView(LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            button(getString(R.string.connection_controls, profile.name)) { showProfiles() }
-            addView(view, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-        })
+        setContentView(view)
     }
 
     private fun showConnectionError(view: WebView, profile: ConnectionProfile) {
@@ -637,6 +642,10 @@ class MainActivity : AppCompatActivity() {
                     }
                     replyProxy.postMessage(QwenBridgeInjector.formatSuccessReply(req.id, "null"))
                 }
+                "showConnections" -> {
+                    replyProxy.postMessage(QwenBridgeInjector.formatSuccessReply(req.id, "null"))
+                    runOnUiThread { showProfiles() }
+                }
                 else -> {
                     replyProxy.postMessage(QwenBridgeInjector.formatErrorReply(req.id, "unsupported_method"))
                 }
@@ -644,7 +653,7 @@ class MainActivity : AppCompatActivity() {
         }
         WebViewCompat.addDocumentStartJavaScript(
             view,
-            QwenBridgeInjector.buildDocumentStartScript(shellVersion, profile.token),
+            QwenBridgeInjector.buildDocumentStartScript(shellVersion, profile.token, profile.name),
             rule,
         )
     }

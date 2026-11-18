@@ -4599,6 +4599,14 @@
         >
           Unlock
         </button>
+        <button
+          id="auth-connections-btn"
+          type="button"
+          hidden
+          style="min-height: 44px; min-width: 44px"
+        >
+          Connections
+        </button>
         <span id="pair-feedback" role="status" aria-live="polite"></span>
       </section>
       <div
@@ -4878,6 +4886,10 @@
           </div>
           <div class="mgrp" role="group" aria-labelledby="more-g-phone">
             <div class="grp" id="more-g-phone">This phone</div>
+            <button type="button" class="row" id="more-connections" data-action="connections" hidden>
+              <span class="lbl">Connections</span><span class="val" id="more-connections-val"></span>
+              <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
             <button type="button" class="row" data-panel="notify">
               <span class="lbl">Notifications</span><span class="val"></span>
               <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
@@ -21604,6 +21616,43 @@
           }
         };
       }
+      (function syncNativeConnectionsControls() {
+        const canShowConnections =
+          isNativeShell() && typeof bridge.showConnections === 'function';
+        const moreRow = $('more-connections');
+        const moreVal = $('more-connections-val');
+        const authBtn = $('auth-connections-btn');
+        const installRow = document.querySelector(
+          '#more-screen .row[data-panel="install"]',
+        );
+        if (installRow && isNativeShell()) {
+          installRow.hidden = true;
+        }
+        if (moreRow) {
+          moreRow.hidden = !canShowConnections;
+          if (moreVal) {
+            moreVal.textContent =
+              canShowConnections &&
+              typeof bridge.connectionName === 'string' &&
+              bridge.connectionName
+                ? bridge.connectionName
+                : '';
+          }
+          moreRow.onclick = () => {
+            if (typeof bridge.showConnections === 'function') {
+              void bridge.showConnections();
+            }
+          };
+        }
+        if (authBtn) {
+          authBtn.hidden = !canShowConnections;
+          authBtn.onclick = () => {
+            if (typeof bridge.showConnections === 'function') {
+              void bridge.showConnections();
+            }
+          };
+        }
+      })();
 
       // QR auto-fill: a scanned QR opens .../ui/#code=<code>. Read it, scrub it
       // from the address bar IMMEDIATELY (so a reload/bookmark can't retry a

@@ -49,9 +49,14 @@ internal object QwenBridgeInjector {
         return sb.toString()
     }
 
-    fun buildDocumentStartScript(shellVersion: String, pendingToken: String?): String {
+    fun buildDocumentStartScript(
+        shellVersion: String,
+        pendingToken: String?,
+        connectionName: String? = null,
+    ): String {
         val shellLit = jsStringLiteral(shellVersion)
         val tokenLit = jsStringLiteral(pendingToken)
+        val nameLit = jsStringLiteral(connectionName)
         return """
 (function() {
   if (typeof window.qwen === 'object' && window.qwen !== null) return;
@@ -85,6 +90,7 @@ internal object QwenBridgeInjector {
   window.qwen = {
     platform: 'android-twa',
     version: { shell: $shellLit, bridge: $BRIDGE_VERSION },
+    connectionName: $nameLit,
     __pendingToken: $tokenLit,
     getToken: function() { return rpc('getToken'); },
     setToken: function(t) { return rpc('setToken', { token: t === null || t === undefined ? null : String(t) }); },
@@ -92,6 +98,7 @@ internal object QwenBridgeInjector {
     isBiometricAvailable: function() { return rpc('isBiometricAvailable'); },
     requireBiometric: function(reason) { return rpc('requireBiometric', { reason: String(reason || '') }); },
     openExternal: function(url) { return rpc('openExternal', { url: String(url || '') }); },
+    showConnections: function() { return rpc('showConnections'); },
     setWatchedSession: function(ptr) {
       if (!ptr || !ptr.sessionId) return rpc('setWatchedSession', { cleared: true });
       return rpc('setWatchedSession', {
