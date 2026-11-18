@@ -774,6 +774,8 @@ describe('model configuration manifest', () => {
     ['qwen3.7-plus', 'none', false, true],
     ['qwen3.7-plus', 'low', false, false],
     ['qwen-plus', 'max', false, false],
+    ['qwen3.8-flash-next-trtllm', 'high', false, true],
+    ['qwen3.6-35b-manual', 'medium', false, true],
     ['claude-opus-4-6', 'max', false, true],
   ] as const)(
     'validates %s selection %s with mandatory=%s',

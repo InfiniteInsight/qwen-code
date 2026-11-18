@@ -96,6 +96,7 @@ import type { UsageTickBroadcaster } from './cost/usageTickBroadcaster.js';
 import { createForkRoute } from './routes/fork.js';
 import { createRewindRoute } from './routes/rewind.js';
 import { createApprovalModeRoute } from './routes/approvalMode.js';
+import { createConfigOptionRoute } from './routes/configOption.js';
 import { createModelSwitchRoute } from './routes/modelSwitch.js';
 import { createWorkspacePermissionsRoutes } from './routes/workspacePermissions.js';
 import { createWorkspaceTrustRoutes } from './routes/workspaceTrust.js';
@@ -2725,6 +2726,18 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan, // banned chat user → 403 (before consuming rate budget)
     subActorRateLimit, // bridge fan-in: cap model switches per chat user
     createModelSwitchRoute(deps.daemon),
+  );
+
+  // POST /session/:id/config-option - WRITE floor for session-scoped
+  // `reasoning_effort` changes, OWNER required in-handler when `persist: true`.
+  app.post(
+    '/session/:id/config-option',
+    requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
+    subActorBan,
+    subActorRateLimit,
+    createConfigOptionRoute(deps.daemon, { audit }),
   );
 
   // /rc/workspace/* - workspace-control routes (rc-workspace-permissions).

@@ -38074,6 +38074,187 @@ PAGE_SCENARIOS.push({
   },
 });
 
+PAGE_SCENARIOS.push({
+  name: 'P611 thinking effort control posts /session/:id/config-option, open WSL tab button queues /rc/terminals when not in Closed tabs, and #h1-tps displays live tok/s (#278)',
+  waitView: false,
+  stub: { hostTabs: {} },
+  run: async ({ page, viewer }) => {
+    const configOptionBodies: Array<Record<string, unknown>> = [];
+    const terminalBodies: Array<Record<string, unknown>> = [];
+    await page.route(
+      new RegExp(`/session/${viewer.sessionId}/context$`),
+      async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            v: 1,
+            sessionId: viewer.sessionId,
+            workspaceCwd: '/proj',
+            state: {
+              models: {
+                currentModelId: 'qwen3.8-flash-next-trtllm',
+                availableModels: [
+                  {
+                    modelId: 'qwen3.8-flash-next-trtllm',
+                    name: 'Qwen3.8 Flash Next',
+                  },
+                ],
+              },
+              modes: {
+                currentModeId: 'default',
+                availableModes: [
+                  { id: 'default', name: 'Default' },
+                  { id: 'yolo', name: 'YOLO' },
+                ],
+              },
+              configOptions: [
+                {
+                  id: 'reasoning_effort',
+                  name: 'Reasoning effort',
+                  currentValue: 'medium',
+                  options: [
+                    { value: 'none', name: 'Thinking off' },
+                    { value: 'default', name: 'Default' },
+                    { value: 'low', name: 'Low' },
+                    { value: 'medium', name: 'Medium' },
+                    { value: 'high', name: 'High' },
+                    { value: 'xhigh', name: 'Extra high' },
+                    { value: 'max', name: 'Max' },
+                  ],
+                },
+              ],
+            },
+          }),
+        });
+      },
+    );
+    await page.route(
+      new RegExp(`/session/${viewer.sessionId}/config-option$`),
+      async (route) => {
+        const body = JSON.parse(route.request().postData() ?? '{}') as Record<
+          string,
+          unknown
+        >;
+        configOptionBodies.push(body);
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            sessionId: viewer.sessionId,
+            configId: 'reasoning_effort',
+            value: body['value'],
+            configOptions: [
+              {
+                id: 'reasoning_effort',
+                name: 'Reasoning effort',
+                currentValue: body['value'],
+                options: [
+                  { value: 'none', name: 'Thinking off' },
+                  { value: 'default', name: 'Default' },
+                  { value: 'low', name: 'Low' },
+                  { value: 'medium', name: 'Medium' },
+                  { value: 'high', name: 'High' },
+                  { value: 'xhigh', name: 'Extra high' },
+                  { value: 'max', name: 'Max' },
+                ],
+              },
+            ],
+            persisted: body['persist'] === true,
+          }),
+        });
+      },
+    );
+    await page.route(/\/rc\/terminals$/, async (route) => {
+      const body = JSON.parse(route.request().postData() ?? '{}') as Record<
+        string,
+        unknown
+      >;
+      terminalBodies.push(body);
+      await route.fulfill({
+        status: 202,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          requestId: 'req-p611',
+          launcherState: 'live',
+          launcherSeenMsAgo: 100,
+        }),
+      });
+    });
+
+    await watch(page, viewer.sessionId);
+    await page.waitForSelector('#composer', { state: 'visible' });
+    await page.click('#h1-status');
+    await page.waitForSelector('#session-footer .seg-effort button[data-effort="high"]', {
+      state: 'visible',
+    });
+
+    // 1. Thinking effort control
+    const initialPressed = await page.getAttribute(
+      '#session-footer .seg-effort button[data-effort="medium"]',
+      'aria-pressed',
+    );
+    expect(initialPressed === 'true', `expected medium pressed, got ${initialPressed}`);
+    await page.click('#session-footer .seg-effort button[data-effort="xhigh"]');
+    await page.waitForFunction(
+      () =>
+        document
+          .querySelector('#session-footer .seg-effort button[data-effort="xhigh"]')
+          ?.getAttribute('aria-pressed') === 'true',
+      null,
+      { timeout: 5_000 },
+    );
+    expect(
+      configOptionBodies.length === 1 &&
+        configOptionBodies[0]!['configId'] === 'reasoning_effort' &&
+        configOptionBodies[0]!['value'] === 'xhigh',
+      `unexpected config-option bodies: ${JSON.stringify(configOptionBodies)}`,
+    );
+
+    // 2. Open WSL tab button when not in Closed tabs and not running in WSL
+    await page.waitForSelector('#open-host-tab-btn', { state: 'visible' });
+    await page.click('#open-host-tab-btn');
+    await page.waitForFunction(
+      () =>
+        (document.getElementById('status')?.textContent ?? '') ===
+        'terminal opening on the host…',
+      null,
+      { timeout: 5_000 },
+    );
+    expect(
+      terminalBodies.length === 1 &&
+        terminalBodies[0]!['sessionId'] === viewer.sessionId,
+      `unexpected /rc/terminals bodies: ${JSON.stringify(terminalBodies)}`,
+    );
+
+    // 3. Real-time tok/s indicator on #h1-tps and #footer-tps
+    await page.evaluate(() => {
+      showProcessing();
+      renderFrame({
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'a'.repeat(400) },
+          },
+        },
+      });
+    });
+    await page.waitForFunction(
+      () => (document.getElementById('h1-tps')?.textContent ?? '').endsWith('tok/s'),
+      null,
+      { timeout: 5_000 },
+    );
+    const tps = await page.textContent('#h1-tps');
+    const footerTps = await page.textContent('#footer-tps');
+    expect(
+      !!tps && tps.endsWith('tok/s') && footerTps === tps,
+      `expected live tok/s on #h1-tps and #footer-tps, got ${JSON.stringify({ tps, footerTps })}`,
+    );
+    return `thinking effort -> xhigh, Open tab -> POST /rc/terminals, live speed ${tps}`;
+  },
+});
+
 async function runPageSection(): Promise<Result[]> {
   const queue = PAGE_SCENARIOS.filter((s) => selected(s.name));
   const results: Result[] = [];

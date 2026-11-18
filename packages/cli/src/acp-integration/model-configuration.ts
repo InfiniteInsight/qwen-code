@@ -371,6 +371,17 @@ export function parseReasoningSelection(
   return REASONING_EFFORT_TIERS.find((tier) => tier === value);
 }
 
+const NON_REASONING_QWEN_MODEL_IDS: ReadonlySet<string> = new Set([
+  'qwen-plus',
+  'qwen-max',
+  'qwen-turbo',
+  'qwen-long',
+  'qwen3-coder-plus',
+  'qwen3-coder-next',
+  'qwen3-max',
+  'coder-model',
+]);
+
 export function isReasoningSelectionSupported(
   modelId: string | undefined,
   selection: ReasoningSelection,
@@ -384,8 +395,7 @@ export function isReasoningSelectionSupported(
   )?.reasoning;
   if (!reasoning?.thinking) {
     const normalized = modelId.toLowerCase();
-    if (normalized.startsWith('qwen') || normalized === 'coder-model')
-      return false;
+    if (NON_REASONING_QWEN_MODEL_IDS.has(normalized)) return false;
   }
   if (selection === REASONING_EFFORT_DEFAULT) return true;
   if (selection === REASONING_EFFORT_NONE) {
