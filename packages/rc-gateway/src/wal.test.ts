@@ -561,7 +561,7 @@ describe('SessionWal', () => {
         sessionId: 'sess-1',
         segmentMaxBytes: 400,
         maxEvents: 1000,
-        now: () => Date.now() + 2 * DAY_MS,
+        now: () => Date.now() + 2 * WAL_DEFAULTS.walHorizonSec * 1_000,
       });
 
       expect(wal.count()).toBe(1);

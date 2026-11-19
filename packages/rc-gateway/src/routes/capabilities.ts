@@ -220,8 +220,8 @@ export function createCapabilityRoute(deps: {
       supportedScopes: ['owner', 'write', 'approve', 'session:read'],
       pairingEnabled: true,
       auditEnabled: true,
-      walHorizonSec: 86400,
-      walMaxEvents: 10000,
+      walHorizonSec: 30 * 86400,
+      walMaxEvents: 100000,
       workspaceControl: {
         permissions: true,
         trust: true,

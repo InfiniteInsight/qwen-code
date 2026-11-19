@@ -104,6 +104,8 @@ class MainActivity : AppCompatActivity() {
     override fun onStart() {
         super.onStart()
         ForegroundVisibility.isForeground = true
+        webView?.onResume()
+        webView?.resumeTimers()
     }
 
     private fun loadProfiles(snapshot: ConnectionRecovery? = null) {
@@ -675,10 +677,28 @@ class MainActivity : AppCompatActivity() {
             }
             is QwenRcDeepLink.OpenSession -> {
                 val targetProfile = activeProfile ?: state.profiles.firstOrNull() ?: return
+                val view = webView
+                if (view != null && view.parent != null && activeProfile?.id == targetProfile.id && OriginPolicy.isSameOrigin(targetProfile.origin, view.url.orEmpty())) {
+                    val sidLit = QwenBridgeInjector.jsStringLiteral(parsed.sessionId)
+                    view.evaluateJavascript(
+                        "if (typeof window.__qwenOpenSession === 'function') { window.__qwenOpenSession($sidLit, null); }",
+                        null,
+                    )
+                    return
+                }
                 connect(targetProfile, parsed.toNavigation())
             }
             is QwenRcDeepLink.OpenPermission -> {
                 val targetProfile = activeProfile ?: state.profiles.firstOrNull() ?: return
+                val view = webView
+                if (view != null && view.parent != null && activeProfile?.id == targetProfile.id && OriginPolicy.isSameOrigin(targetProfile.origin, view.url.orEmpty())) {
+                    val permLit = QwenBridgeInjector.jsStringLiteral(parsed.permissionId)
+                    view.evaluateJavascript(
+                        "if (typeof window.__qwenOpenSession === 'function') { window.__qwenOpenSession(null, $permLit); }",
+                        null,
+                    )
+                    return
+                }
                 connect(targetProfile, parsed.toNavigation())
             }
             is QwenRcDeepLink.PairDaemon -> {

@@ -92,9 +92,9 @@ export type ReplayResult =
  * are bounded by roughly half a segment, against ~12 MB at the old 16 MB cap.
  */
 export const WAL_DEFAULTS = {
-  walMaxEvents: 10_000,
-  walHorizonSec: 86_400,
-  walSegmentMaxBytes: 4 * 1024 * 1024,
+  walMaxEvents: 100_000,
+  walHorizonSec: 30 * 86_400,
+  walSegmentMaxBytes: 40 * 1024 * 1024,
 } as const;
 
 export interface SessionWalOptions {

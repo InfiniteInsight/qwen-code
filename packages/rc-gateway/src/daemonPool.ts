@@ -2441,6 +2441,13 @@ export class DaemonPool implements SessionDaemon {
     const { key, entry } = this.ownerEntry(sessionId, !isBackground);
     const client = entry.client;
     let evicted = false;
+    const keepAlive =
+      !isBackground && key !== this.defaultWorkspaceCwd
+        ? setInterval(() => {
+            if (!entry.dead) this.touch(entry);
+          }, 60_000)
+        : null;
+    keepAlive?.unref?.();
     try {
       for await (const event of client.subscribeEvents(sessionId, opts)) {
         if (!isBackground && key !== this.defaultWorkspaceCwd && !entry.dead) {
@@ -2464,6 +2471,7 @@ export class DaemonPool implements SessionDaemon {
       }
       throw err;
     } finally {
+      if (keepAlive !== null) clearInterval(keepAlive);
       if (!isBackground && key !== this.defaultWorkspaceCwd && !entry.dead) {
         this.touch(entry);
       }

@@ -1107,7 +1107,8 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         return out;
       },
       maxDaemons: opts.maxDaemons,
-      idleReapMs: 15 * 60_000,
+      idleReapMs:
+        Number(process.env['QWEN_RC_IDLE_REAP_MS']) || 4 * 60 * 60_000,
     });
     bootDaemonPool = daemonPool;
     // add-mid-turn-recovery: the boot daemon's death flows through the SAME
