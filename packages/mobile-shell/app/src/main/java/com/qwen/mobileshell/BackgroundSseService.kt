@@ -114,6 +114,7 @@ class BackgroundSseService : Service() {
         val sessionId: String,
         val sessionTitle: String?,
         val lastEventId: String?,
+        val cwd: String? = null,
     )
 
     private val running = AtomicBoolean(false)
@@ -143,7 +144,8 @@ class BackgroundSseService : Service() {
         }
         val title = intent.getStringExtra(EXTRA_SESSION_TITLE)
         val cursor = intent.getStringExtra(EXTRA_LAST_EVENT_ID)
-        val next = Target(profileId, sessionId, title, cursor)
+        val cwd = intent.getStringExtra(EXTRA_SESSION_CWD)
+        val next = Target(profileId, sessionId, title, cursor, cwd)
 
         val fg = buildForegroundNotification(title ?: sessionId)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -214,12 +216,29 @@ class BackgroundSseService : Service() {
                     }
                     activeConnection = conn
                     val code = conn.responseCode
-                    if (code == 401 || code == 403 || code == 404) {
+                    if (code == 401 || code == 403) {
                         conn.disconnect()
                         stopSelf()
                         break
                     }
-                    if (code in 200..299) {
+                    if (code == 412) {
+                        // Cursor fell behind WAL horizon: drop the stale cursor and
+                        // immediately attach to the live tail so the stream stays open.
+                        cursor = null
+                        conn.disconnect()
+                        connectedOnce = true
+                        backoffMs = 250L
+                    } else if (code == 404 || code == 409) {
+                        conn.disconnect()
+                        if (!target.cwd.isNullOrBlank() && tryResumeSession(profile.origin, token, target.sessionId, target.cwd)) {
+                            cursor = null
+                            connectedOnce = true
+                            backoffMs = 250L
+                        } else if (code == 404 && target.cwd.isNullOrBlank()) {
+                            stopSelf()
+                            break
+                        }
+                    } else if (code in 200..299) {
                         connectedOnce = true
                         backoffMs = 1_000L
                         BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).use { reader ->
@@ -234,8 +253,10 @@ class BackgroundSseService : Service() {
                                 }
                             }
                         }
+                        conn.disconnect()
+                    } else {
+                        conn.disconnect()
                     }
-                    conn.disconnect()
                 } catch (_: Exception) {
                     // Reconnect after bounded backoff while service remains active.
                 } finally {
@@ -253,6 +274,31 @@ class BackgroundSseService : Service() {
             }
             running.set(false)
         }, "qwen-rc-bg-sse").also { it.isDaemon = true; it.start() }
+    }
+
+    private fun tryResumeSession(origin: String, token: String, sessionId: String, cwd: String): Boolean {
+        return try {
+            val resumeUrl = URL("${origin}session/${Uri.encode(sessionId)}/resume")
+            val bodyBytes = """{"cwd":${QwenBridgeInjector.jsStringLiteral(cwd)}}""".toByteArray(Charsets.UTF_8)
+            val conn = (resumeUrl.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 15_000
+                readTimeout = 30_000
+                useCaches = false
+                doOutput = true
+                setFixedLengthStreamingMode(bodyBytes.size)
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Authorization", "Bearer $token")
+            }
+            try {
+                conn.outputStream.use { it.write(bodyBytes) }
+                conn.responseCode in 200..299
+            } finally {
+                conn.disconnect()
+            }
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun ensureChannels() {
@@ -342,6 +388,7 @@ class BackgroundSseService : Service() {
         const val EXTRA_SESSION_ID = "session_id"
         const val EXTRA_SESSION_TITLE = "session_title"
         const val EXTRA_LAST_EVENT_ID = "last_event_id"
+        const val EXTRA_SESSION_CWD = "session_cwd"
 
         private const val CHANNEL_STREAM = "qwen_rc_bg_stream"
         private const val CHANNEL_ALERTS = "qwen_rc_alerts"
@@ -355,6 +402,7 @@ class BackgroundSseService : Service() {
                 putExtra(EXTRA_SESSION_ID, pointer.sessionId)
                 putExtra(EXTRA_SESSION_TITLE, pointer.title)
                 putExtra(EXTRA_LAST_EVENT_ID, pointer.lastEventId)
+                putExtra(EXTRA_SESSION_CWD, pointer.cwd)
             }
             ContextCompatStart.startForeground(context, intent)
         }

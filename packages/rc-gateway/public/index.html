@@ -22752,6 +22752,9 @@
         if (note) note.textContent = line;
       };
 
+      const BRIDGE_WATCH_THROTTLE_MS = 10_000;
+      let lastBridgeWatchSig = null;
+      let lastBridgeWatchAt = 0;
       function persistWatch() {
         renderStreamStateReadout();
         if (watchedSessionId) {
@@ -22785,21 +22788,38 @@
             'setWatchedSession' in bridge &&
             typeof bridge.setWatchedSession === 'function'
           ) {
-            try {
-              void bridge.setWatchedSession({
-                sessionId: watchedSessionId,
-                lastEventId: lastSeenEventId,
-                title: watchedSessionTitle || null,
-                cwd: watchedSessionCwd || null,
-              });
-            } catch {
-              /* best-effort native sync */
+            const sig =
+              String(watchedSessionId) +
+              '\n' +
+              String(watchedSessionTitle || '') +
+              '\n' +
+              String(watchedSessionCwd || '');
+            const now = Date.now();
+            if (
+              sig !== lastBridgeWatchSig ||
+              lastSeenEventId === null ||
+              now - lastBridgeWatchAt >= BRIDGE_WATCH_THROTTLE_MS
+            ) {
+              lastBridgeWatchSig = sig;
+              lastBridgeWatchAt = now;
+              try {
+                void bridge.setWatchedSession({
+                  sessionId: watchedSessionId,
+                  lastEventId: lastSeenEventId,
+                  title: watchedSessionTitle || null,
+                  cwd: watchedSessionCwd || null,
+                });
+              } catch {
+                /* best-effort native sync */
+              }
             }
           }
         }
       }
 
       function clearPersistedWatch() {
+        lastBridgeWatchSig = null;
+        lastBridgeWatchAt = 0;
         if (
           'setWatchedSession' in bridge &&
           typeof bridge.setWatchedSession === 'function'
@@ -28049,6 +28069,15 @@
       // no longer always the current one.
       function pickConversation(s) {
         closeListToChat();
+        if (
+          s &&
+          s.sessionId === watchedSessionId &&
+          watchStreamAlive &&
+          transcriptModel.items.length > 0
+        ) {
+          void requestHostTerminal(s.sessionId);
+          return;
+        }
         void resumeConversation(s.sessionId, rowFolder(s), strOr(s.title, ''), {
           hostTerminal: true,
         });
@@ -32245,6 +32274,33 @@
         if (gen !== switchGen) return;
         void startWatch(id, 0);
       }
+
+      // #281: allow the native Android shell to focus or open a session
+      // deep-linked from a notification without destroying the live WebView.
+      window.__qwenOpenSession = (sessionId, permissionId) => {
+        setMoreOpen(false);
+        closeListToChat();
+        if (!sessionId || typeof sessionId !== 'string') {
+          if (watchedSessionId) {
+            void refreshPendingCards(watchedSessionId, true);
+          }
+          return;
+        }
+        if (sessionId === watchedSessionId) {
+          void refreshPendingCards(sessionId, true);
+          if (!watchStreamAlive && token()) {
+            clearWatchRetry();
+            watchRetryAttempt = 0;
+            void startWatch(watchedSessionId, lastSeenEventId, watchedSessionTitle);
+          }
+          return;
+        }
+        const pinned = Promise.race([
+          refreshPendingCards(sessionId, true),
+          new Promise((r) => setTimeout(r, 1500)),
+        ]);
+        void openConversationById(sessionId, pinned);
+      };
 
       // Turn-end push deep link (#40): a push notification's URL is
       // /ui/?session=<id>. The push payload is metadata-only - it carries

@@ -1969,7 +1969,9 @@ export async function startStubDaemon(
     const extraFrames = livePromptHistory.get(sessionId) ?? [];
     const allFrames = [...baseFrames, ...extraFrames];
     const parsedCursor =
-      rawCursor !== undefined && /^\d+$/.test(rawCursor)
+      opts.promptBroadcastsEvents &&
+      rawCursor !== undefined &&
+      /^\d+$/.test(rawCursor)
         ? Number.parseInt(rawCursor, 10)
         : 0;
     for (const f of allFrames) {
