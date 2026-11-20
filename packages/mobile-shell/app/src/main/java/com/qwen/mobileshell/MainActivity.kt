@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.ActivityNotFoundException
+import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -11,8 +12,13 @@ import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.MediaStore
+import android.util.Base64
+import android.webkit.MimeTypeMap
 import android.widget.Toast
+import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import javax.net.ssl.HttpsURLConnection
 import android.text.InputType
 import android.text.method.PasswordTransformationMethod
@@ -647,6 +653,98 @@ class MainActivity : AppCompatActivity() {
                 "showConnections" -> {
                     replyProxy.postMessage(QwenBridgeInjector.formatSuccessReply(req.id, "null"))
                     runOnUiThread { showProfiles() }
+                }
+                "downloadWorkspaceFile" -> {
+                    val filePath = req.filePath
+                    if (filePath.isNullOrBlank()) {
+                        replyProxy.postMessage(QwenBridgeInjector.formatErrorReply(req.id, "invalid_path"))
+                        return@addWebMessageListener
+                    }
+                    val tok = try {
+                        activeProfile?.token ?: store?.vault?.load()?.profiles?.find { it.id == profile.id }?.token
+                    } catch (_: Exception) {
+                        activeProfile?.token
+                    }
+                    if (tok.isNullOrBlank()) {
+                        replyProxy.postMessage(QwenBridgeInjector.formatErrorReply(req.id, "missing_token"))
+                        return@addWebMessageListener
+                    }
+                    val rawName = req.filename ?: filePath.substringAfterLast('/')
+                    val safeName = rawName.replace(Regex("[\\\\/:*?\"<>|\\x00-\\x1f]+"), "_").trim().ifEmpty { "download" }
+                    val ext = safeName.substringAfterLast('.', "").lowercase()
+                    val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
+                    val baseOrigin = profile.origin.trimEnd('/') + "/"
+                    val ws = req.workspace
+                    Thread({
+                        try {
+                            val values = ContentValues().apply {
+                                put(MediaStore.Downloads.DISPLAY_NAME, safeName)
+                                put(MediaStore.Downloads.MIME_TYPE, mime)
+                                put(MediaStore.Downloads.IS_PENDING, 1)
+                            }
+                            val resolver = applicationContext.contentResolver
+                            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                                ?: throw IllegalStateException("downloads_insert_failed")
+                            var totalWritten = 0L
+                            var offset = 0L
+                            val windowBytes = 256 * 1024
+                            val maxTotal = 50L * 1024L * 1024L
+                            try {
+                                resolver.openOutputStream(uri)?.use { out ->
+                                    while (offset < maxTotal) {
+                                        val qPath = URLEncoder.encode(filePath, "UTF-8")
+                                        val qWs = if (!ws.isNullOrBlank()) "&workspace=" + URLEncoder.encode(ws, "UTF-8") else ""
+                                        val endpoint = "${baseOrigin}rc/workspace/file/bytes?path=$qPath&offset=$offset&maxBytes=$windowBytes$qWs"
+                                        val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                                            requestMethod = "GET"
+                                            connectTimeout = 10_000
+                                            readTimeout = 20_000
+                                            setRequestProperty("Authorization", "Bearer $tok")
+                                            setRequestProperty("Accept", "application/json")
+                                        }
+                                        val body = try {
+                                            if (conn.responseCode != 200) {
+                                                throw IllegalStateException("http_${conn.responseCode}")
+                                            }
+                                            conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                                        } finally {
+                                            conn.disconnect()
+                                        }
+                                        val parsed = SimpleJson.parseFlatObject(body) ?: throw IllegalStateException("invalid_json")
+                                        val b64 = (parsed["contentBase64"] as? String).orEmpty()
+                                        val chunk = if (b64.isNotEmpty()) Base64.decode(b64, Base64.DEFAULT) else ByteArray(0)
+                                        if (chunk.isNotEmpty()) {
+                                            out.write(chunk)
+                                            totalWritten += chunk.size
+                                        }
+                                        val returned = (parsed["returnedBytes"] as? String)?.toLongOrNull() ?: chunk.size.toLong()
+                                        val totalSize = (parsed["sizeBytes"] as? String)?.toLongOrNull() ?: 0L
+                                        val truncated = parsed["truncated"] == true
+                                        offset += returned
+                                        if (!truncated || returned <= 0L || (totalSize > 0L && offset >= totalSize)) {
+                                            break
+                                        }
+                                    }
+                                } ?: throw IllegalStateException("downloads_stream_failed")
+                                val doneValues = ContentValues().apply {
+                                    put(MediaStore.Downloads.IS_PENDING, 0)
+                                }
+                                resolver.update(uri, doneValues, null, null)
+                            } catch (e: Exception) {
+                                try { resolver.delete(uri, null, null) } catch (_: Exception) {}
+                                throw e
+                            }
+                            val resultJson = """{"ok":true,"filename":${QwenBridgeInjector.jsStringLiteral(safeName)},"sizeBytes":$totalWritten}"""
+                            runOnUiThread {
+                                Toast.makeText(this@MainActivity, "Saved $safeName to Downloads", Toast.LENGTH_SHORT).show()
+                                replyProxy.postMessage(QwenBridgeInjector.formatSuccessReply(req.id, resultJson))
+                            }
+                        } catch (_: Exception) {
+                            runOnUiThread {
+                                replyProxy.postMessage(QwenBridgeInjector.formatErrorReply(req.id, "download_failed"))
+                            }
+                        }
+                    }, "qwen-rc-download").start()
                 }
                 else -> {
                     replyProxy.postMessage(QwenBridgeInjector.formatErrorReply(req.id, "unsupported_method"))

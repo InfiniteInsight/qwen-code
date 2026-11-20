@@ -7091,6 +7091,38 @@
             text-transform: none;
             letter-spacing: 0;
           }
+          #transcript .tool-file-acts {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px;
+            margin-top: 6px;
+          }
+          #transcript .tool-dl {
+            min-height: 36px;
+            padding: 4px 12px;
+            border: 1px solid var(--g1-rule);
+            border-radius: 6px;
+            background: #14171c;
+            color: var(--g1-ink-hi);
+            font-size: 12px;
+            cursor: pointer;
+          }
+          #transcript .tool-dl:hover {
+            border-color: var(--g1-ink-mid);
+          }
+          #transcript .tool-dl:disabled {
+            opacity: 0.6;
+            cursor: default;
+          }
+          #transcript .tool-dl-note {
+            color: var(--g1-ink-mid);
+            font-size: 12px;
+          }
+          #transcript .tool-dl-note[hidden],
+          #transcript .tool-dl-note:empty {
+            display: none;
+          }
           /* Fork-lineage breadcrumb above the transcript (add-session-forking). */
           #lineage {
             margin-top: 8px;
@@ -9451,6 +9483,10 @@
           // offered only where the gateway and daemon serve the agent reads.
           onTraceSubagent: (item) => openAgentTrace(item && item.toolCallId),
           canTraceSubagent: () => agentsOn(),
+          // #282: inline one-tap download on completed file-write/edit tool rows.
+          toolDownloadPath: (item) => resolveToolDownloadPath(item),
+          onDownloadToolFile: (item, relPath) =>
+            void doDownloadToolFile(item, relPath),
           // May still be null if the boot read has not landed; the view then
           // starts in its own default and applyStampZone corrects it below.
           stampZone,
@@ -14926,6 +14962,197 @@
           if (gen !== wsViewGen) return;
           status.textContent = 'read failed: ' + err.message;
         }
+      }
+
+      // #282. Multi-window binary download helper backed by
+      // GET /rc/workspace/file/bytes?path=<rel>&offset=<n>. Pages 256 KiB
+      // windows up to 50 MiB so files larger than a single read window
+      // (PDFs, images, archives, notebooks, Office docs, long markdown/code)
+      // download whole rather than truncated at 256 KiB.
+      const WORKSPACE_DL_WINDOW_BYTES = 256 * 1024;
+      const WORKSPACE_DL_MAX_BYTES = 50 * 1024 * 1024;
+      let workspaceDownloadUrl = null;
+      function safeDownloadLeaf(relPath, fallbackName) {
+        const raw =
+          strOr(fallbackName, '') ||
+          strOr(relPath, '').replace(/\/+$/, '').split('/').pop() ||
+          'file';
+        const cleaned = raw
+          .replace(/[\\/:*?"<>|\x00-\x1f]+/g, '_')
+          .replace(/^[.\s]+/, '')
+          .slice(0, 120)
+          .trim();
+        return cleaned || 'file';
+      }
+      function toWorkspaceRelPath(rawPath) {
+        let p = strOr(rawPath, '').trim();
+        if (!p || /^https?:\/\//i.test(p)) return '';
+        const cwd = (
+          watchedSessionCwd ||
+          (ctxInfo && ctxInfo.cwd) ||
+          orgCwd() ||
+          ''
+        ).replace(/\/+$/, '');
+        if (p.startsWith('/')) {
+          if (cwd && p.startsWith(cwd + '/')) {
+            p = p.slice(cwd.length + 1);
+          } else {
+            return '';
+          }
+        }
+        p = p.replace(/^\.\/+/, '');
+        if (!p || p === '.' || p.startsWith('../') || p.includes('/../')) {
+          return '';
+        }
+        return p;
+      }
+      function resolveToolDownloadPath(item) {
+        if (!item || item.kind !== 'tool' || item.status !== 'completed') {
+          return '';
+        }
+        if (!daemonHasFeature('workspace_file_read')) return '';
+        const inp =
+          item.input && typeof item.input === 'object' ? item.input : null;
+        const label = strOr(item.label, '');
+        const isEditKind =
+          item.toolKind === 'edit' ||
+          /^(write_file|writefile|edit|create_file|save_file)\b/i.test(label) ||
+          /\b(writing to|wrote|created|updated|edited)\b/i.test(label) ||
+          !!(
+            inp &&
+            (typeof inp.content === 'string' ||
+              typeof inp.new_string === 'string' ||
+              typeof inp.newText === 'string')
+          ) ||
+          (Array.isArray(item.result) &&
+            item.result.some(
+              (c) => c && c.type === 'diff' && typeof c.path === 'string',
+            ));
+        if (!isEditKind) return '';
+        let candidate = '';
+        if (inp) {
+          candidate =
+            strOr(inp.file_path, '') ||
+            strOr(inp.path, '') ||
+            strOr(inp.filePath, '') ||
+            strOr(inp.target_file, '');
+        }
+        if (!candidate && Array.isArray(item.locations) && item.locations[0]) {
+          candidate = strOr(item.locations[0].path, '');
+        }
+        if (!candidate && Array.isArray(item.result)) {
+          const diff = item.result.find(
+            (c) => c && c.type === 'diff' && typeof c.path === 'string',
+          );
+          if (diff) candidate = diff.path;
+        }
+        return toWorkspaceRelPath(candidate);
+      }
+      async function downloadWorkspaceFileBytes(relPath, fallbackName) {
+        const cleanRel = toWorkspaceRelPath(relPath) || strOr(relPath, '').trim();
+        if (!cleanRel) {
+          return { ok: false, error: 'Missing workspace file path.' };
+        }
+        const name = safeDownloadLeaf(cleanRel, fallbackName);
+        const q = typeof window.qwen === 'object' ? window.qwen : null;
+        if (q && typeof q.downloadWorkspaceFile === 'function') {
+          try {
+            const ws =
+              watchedSessionCwd ||
+              (ctxInfo && ctxInfo.cwd) ||
+              orgCwd() ||
+              null;
+            const r = await q.downloadWorkspaceFile({
+              path: cleanRel,
+              workspace: ws,
+              filename: name,
+            });
+            if (r && r.ok) {
+              return {
+                ok: true,
+                name: strOr(r.filename, name),
+                sizeBytes: typeof r.sizeBytes === 'number' ? r.sizeBytes : 0,
+                nativeSaved: true,
+              };
+            }
+          } catch {
+            // Fall back to standard browser fetch + Blob download below.
+          }
+        }
+        const chunks = [];
+        let offset = 0;
+        let totalSize = 0;
+        while (offset < WORKSPACE_DL_MAX_BYTES) {
+          let res;
+          try {
+            res = await fetch(
+              wsTargetQuery(
+                '/rc/workspace/file/bytes?path=' +
+                  encodeURIComponent(cleanRel) +
+                  '&offset=' +
+                  offset +
+                  '&maxBytes=' +
+                  WORKSPACE_DL_WINDOW_BYTES,
+              ),
+              { headers: { Authorization: 'Bearer ' + token() } },
+            );
+          } catch (err) {
+            return {
+              ok: false,
+              error: err && err.message ? err.message : String(err),
+            };
+          }
+          if (!res.ok) {
+            const e = await res.json().catch(() => ({}));
+            return { ok: false, error: wsFilesErrorText(res.status, e) };
+          }
+          const data = await res.json().catch(() => ({}));
+          const b64 =
+            typeof data.contentBase64 === 'string' ? data.contentBase64 : '';
+          const bin = b64 ? atob(b64) : '';
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          chunks.push(bytes);
+          const returned =
+            typeof data.returnedBytes === 'number'
+              ? data.returnedBytes
+              : bytes.length;
+          if (typeof data.sizeBytes === 'number') totalSize = data.sizeBytes;
+          offset += returned;
+          if (!data.truncated || returned <= 0 || (totalSize > 0 && offset >= totalSize)) {
+            break;
+          }
+        }
+        if (workspaceDownloadUrl) URL.revokeObjectURL(workspaceDownloadUrl);
+        workspaceDownloadUrl = URL.createObjectURL(
+          new Blob(chunks, { type: 'application/octet-stream' }),
+        );
+        const link = document.createElement('a');
+        link.href = workspaceDownloadUrl;
+        link.download = name;
+        link.rel = 'noopener';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        return {
+          ok: true,
+          name,
+          sizeBytes: totalSize || offset,
+        };
+      }
+      async function doDownloadToolFile(item, relPath) {
+        if (!item || item.dlBusy) return;
+        item.dlBusy = true;
+        item.dlNote = '';
+        transcriptModel.touch(item);
+        const r = await downloadWorkspaceFileBytes(relPath);
+        item.dlBusy = false;
+        item.dlNote = r.ok
+          ? 'Downloaded ' +
+            r.name +
+            (r.sizeBytes > 0 ? ' (' + formatBytes(r.sizeBytes) + ')' : '')
+          : 'Download failed: ' + r.error;
+        transcriptModel.touch(item);
       }
 
       // A 422 binary_file is the daemon's cue that the path is not text, and
@@ -24928,6 +25155,17 @@
       function artIsSnapshot(a) {
         return a.kind === 'html' && a.storage === 'published';
       }
+      function artHasWorkspaceFile(a) {
+        return !!(
+          a &&
+          !artIsSnapshot(a) &&
+          strOr(a.workspacePath, '') &&
+          a.status !== 'missing'
+        );
+      }
+      function artifactsCanDownloadFile() {
+        return daemonHasFeature('workspace_file_read');
+      }
       const ART_KINDS = {
         html: 'web page',
         link: 'link',
@@ -24991,6 +25229,7 @@
       function renderArtSheet() {
         if (!artSheet.open) return;
         const canOpen = artifactsCanOpen();
+        const canDownload = artifactsCanDownloadFile();
         const writable = artifactsWritable();
         const list = $('art-list');
         // A re-render replaces the rows; the control that had focus gets it
@@ -25052,6 +25291,14 @@
               open.disabled = artSheet.busy;
               open.setAttribute('aria-label', 'Open ' + title + ' as a download');
               acts.appendChild(open);
+            }
+            if (artHasWorkspaceFile(a) && canDownload) {
+              const dl = orgEl('button', 'cv-btn art-dl', 'Download');
+              dl.type = 'button';
+              dl.dataset.id = a.id;
+              dl.disabled = artSheet.busy;
+              dl.setAttribute('aria-label', 'Download ' + title);
+              acts.appendChild(dl);
             }
             // Every row, for a token that can write: whether this client may
             // remove it is the daemon's call (a tool or hook artifact, yes;
@@ -25261,6 +25508,34 @@
         artSheet.tone = '';
         renderArtSheet();
       }
+      async function artDownload(id) {
+        const a = (artSheet.rows || []).find((x) => x && x.id === id);
+        if (!a || artSheet.busy) return;
+        const relPath = strOr(a.workspacePath, '');
+        if (!relPath) return;
+        const title = artTitle(a);
+        const gen = artSheet.gen;
+        artSheet.busy = true;
+        artSheet.note = 'Downloading ' + title + '...';
+        artSheet.tone = '';
+        renderArtSheet();
+        const r = await downloadWorkspaceFileBytes(relPath, title);
+        if (gen !== artSheet.gen || !artSheet.open) return;
+        artSheet.busy = false;
+        if (!r.ok) {
+          artSheet.note = 'Not downloaded: ' + r.error;
+          artSheet.tone = 'err';
+          renderArtSheet();
+          return;
+        }
+        artSheet.note =
+          'Downloaded ' +
+          r.name +
+          (r.sizeBytes > 0 ? ' (' + formatBytes(r.sizeBytes) + ')' : '') +
+          '. It opens from your downloads, outside this page.';
+        artSheet.tone = '';
+        renderArtSheet();
+      }
       function artRefusalText(r) {
         // The daemon refuses a change to a client artifact another client
         // owns. What a tool or a hook recorded is not refused, so this is
@@ -25403,6 +25678,8 @@
           renderArtSheet();
         } else if (b.classList.contains('art-open')) {
           void artOpen(id);
+        } else if (b.classList.contains('art-dl')) {
+          void artDownload(id);
         } else if (b.classList.contains('art-rm')) {
           void artRemove(id);
         }

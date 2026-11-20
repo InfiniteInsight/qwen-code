@@ -15,6 +15,9 @@ internal data class BridgeRpcRequest(
     val reason: String? = null,
     val watched: WatchedSessionPointer? = null,
     val watchedCleared: Boolean = false,
+    val filePath: String? = null,
+    val workspace: String? = null,
+    val filename: String? = null,
 )
 
 internal object QwenBridgeInjector {
@@ -107,6 +110,14 @@ internal object QwenBridgeInjector {
         title: ptr.title ? String(ptr.title) : null,
         cwd: ptr.cwd ? String(ptr.cwd) : null
       });
+    },
+    downloadWorkspaceFile: function(opts) {
+      if (!opts || !opts.path) return Promise.reject(new Error('invalid_path'));
+      return rpc('downloadWorkspaceFile', {
+        filePath: String(opts.path),
+        workspace: opts.workspace ? String(opts.workspace) : null,
+        filename: opts.filename ? String(opts.filename) : null
+      });
     }
   };
 })();
@@ -142,6 +153,9 @@ internal object QwenBridgeInjector {
             reason = fields["reason"] as? String,
             watched = watched,
             watchedCleared = cleared || (method == "setWatchedSession" && watched == null),
+            filePath = (fields["filePath"] as? String)?.takeIf { it.isNotBlank() && it.length <= 2048 },
+            workspace = (fields["workspace"] as? String)?.takeIf { it.isNotBlank() && it.length <= 2048 },
+            filename = (fields["filename"] as? String)?.takeIf { it.isNotBlank() && it.length <= 256 },
         )
     }
 }
