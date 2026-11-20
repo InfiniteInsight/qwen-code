@@ -10005,6 +10005,7 @@
       // open past the end of the turn. Declared here rather than beside the
       // send handler because the frame handler above it reads it.
       let abandonPendingSend = null;
+      let pendingSendStartedAt = 0;
       function ensureCrashBanner() {
         if (!crashBanner) {
           crashBanner = document.createElement('div');
@@ -17094,8 +17095,10 @@
             // that close it out.
             finishThought();
             endTurn();
-            if (abandonPendingSend) abandonPendingSend('turn');
-            drainOutbox(0);
+            if (!insideReplay) {
+              if (abandonPendingSend) abandonPendingSend('turn');
+              drainOutbox(0);
+            }
             const se = ev.data && typeof ev.data === 'object' ? ev.data : {};
             if (se.code === 'prompt_timeout') {
               const secs =
@@ -17206,12 +17209,14 @@
             // and its own finally is the only thing that re-enables the
             // button, so abandon it here rather than leaving the button
             // hostage to a request whose reason for existing has ended.
-            if (abandonPendingSend) abandonPendingSend('turn');
-            // #70: the turn is over, so anything waiting goes now. Drained after
-            // the abandon rather than before, because the abandon is what starts
-            // the send handler's finally freeing the button, and the drain waits
-            // on that button.
-            drainOutbox(0);
+            if (!insideReplay) {
+              if (abandonPendingSend) abandonPendingSend('turn');
+              // #70: the turn is over, so anything waiting goes now. Drained after
+              // the abandon rather than before, because the abandon is what starts
+              // the send handler's finally freeing the button, and the drain waits
+              // on that button.
+              drainOutbox(0);
+            }
             // A turn can't end while an Agent tool is still in flight -
             // settle any indicator whose terminal update never arrived.
             transcriptModel.settleAllSubagents();
@@ -17265,8 +17270,10 @@
             endTurn();
             // A prompt this window sent holds Send until its request settles;
             // the turn is over, so release it, as turn_complete does (#70).
-            if (abandonPendingSend) abandonPendingSend('turn');
-            drainOutbox(0);
+            if (!insideReplay) {
+              if (abandonPendingSend) abandonPendingSend('turn');
+              drainOutbox(0);
+            }
             return;
           }
           case 'session_rewound': {
@@ -22553,15 +22560,25 @@
             if (!turnOpen) showProcessing();
           } else if (
             body.hasActivePrompt === false &&
-            (body.activeWorkState === 'idle' || daemonTurnActive)
+            (body.activeWorkState === 'idle' ||
+              body.activeWorkState === undefined ||
+              daemonTurnActive)
           ) {
             daemonTurnActive = false;
             if (
-              turnOpen &&
-              abandonPendingSend === null &&
-              runningToolIds.size === 0
+              abandonPendingSend !== null &&
+              Date.now() - pendingSendStartedAt >= 4000
+            ) {
+              abandonPendingSend('turn');
+            }
+            if (
+              (turnOpen || runningToolIds.size > 0) &&
+              abandonPendingSend === null
             ) {
               endTurn();
+            }
+            if (outbox.length > 0 && !turnRunning()) {
+              drainOutbox(0);
             }
           }
           if (
@@ -22649,6 +22666,13 @@
       // answer that happens to land last.
       function noteConversationSwitch() {
         switchGen += 1;
+        if (drainOutboxTimer) {
+          clearTimeout(drainOutboxTimer);
+          drainOutboxTimer = null;
+        }
+        if (abandonPendingSend) {
+          abandonPendingSend('switch');
+        }
         // #190: the usage figure names the conversation being left.
         sessionUsage = null;
         sessionUsageGen += 1;
@@ -24003,6 +24027,7 @@
       // path is the most-reported-confusing part of this page.
       const OUTBOX_PREFIX = 'qwen-rc:outbox:';
       let outbox = [];
+      let drainOutboxTimer = null;
 
       function outboxKey(id) {
         return OUTBOX_PREFIX + id;
@@ -24097,7 +24122,16 @@
       // daemon says it holds it; a refusal leaves it queued and says why.
       $('queued-now').onclick = async () => {
         if (!watchedSessionId || outbox.length === 0) return;
-        if (!turnRunning()) return drainOutbox(0);
+        if (!turnRunning()) {
+          const draft = $('prompt').value;
+          if (draft.trim()) $('prompt').value = '';
+          drainOutbox(0);
+          if (draft.trim()) {
+            $('prompt').value = draft;
+            saveDraft();
+          }
+          return;
+        }
         const id = watchedSessionId;
         const btn = $('queued-now');
         btn.disabled = true;
@@ -24143,6 +24177,10 @@
       // Send would do nothing and the message would sit queued with no reason
       // given, so this waits for the button and says so if it never comes.
       function drainOutbox(attempt) {
+        if (drainOutboxTimer) {
+          clearTimeout(drainOutboxTimer);
+          drainOutboxTimer = null;
+        }
         if (outbox.length === 0) return;
         // The send path clears the composer at dispatch. Dispatching over text
         // the reader is typing would take that text with no way to get it back,
@@ -24156,7 +24194,12 @@
             setStatus('a queued message is waiting: send is still held');
             return;
           }
-          setTimeout(() => drainOutbox(attempt + 1), 50);
+          const drainGen = switchGen;
+          drainOutboxTimer = setTimeout(() => {
+            drainOutboxTimer = null;
+            if (drainGen !== switchGen) return;
+            drainOutbox(attempt + 1);
+          }, 50);
           return;
         }
         if (!watchedSessionId) return;
@@ -26125,6 +26168,7 @@
         const sendLbl = $('send').querySelector('.lbl');
         const sendLabel = sendLbl.textContent;
         sendLbl.textContent = 'waiting…';
+        const sendSessionId = watchedSessionId;
         const sendAbort = new AbortController();
         let sendAbandoned = null;
         const abandon = (why) => {
@@ -26132,6 +26176,7 @@
           sendAbort.abort();
         };
         abandonPendingSend = abandon;
+        pendingSendStartedAt = Date.now();
         // #70: the way to queue is on screen for exactly as long as Send is
         // held, because that hold is the reason it exists.
         renderQueueControl();
@@ -26279,7 +26324,10 @@
             }
           }
         } catch (e) {
-          if (sendAbandoned === 'watchdog') {
+          if (sendAbandoned === 'switch' || watchedSessionId !== sendSessionId) {
+            // Left this conversation while the prompt request was in flight;
+            // do not overwrite the new conversation's status line.
+          } else if (sendAbandoned === 'watchdog') {
             // Abandoned here rather than lost by the network, and said so: the
             // turn may still be running, so this is not reported as a failed
             // send, but the button is back and the next prompt is the user's
@@ -26308,6 +26356,7 @@
           // mid-turn of a send that is genuinely still running.
           if (abandonPendingSend === abandon) {
             abandonPendingSend = null;
+            pendingSendStartedAt = 0;
             $('send').disabled = false;
             sendLbl.textContent = sendLabel;
             // #70: the hold is gone, so the reason to queue rather than send is
@@ -26316,7 +26365,7 @@
             renderQueueControl();
           }
         }
-        if (refused) {
+        if (refused && watchedSessionId === sendSessionId) {
           // The daemon never ran this prompt, so no frame is coming to consume
           // the marker. Leaving it would let it swallow someone else's
           // identical message later.
@@ -30161,7 +30210,10 @@
               // cursor immediately after.
               insideReplay = true;
               for (const f of replay) renderFrame(f);
-              if (j.hasActivePrompt !== true) markPrevTurnEnd();
+              if (j.hasActivePrompt !== true) {
+                endTurn();
+                markPrevTurnEnd();
+              }
               let from = 0;
               if (typeof j.lastEventId === 'number') {
                 from = j.lastEventId;
@@ -30791,6 +30843,7 @@
         // still waiting. A queued message that followed the reader into some
         // other conversation would be the failure this control exists to avoid.
         outbox = loadOutbox(id);
+        renderQueueControl();
         watchedSessionTitle = title || null;
         showSessionTitle(watchedSessionTitle);
         // issue #46: a re-tap / deep link / resume replaces the previous
