@@ -29,6 +29,8 @@ interface Item {
   toolCallId?: string;
   label?: string;
   status?: string;
+  toolKind?: string;
+  locations?: Array<{ path: string; line?: number | null }>;
   input?: unknown;
   result?: unknown;
   open?: Array<{ text: string; status: string }>;
@@ -122,5 +124,27 @@ describe('a to-do list closes the thought before it (#171)', () => {
     m.appendThought('planning');
     m.setPlan([]);
     expect(m.items[0].live).toBe(true);
+  });
+
+  it('retains toolKind and locations across status updates for inline file downloads (#282)', () => {
+    const m = api.createTranscriptModel();
+    m.upsertTool({
+      toolCallId: 'w1',
+      title: 'WriteFile Writing to docs/report.md',
+      kind: 'edit',
+      status: 'in_progress',
+      locations: [{ path: '/repo/docs/report.md', line: null }],
+      rawInput: { file_path: 'docs/report.md', content: '# Report' },
+    });
+    m.upsertTool({
+      toolCallId: 'w1',
+      status: 'completed',
+    });
+    expect(m.items).toHaveLength(1);
+    expect(m.items[0].status).toBe('completed');
+    expect(m.items[0].toolKind).toBe('edit');
+    expect(m.items[0].locations).toEqual([
+      { path: '/repo/docs/report.md', line: null },
+    ]);
   });
 });

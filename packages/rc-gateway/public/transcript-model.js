@@ -837,6 +837,11 @@
       var id = strOr(u.toolCallId, '');
       var tool = id ? toolIndex.get(id) : null;
       var status = toolStatusOf(u, tool ? tool.status : '');
+      var toolKind = strOr(u.kind, '');
+      var locations =
+        Array.isArray(u.locations) && u.locations.length > 0
+          ? u.locations
+          : undefined;
       var input = u.rawInput;
       var result = toolResult(u);
       var stamp = validStamp(time);
@@ -846,6 +851,8 @@
         // (subagentSessionReady); taking '' from it dropped [in_progress] for
         // the whole subagent run.
         if (status) tool.status = status;
+        if (toolKind) tool.toolKind = toolKind;
+        if (locations !== undefined) tool.locations = locations;
         if (input !== undefined) tool.input = input;
         if (result !== undefined) tool.result = result;
         if (
@@ -859,10 +866,12 @@
           toolCallId: id,
           label: toolLabel(u, id, ''),
           status: status,
+          toolKind: toolKind,
           time: stamp,
           sub: null,
           expanded: false,
         });
+        if (locations !== undefined) tool.locations = locations;
         if (input !== undefined) tool.input = input;
         if (result !== undefined) tool.result = result;
         if (id) toolIndex.set(id, tool);

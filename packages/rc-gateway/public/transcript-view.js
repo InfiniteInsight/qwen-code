@@ -724,6 +724,7 @@
       m.st = null;
       m.stamp = null;
       m.sub = null;
+      m.fileActs = null;
       patchTool(m, now);
       return b;
     }
@@ -834,6 +835,42 @@
       if (item.sub) {
         if (!m.sub) m.sub = buildSub(m.bubble, m);
         patchSub(m.sub, item.sub, now);
+      }
+      var dlPath =
+        typeof opts.toolDownloadPath === 'function'
+          ? opts.toolDownloadPath(item)
+          : '';
+      if (dlPath) {
+        if (!m.fileActs) {
+          var box = el('div', 'tool-file-acts');
+          var btn = el('button', 'tool-dl', '');
+          btn.type = 'button';
+          btn.addEventListener('click', function (ev) {
+            ev.stopPropagation();
+            if (typeof opts.onDownloadToolFile === 'function') {
+              opts.onDownloadToolFile(item, m.fileActs.path);
+            }
+          });
+          var note = el('span', 'tool-dl-note');
+          box.appendChild(btn);
+          box.appendChild(note);
+          m.bubble.appendChild(box);
+          m.fileActs = { box: box, btn: btn, note: note, path: dlPath };
+        }
+        m.fileActs.path = dlPath;
+        var leaf = dlPath.replace(/\/+$/, '').split('/').pop() || dlPath;
+        var btnText = item.dlBusy ? 'Downloading...' : 'Download ' + leaf;
+        if (m.fileActs.btn.textContent !== btnText) {
+          m.fileActs.btn.textContent = btnText;
+        }
+        var busy = !!item.dlBusy;
+        if (m.fileActs.btn.disabled !== busy) m.fileActs.btn.disabled = busy;
+        var dlNote = item.dlNote || '';
+        setText(m.fileActs.note, dlNote);
+        m.fileActs.note.hidden = !dlNote;
+      } else if (m.fileActs) {
+        m.fileActs.box.remove();
+        m.fileActs = null;
       }
     }
 
