@@ -66,6 +66,8 @@ export type ReattachAttempt =
 
 export interface ReattachLoopDeps {
   sessionId: string;
+  /** Latest session id when the TUI switched conversations in-place (#284). */
+  currentSessionId?(): string | Promise<string>;
   /** Run the TUI to completion and return its exit code. */
   run(linuxArgv: string[], cwd: string): Promise<number>;
   /** Ask the gateway for the session's attach material. Must not throw. */
@@ -142,7 +144,9 @@ export async function runWithReattach(
     // wait, and must not write to a pty that is not there.
     if (deps.terminalGone?.()) return TERMINAL_GONE_EXIT;
 
-    deps.log(`daemon gone, re-attaching ${deps.sessionId}…`);
+    const activeSessionId =
+      (await deps.currentSessionId?.()) || deps.sessionId;
+    deps.log(`daemon gone, re-attaching ${activeSessionId}…`);
     const lostAt = deps.now();
     if (lostAt - startedAt >= stable) delay = initial;
 
@@ -174,7 +178,7 @@ export async function runWithReattach(
         }
         if (deps.now() - lostAt >= giveUp) {
           deps.log(
-            `qwen-rc attach: gave up re-attaching ${deps.sessionId} after ` +
+            `qwen-rc attach: gave up re-attaching ${activeSessionId} after ` +
               `${Math.round(giveUp / 60_000)} minutes (${got.reason})`,
           );
           return 1;

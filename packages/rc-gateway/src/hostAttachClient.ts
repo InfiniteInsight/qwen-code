@@ -23,12 +23,16 @@
 
 import { X509Certificate } from 'node:crypto';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, readFile, rm } from 'node:fs/promises';
 import { request as httpsRequest } from 'node:https';
 import type { SpawnSyncOptions, SpawnSyncReturns } from 'node:child_process';
 import { constants as osConstants } from 'node:os';
 import { join, resolve } from 'node:path';
 import { writeFileAtomic } from './atomicWrite.js';
+import {
+  HOST_TAB_SESSIONS_DIR,
+  hostTabSessionPath,
+} from './hostMirrors.js';
 import { hostTabEndsDir, isValidTabId } from './hostTabs.js';
 import { readState } from './launcher/state.js';
 import { readLocalToken } from './localCredential.js';
@@ -609,6 +613,28 @@ export async function runHostAttach(deps: HostAttachRunDeps): Promise<number> {
   // #212: the gateway's record of this tab, when it keeps one (an older
   // gateway answers none, and then nothing is reported).
   const tabId = isValidTabId(res.body.tabId) ? res.body.tabId : undefined;
+  const wrapperPid = deps.pid ?? process.pid;
+  const sessionFilePath = hostTabSessionPath(deps.rcDir, wrapperPid);
+  try {
+    await mkdir(join(deps.rcDir, HOST_TAB_SESSIONS_DIR), {
+      recursive: true,
+      mode: 0o700,
+    });
+    await writeFileAtomic(sessionFilePath, `${attachment.sessionId}\n`, {
+      mode: 0o600,
+    });
+  } catch {
+    // Best-effort sidecar for in-place /resume and /branch session tracking (#284).
+  }
+  const readCurrentSessionId = async (): Promise<string> => {
+    try {
+      const current = (await readFile(sessionFilePath, 'utf8')).trim();
+      if (current.length > 0) return current;
+    } catch {
+      // Fall back to the initial attachment session id.
+    }
+    return attachment.sessionId;
+  };
 
   stderr(`attached ${attachment.sessionId} in ${attachment.workspaceCwd}`);
   // Node has no execvp, so the TUI runs as a child with this terminal handed
@@ -632,7 +658,14 @@ export async function runHostAttach(deps: HostAttachRunDeps): Promise<number> {
     const restore = (deps.shieldSignals ?? shieldParentSignals)();
     let result: Awaited<ReturnType<typeof spawn>>;
     try {
-      result = await spawn(command, rest, { stdio: 'inherit', cwd });
+      result = await spawn(command, rest, {
+        stdio: 'inherit',
+        cwd,
+        env: {
+          ...process.env,
+          QWEN_RC_TAB_SESSION_FILE: sessionFilePath,
+        },
+      });
     } finally {
       restore();
     }
@@ -649,11 +682,6 @@ export async function runHostAttach(deps: HostAttachRunDeps): Promise<number> {
     }
     return 1;
   };
-  const reattachArgs = {
-    cwd: attachment.workspaceCwd,
-    sessionId: attachment.sessionId,
-  };
-  const reattachPath = `/rc/host/attach/${encodeURIComponent(attachment.sessionId)}`;
   const watchInterrupt = deps.watchInterrupt ?? watchWaitInterrupts;
   // #212: the end report. The gateway classifies the code (0 quit, 129 the
   // tab was closed, anything else crashed); this only delivers it, from every
@@ -696,6 +724,7 @@ export async function runHostAttach(deps: HostAttachRunDeps): Promise<number> {
       },
       {
         sessionId: attachment.sessionId,
+        currentSessionId: readCurrentSessionId,
         run: runTui,
         terminalGone: () => guard.gone(),
         attach: async () => {
@@ -706,6 +735,12 @@ export async function runHostAttach(deps: HostAttachRunDeps): Promise<number> {
           // The target is resolved again too, so a gateway that came back on a
           // new port or with a renewed cert is found.
           const where = resolveGatewayLoopback(deps.rcDir);
+          const currentSessionId = await readCurrentSessionId();
+          const reattachArgs = {
+            cwd: attachment.workspaceCwd,
+            sessionId: currentSessionId,
+          };
+          const reattachPath = `/rc/host/attach/${encodeURIComponent(currentSessionId)}`;
           try {
             return classifyReattach(
               {
@@ -741,6 +776,7 @@ export async function runHostAttach(deps: HostAttachRunDeps): Promise<number> {
     await reportEnd(code);
   } finally {
     guard.stop();
+    await rm(sessionFilePath, { force: true }).catch(() => {});
   }
   return code;
 }

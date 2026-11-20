@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { useContext } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act } from '@testing-library/react';
@@ -179,32 +182,51 @@ describe('DaemonAppContainer initial attach failure', () => {
   });
 
   it('provides DaemonSessionSwitchContext to resume a new session, consume its replay, and detach the previous driver', async () => {
-    const prevDetach = vi.fn().mockResolvedValue(undefined);
-    const initialDriver = {
-      clientId: 'c1',
-      session: { sessionId: 's1' },
-      detach: prevDetach,
-    };
-    const consumeReplaySnapshot = vi.fn();
-    const nextDriver = {
-      clientId: 'c2',
-      session: { sessionId: 's2' },
-      consumeReplaySnapshot,
-    };
-    sdk.load.mockResolvedValue(initialDriver);
-    sdk.resume.mockResolvedValue(nextDriver);
+    const dir = await mkdtemp(join(tmpdir(), 'daemon-tab-sess-'));
+    const sessionFile = join(dir, 'tab.session');
+    const prevEnv = process.env['QWEN_RC_TAB_SESSION_FILE'];
+    process.env['QWEN_RC_TAB_SESSION_FILE'] = sessionFile;
+    try {
+      const prevDetach = vi.fn().mockResolvedValue(undefined);
+      const initialDriver = {
+        clientId: 'c1',
+        session: { sessionId: 's1' },
+        detach: prevDetach,
+      };
+      const consumeReplaySnapshot = vi.fn();
+      const nextDriver = {
+        clientId: 'c2',
+        session: { sessionId: 's2' },
+        consumeReplaySnapshot,
+      };
+      sdk.load.mockResolvedValue(initialDriver);
+      sdk.resume.mockResolvedValue(nextDriver);
 
-    mount(vi.fn());
-    await vi.waitFor(() => expect(latestDriver).toBe(initialDriver));
-    expect(typeof latestSwitchDaemonSession).toBe('function');
+      mount(vi.fn());
+      await vi.waitFor(() => expect(latestDriver).toBe(initialDriver));
+      await vi.waitFor(async () =>
+        expect((await readFile(sessionFile, 'utf8')).trim()).toBe('s1'),
+      );
+      expect(typeof latestSwitchDaemonSession).toBe('function');
 
-    await act(async () => {
-      await latestSwitchDaemonSession!('s2');
-    });
+      await act(async () => {
+        await latestSwitchDaemonSession!('s2');
+      });
 
-    expect(sdk.resume).toHaveBeenCalledWith(expect.anything(), 's2');
-    expect(consumeReplaySnapshot).toHaveBeenCalledTimes(1);
-    expect(prevDetach).toHaveBeenCalledTimes(1);
-    expect(latestDriver).toBe(nextDriver);
+      expect(sdk.resume).toHaveBeenCalledWith(expect.anything(), 's2');
+      expect(consumeReplaySnapshot).toHaveBeenCalledTimes(1);
+      expect(prevDetach).toHaveBeenCalledTimes(1);
+      expect(latestDriver).toBe(nextDriver);
+      await vi.waitFor(async () =>
+        expect((await readFile(sessionFile, 'utf8')).trim()).toBe('s2'),
+      );
+    } finally {
+      if (prevEnv === undefined) {
+        delete process.env['QWEN_RC_TAB_SESSION_FILE'];
+      } else {
+        process.env['QWEN_RC_TAB_SESSION_FILE'] = prevEnv;
+      }
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

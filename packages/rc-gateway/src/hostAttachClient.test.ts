@@ -625,6 +625,52 @@ describe('runHostAttach re-attach', () => {
     ]);
   });
 
+  it('re-attaches to the switched-to session when the TUI updated QWEN_RC_TAB_SESSION_FILE (#284)', async () => {
+    const SWITCHED = 'cccccccc-dddd-4eee-8fff-000000000284';
+    let firstRun = true;
+    const out = await reattachRun({
+      statuses: [75, 0],
+      answers: [
+        READY('first'),
+        {
+          status: 200,
+          body: {
+            sessionId: SWITCHED,
+            workspaceCwd: '/srv/w',
+            linuxArgv: ['fake-qwen', '--switched'],
+          },
+        },
+      ],
+      deps: {
+        pid: 8284,
+        spawn: (async (
+          cmd: string,
+          args: string[],
+          opts: { env?: NodeJS.ProcessEnv },
+        ) => {
+          if (firstRun) {
+            firstRun = false;
+            const sessionFile = opts.env?.['QWEN_RC_TAB_SESSION_FILE'];
+            expect(sessionFile).toBeTruthy();
+            await writeFile(sessionFile!, `${SWITCHED}\n`);
+            return { status: 75, signal: null };
+          }
+          expect([cmd, ...args]).toEqual(['fake-qwen', '--switched']);
+          return { status: 0, signal: null };
+        }) as unknown as HostAttachRunDeps['spawn'],
+      },
+    });
+    expect(out.code).toBe(0);
+    expect(out.paths).toEqual([
+      `/rc/host/attach/${SESSION}`,
+      `/rc/host/attach/${SWITCHED}`,
+    ]);
+    expect(out.lines).toEqual([
+      `attached ${SESSION} in /srv/w`,
+      `daemon gone, re-attaching ${SWITCHED}…`,
+    ]);
+  });
+
   it('waits through 503s, 502s and a closed port, then relaunches', async () => {
     const out = await reattachRun({
       statuses: [75, 3],

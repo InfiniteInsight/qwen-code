@@ -8,8 +8,10 @@ import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  HOST_TAB_SESSIONS_DIR,
   isLiveTerminalTarget,
   isSessionMirrored,
+  readActiveSessionId,
   readProcArgv,
   readProcEntries,
   readStdinTarget,
@@ -214,6 +216,59 @@ describe('isSessionMirrored', () => {
         counting,
       );
       expect(reads).toBe(0);
+    });
+  });
+
+  describe('tracks in-place /resume and /branch session switches (#284)', () => {
+    const SWITCHED = 'b8b6eef0-fed0-483f-9d63-fb7eb371af91';
+
+    it('matches the switched-to session and stops matching the initial argv session', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'rc-active-'));
+      try {
+        const rcDir = join(root, 'rc');
+        const sessionsDir = join(root, 'sessions');
+        await mkdir(sessionsDir, { recursive: true });
+        await writeFile(
+          join(sessionsDir, '1000.json'),
+          JSON.stringify({ pid: 1000, sessionId: SWITCHED }),
+        );
+        const lister = async () => procs(attach(SESSION));
+        const activeReader = readActiveSessionId(rcDir, sessionsDir);
+        expect(
+          await isSessionMirrored(SWITCHED, lister, livePty, activeReader),
+        ).toBe(true);
+        expect(
+          await isSessionMirrored(SESSION, lister, livePty, activeReader),
+        ).toBe(false);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('matches a bare qwen-rc attach wrapper via its host-tab-sessions sidecar', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'rc-active-'));
+      try {
+        const rcDir = join(root, 'rc');
+        const sessionsDir = join(root, 'sessions');
+        await mkdir(join(rcDir, HOST_TAB_SESSIONS_DIR), { recursive: true });
+        await writeFile(
+          join(rcDir, HOST_TAB_SESSIONS_DIR, '1000.session'),
+          `${SWITCHED}\n`,
+        );
+        const lister = async () =>
+          procs([
+            'node',
+            '/opt/qwen-code/packages/rc-gateway/dist/cli.js',
+            'attach',
+            '/srv/work',
+          ]);
+        const activeReader = readActiveSessionId(rcDir, sessionsDir);
+        expect(
+          await isSessionMirrored(SWITCHED, lister, livePty, activeReader),
+        ).toBe(true);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
     });
   });
 });

@@ -31,6 +31,7 @@
  */
 
 import { readdir, readFile, readlink } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 /** One live process: its pid and argv. */
@@ -49,7 +50,53 @@ export type ProcessLister = () => Promise<ProcessEntry[]>;
  */
 export type StdinTargetReader = (pid: number) => Promise<string | undefined>;
 
+/**
+ * Current session id of a running wrapper or attached TUI process (#284), or
+ * undefined when no active-session sidecar exists for `pid` (the caller falls
+ * back to `argv`). A test seam; the default reads `~/.qwen/rc/host-tab-sessions`
+ * and `~/.qwen/sessions`.
+ */
+export type ActiveSessionReader = (pid: number) => Promise<string | undefined>;
+
+export const HOST_TAB_SESSIONS_DIR = 'host-tab-sessions';
+
+export function hostTabSessionPath(rcDir: string, pid: number): string {
+  return join(rcDir, HOST_TAB_SESSIONS_DIR, `${pid}.session`);
+}
+
+/**
+ * Default {@link ActiveSessionReader}: checks the wrapper's tab-session file
+ * (`~/.qwen/rc/host-tab-sessions/<pid>.session`) and the TUI's session-registry
+ * record (`~/.qwen/sessions/<pid>.json`), both updated on in-place `/resume`
+ * and `/branch` switches.
+ */
+export function readActiveSessionId(
+  rcDir = join(homedir(), '.qwen', 'rc'),
+  sessionsDir = join(homedir(), '.qwen', 'sessions'),
+): ActiveSessionReader {
+  return async (pid) => {
+    try {
+      const raw = (await readFile(hostTabSessionPath(rcDir, pid), 'utf8')).trim();
+      if (raw.length > 0) return raw;
+    } catch {
+      // Fall through to the TUI session registry.
+    }
+    try {
+      const parsed = JSON.parse(
+        await readFile(join(sessionsDir, `${pid}.json`), 'utf8'),
+      ) as { sessionId?: unknown };
+      if (typeof parsed.sessionId === 'string' && parsed.sessionId.length > 0) {
+        return parsed.sessionId;
+      }
+    } catch {
+      // No registry entry for this pid.
+    }
+    return undefined;
+  };
+}
+
 const ATTACH_FLAG = '--attach-session';
+const ATTACH_DAEMON_FLAG = '--attach-daemon';
 const WRAPPER_SUBCOMMAND = 'attach';
 const WRAPPER_FLAG = '--session';
 
@@ -140,6 +187,36 @@ function attachesTo(argv: string[], sessionId: string): boolean {
 }
 
 /**
+ * Whether `argv` is an attached TUI or a `qwen-rc attach` wrapper whose
+ * current session may have moved past its initial command-line `--session` via
+ * an in-place `/resume` or `/branch` (#284).
+ */
+function isAttachCandidate(argv: string[]): boolean {
+  const attachAt = argv.indexOf(WRAPPER_SUBCOMMAND);
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === ATTACH_FLAG || a.startsWith(`${ATTACH_FLAG}=`)) return true;
+    if (a === ATTACH_DAEMON_FLAG || a.startsWith(`${ATTACH_DAEMON_FLAG}=`)) {
+      return true;
+    }
+    if (attachAt !== -1 && i > attachAt) {
+      if (a === WRAPPER_FLAG || a.startsWith(`${WRAPPER_FLAG}=`)) return true;
+    }
+  }
+  if (attachAt > 0) {
+    return argv
+      .slice(0, attachAt)
+      .some(
+        (a) =>
+          a === 'qwen-rc' ||
+          a.endsWith('/qwen-rc') ||
+          a.endsWith('/rc-gateway/dist/cli.js'),
+      );
+  }
+  return false;
+}
+
+/**
  * True when a live process on this host is attached to `sessionId` and has a
  * live terminal on fd 0. A process whose terminal is gone (a closed tab whose
  * wrapper outlived its pty, issue #207) is not a tab on screen, so it does not
@@ -151,6 +228,7 @@ export async function isSessionMirrored(
   sessionId: string,
   lister: ProcessLister = () => readProcEntries(),
   readStdin: StdinTargetReader = readStdinTarget(),
+  readActiveSession: ActiveSessionReader = readActiveSessionId(),
 ): Promise<boolean> {
   if (!sessionId) return false;
   let procs: ProcessEntry[];
@@ -160,7 +238,17 @@ export async function isSessionMirrored(
     return false;
   }
   for (const proc of procs) {
-    if (!attachesTo(proc.argv, sessionId)) continue;
+    const argvMatches = attachesTo(proc.argv, sessionId);
+    if (!argvMatches && !isAttachCandidate(proc.argv)) continue;
+    let activeId: string | undefined;
+    try {
+      activeId = await readActiveSession(proc.pid);
+    } catch {
+      activeId = undefined;
+    }
+    const matches =
+      activeId !== undefined ? activeId === sessionId : argvMatches;
+    if (!matches) continue;
     let target: string | undefined;
     try {
       target = await readStdin(proc.pid);
