@@ -13,6 +13,7 @@
  * The render is gated on attach: `useDaemonStream` needs `driver.clientId` set
  * at mount, so we hold a placeholder until `createOrAttach` resolves.
  */
+import { writeFile } from 'node:fs/promises';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import { DaemonClient, DaemonSessionClient } from '@qwen-code/sdk';
@@ -110,6 +111,12 @@ export const DaemonAppContainer = (props: DaemonAppContainerProps) => {
           : await DaemonSessionClient.createOrAttach(client, {});
         if (cancelled) return;
         const attachedSessionId = session.session?.sessionId;
+        const tabSessionFile = process.env['QWEN_RC_TAB_SESSION_FILE'];
+        if (tabSessionFile && attachedSessionId) {
+          void writeFile(tabSessionFile, `${attachedSessionId}\n`, {
+            mode: 0o600,
+          }).catch(() => {});
+        }
         if (
           attachedSessionId &&
           configRef.current.getSessionId?.() !== attachedSessionId
@@ -167,6 +174,13 @@ export const DaemonAppContainer = (props: DaemonAppContainerProps) => {
         nextSessionId,
       );
       nextSession.consumeReplaySnapshot?.();
+      const activeId = nextSession.session?.sessionId ?? nextSessionId;
+      const tabSessionFile = process.env['QWEN_RC_TAB_SESSION_FILE'];
+      if (tabSessionFile && activeId) {
+        void writeFile(tabSessionFile, `${activeId}\n`, {
+          mode: 0o600,
+        }).catch(() => {});
+      }
       setDriver((prev) => {
         if (prev && prev.session?.sessionId !== nextSession.session?.sessionId) {
           void prev.detach?.().catch(() => {});
