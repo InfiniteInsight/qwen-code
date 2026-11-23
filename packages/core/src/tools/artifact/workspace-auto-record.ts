@@ -129,8 +129,8 @@ export function buildRecordArtifactReminder(
 export function formatRecordArtifactReminder(workspacePath: string): string {
   return (
     `This file was automatically recorded as a workspace artifact with ` +
-    `workspacePath "${workspacePath}". No extra artifact registration step ` +
-    `is needed.`
+    `workspacePath "${workspacePath}" (available for one-tap Download in the chat and Artifacts UI). ` +
+    `No extra artifact registration step is needed.`
   );
 }
 

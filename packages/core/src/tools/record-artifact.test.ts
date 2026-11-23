@@ -145,6 +145,12 @@ describe('RecordArtifactTool', () => {
     expect(makeTool().description).not.toContain('Artifact tool');
   });
 
+  it('keeps the opening deferred-reminder line within 160 chars and mentions Download', () => {
+    const firstLine = makeTool().description.split('\n')[0] ?? '';
+    expect(firstLine.length).toBeLessThanOrEqual(160);
+    expect(firstLine).toContain('Download');
+  });
+
   it('records a link artifact without touching the resource', async () => {
     const url = 'https://example.com/tables/orders';
     const metadata = { table: 'orders' };
