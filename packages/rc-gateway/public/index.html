@@ -15015,6 +15015,10 @@
         const inp =
           item.input && typeof item.input === 'object' ? item.input : null;
         const label = strOr(item.label, '');
+        const isRecordArtifactKind =
+          /^(record_artifact|recordartifact|recording artifact)\b/i.test(
+            label,
+          ) || !!(inp && typeof inp.workspacePath === 'string');
         const isEditKind =
           item.toolKind === 'edit' ||
           /^(write_file|writefile|edit|create_file|save_file)\b/i.test(label) ||
@@ -15029,10 +15033,30 @@
             item.result.some(
               (c) => c && c.type === 'diff' && typeof c.path === 'string',
             ));
-        if (!isEditKind) return '';
+        if (!isEditKind && !isRecordArtifactKind) return '';
         let candidate = '';
-        if (inp) {
+        if (isRecordArtifactKind && Array.isArray(item.result)) {
+          for (const c of item.result) {
+            const text =
+              c && typeof c.text === 'string'
+                ? c.text
+                : c && c.content && typeof c.content.text === 'string'
+                  ? c.content.text
+                  : '';
+            if (!text) continue;
+            if (/^Recorded \d+ artifacts? from directory\b/m.test(text)) {
+              return '';
+            }
+            const m = text.match(/(?:^|\n)workspacePath:\s*([^\r\n]+)/);
+            if (m && m[1]) {
+              candidate = m[1].trim();
+              break;
+            }
+          }
+        }
+        if (!candidate && inp) {
           candidate =
+            strOr(inp.workspacePath, '') ||
             strOr(inp.file_path, '') ||
             strOr(inp.path, '') ||
             strOr(inp.filePath, '') ||

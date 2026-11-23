@@ -146,7 +146,7 @@ const RESIDENT: ReadonlyArray<[name: string, build: Build, budget: number]> = [
   ['skill', (c) => new SkillTool(c), 2_400],
   ['edit', (c) => new EditTool(c), 2_400],
   ['todo_write', (c) => new TodoWriteTool(c), 1_950],
-  ['write_file', (c) => new WriteFileTool(c), 1_850],
+  ['write_file', (c) => new WriteFileTool(c), 2_000],
   [
     'artifact',
     (c) => new ArtifactTool(c, {} as unknown as ArtifactPublisher),
