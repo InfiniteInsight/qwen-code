@@ -786,6 +786,8 @@ describe('TranscriptModel', () => {
       );
       const found = new Set<string>();
       for (const m of html.matchAll(/su === '([a-z_]+)'/g)) found.add(m[1]);
+      // Footer metadata updates carry no transcript row.
+      found.delete('config_options_update');
       return [...found].sort();
     }
 

@@ -24,7 +24,7 @@ class SseEventParserTest {
         assertNull(parser.feedLine("""data: {"id":"14","type":"turn_complete","data":{"stopReason":"max_tokens"}}"""))
         val turnAlert = parser.feedLine("")
         assertEquals(
-            SseAlert("14", "turn_complete", "Turn finished", "Stopped (max_tokens) - tap to continue."),
+            SseAlert("14", "turn_complete", "Turn finished", "Stopped (max_tokens) - tap to continue.", stopReason = "max_tokens"),
             turnAlert,
         )
 
@@ -35,5 +35,18 @@ class SseEventParserTest {
             SseAlert("15", "error", "Session interrupted", "Stream reported prompt_timeout."),
             errAlert,
         )
+
+        assertNull(parser.feedLine("id: 16"))
+        assertNull(parser.feedLine("""data: {"id":"16","type":"turn_error","data":{"message":"Model stream ended without a finish reason."}}"""))
+        val turnErrAlert = parser.feedLine("")
+        assertEquals(
+            SseAlert("16", "error", "Turn interrupted", "Model stream ended without a finish reason."),
+            turnErrAlert,
+        )
+
+        assertNull(parser.feedLine("id: 17"))
+        assertNull(parser.feedLine("""data: {"id":"17","type":"turn_complete","data":{"stopReason":"end_turn"}}"""))
+        val doneAlert = parser.feedLine("")
+        assertEquals("end_turn", doneAlert?.stopReason)
     }
 }

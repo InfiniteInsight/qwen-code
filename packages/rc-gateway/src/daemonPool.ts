@@ -235,7 +235,7 @@ export interface DaemonEndpoint {
 /** Result of spawning a new daemon bound to a workspace. */
 export interface PooledDaemonSpawn {
   client: DaemonClient;
-  stop: () => Promise<void>;
+  stop: (opts?: { force?: boolean }) => Promise<void>;
   workspaceCwd: string;
   /** Endpoint material, captured at spawn so a host terminal can attach to
    * this daemon later (issue #49). Absent → the workspace's endpoint is
@@ -245,6 +245,34 @@ export interface PooledDaemonSpawn {
    * The pool fills this at spawn time (add-mid-turn-recovery: death
    * detection); the spawner wires the child's exit into it. */
   onExit?: (info: DaemonExitInfo) => void;
+}
+
+/** Options for restarting the workspace daemon serving a session. */
+export interface DaemonRestartOptions {
+  /** Send SIGKILL immediately instead of waiting for SIGTERM grace. */
+  force?: boolean;
+  /** Optional fallback workspace cwd when the session was never in memory (e.g. cold or already dead). */
+  workspaceCwd?: string;
+}
+
+/** Outcome of restarting a session's workspace daemon and resuming its sessions. */
+export interface DaemonRestartResult {
+  sessionId: string;
+  restarted: boolean;
+  recovered: boolean;
+  force: boolean;
+  sessionCount: number;
+}
+
+/** Thrown when a caller asks to restart an externally attached daemon (`--attach-daemon`). */
+export class CannotRestartAttachedDaemonError extends Error {
+  readonly code = 'attached_daemon_not_managed';
+  constructor() {
+    super(
+      'This conversation runs on an externally attached daemon that this gateway does not manage',
+    );
+    this.name = 'CannotRestartAttachedDaemonError';
+  }
 }
 
 /** Exit info for a daemon death, as reported by the child's exit event. */
@@ -1067,6 +1095,13 @@ export interface SessionDaemon {
    * its pooled daemon was idle-reaped. Optional - only `DaemonPool` tracks
    * multi-workspace session ownership. */
   sessionWorkspaceCwd?(sessionId: string): string | undefined;
+  /** Restart the workspace daemon owning `sessionId` (stopping the old process
+   * and resuming affected sessions on a fresh daemon). Optional - only
+   * `DaemonPool` manages daemon lifecycles. */
+  restartSessionDaemon?(
+    sessionId: string,
+    opts?: DaemonRestartOptions,
+  ): Promise<DaemonRestartResult>;
 }
 
 export interface DaemonPoolOptions {
@@ -1098,7 +1133,7 @@ export interface DaemonPoolOptions {
    * needs no stop. Absent (attach mode, where the daemon is not the
    * gateway's) → the pool never stops it.
    */
-  stopDefaultDaemon?: () => Promise<void>;
+  stopDefaultDaemon?: (opts?: { force?: boolean }) => Promise<void>;
   defaultWorkspaceCwd: string;
   /** Endpoint of the boot daemon, used for terminal requests against the
    * default workspace (issue #49). Absent → those requests are refused. */
@@ -1137,7 +1172,7 @@ export interface DaemonPoolOptions {
     workspaceKey: string,
     sessions: string[],
     exit: DaemonExitInfo & { atMs: number },
-  ) => void;
+  ) => void | Promise<void>;
   /**
    * Journal sink for pool-level operational warnings such as
    * `workspace_pool_full` (#220). Defaults to `console.warn` (which systemd
@@ -1148,7 +1183,7 @@ export interface DaemonPoolOptions {
 
 interface Entry {
   client: DaemonClient;
-  stop: () => Promise<void>;
+  stop: (opts?: { force?: boolean }) => Promise<void>;
   sessions: Set<string>;
   lastUsed: number;
   /** Copied from `PooledDaemonSpawn` (issue #49). */
@@ -1544,7 +1579,7 @@ export class DaemonPool implements SessionDaemon {
 
   private newEntry(s: {
     client: DaemonClient;
-    stop: () => Promise<void>;
+    stop: (opts?: { force?: boolean }) => Promise<void>;
     endpoint?: DaemonEndpoint;
   }): Entry {
     return {
@@ -2268,6 +2303,168 @@ export class DaemonPool implements SessionDaemon {
     return (
       this.ownerOf.get(sessionId) ?? this.lastKnownWorkspaceOf.get(sessionId)
     );
+  }
+
+  /**
+   * Restart the workspace daemon serving `sessionId`, stopping the existing
+   * process group (`SIGTERM` with escalation, or immediate `SIGKILL` when
+   * `opts.force` is true), spawning a fresh replacement daemon, and resuming
+   * `sessionId` (plus any sibling sessions on that workspace daemon) in place.
+   */
+  async restartSessionDaemon(
+    sessionId: string,
+    opts?: DaemonRestartOptions,
+  ): Promise<DaemonRestartResult> {
+    const liveOwner = this.ownerOf.get(sessionId);
+    const lastKnown = this.lastKnownWorkspaceOf.get(sessionId);
+    const fallbackCwd =
+      typeof opts?.workspaceCwd === 'string' &&
+      opts.workspaceCwd.trim().length > 0
+        ? this.keyFor(opts.workspaceCwd.trim())
+        : undefined;
+    const key = liveOwner ?? lastKnown ?? fallbackCwd;
+    if (key === undefined) {
+      throw new UnknownSessionError(sessionId);
+    }
+
+    const isDefaultKey = key === this.defaultWorkspaceCwd;
+    if (isDefaultKey && !this.respawnDefault) {
+      throw new CannotRestartAttachedDaemonError();
+    }
+
+    const force = opts?.force === true;
+    const release = this.hold(key);
+    try {
+      if (isDefaultKey && this.defaultSpawning) {
+        await this.defaultSpawning.catch(() => undefined);
+      } else if (
+        !isDefaultKey &&
+        !this.byWorkspace.has(key) &&
+        this.spawning.has(key)
+      ) {
+        await this.spawning.get(key)!.catch(() => undefined);
+      }
+
+      const oldEntry = isDefaultKey
+        ? this.defaultEntry.dead
+          ? undefined
+          : this.defaultEntry
+        : this.byWorkspace.get(key);
+
+      // Cold / already-dead workspace daemon: spawn fresh and resume directly.
+      if (oldEntry === undefined) {
+        await this.getOrSpawn(key);
+        await this.resumeSession(sessionId, { workspaceCwd: key });
+        return {
+          sessionId,
+          restarted: true,
+          recovered: true,
+          force,
+          sessionCount: 1,
+        };
+      }
+
+      const affected = new Set<string>(oldEntry.sessions);
+      for (const [sid, k] of this.ownerOf) {
+        if (k === key) affected.add(sid);
+      }
+      affected.add(sessionId);
+
+      // Mark the old entry dead up front and gate the replacement spawn behind
+      // `oldEntry.stop({ force })` so:
+      // 1) neither `whenExited` nor an SSE transport drop double-fires `markDead`,
+      // 2) `onDaemonDeath` marks sessions `'recovering'` BEFORE sockets close
+      //    (holding reconnecting SSE streams cleanly), and
+      // 3) the new daemon spawns only after the old process group has exited.
+      oldEntry.dead = true;
+      const exit: DaemonExitInfo & { atMs: number } = {
+        code: null,
+        signal: force ? 'SIGKILL' : 'SIGTERM',
+        atMs: this.now(),
+      };
+      oldEntry.exit = exit;
+      if (!isDefaultKey) {
+        this.byWorkspace.delete(key);
+      }
+      for (const sid of affected) {
+        this.ownerOf.delete(sid);
+        this.boundClients.delete(sid);
+        this.lastKnownWorkspaceOf.set(sid, key);
+      }
+
+      let replacementPromise: Promise<Entry>;
+      if (isDefaultKey) {
+        const p = (async () => {
+          await oldEntry.stop({ force }).catch(() => {});
+          return this.respawnDefaultEntry();
+        })();
+        this.defaultSpawning = p;
+        const clear = () => {
+          if (this.defaultSpawning === p) this.defaultSpawning = undefined;
+        };
+        p.then(clear, clear);
+        replacementPromise = p;
+      } else {
+        let p: Promise<Entry> | undefined;
+        p = (async () => {
+          try {
+            await oldEntry.stop({ force }).catch(() => {});
+            const s = await promiseFrom(() => this.opts.spawn(key));
+            const entry = this.newEntry(s);
+            if (this.stopped) {
+              await s.stop().catch(() => {});
+              return entry;
+            }
+            s.onExit = (info) => this.markDead(key, info, entry);
+            this.byWorkspace.set(key, entry);
+            this.stopSuperseded(key);
+            return entry;
+          } finally {
+            if (p !== undefined && this.spawning.get(key) === p) {
+              this.spawning.delete(key);
+            }
+          }
+        })();
+        this.spawning.set(key, p);
+        replacementPromise = p;
+      }
+
+      if (this.opts.onDaemonDeath) {
+        await this.opts.onDaemonDeath(key, [...affected], exit);
+        await replacementPromise;
+        const state = this.recoveryState(sessionId);
+        if (!this.ownerOf.has(sessionId) && state === 'idle') {
+          await this.resumeSession(sessionId, { workspaceCwd: key });
+        }
+        const recovered =
+          this.ownerOf.has(sessionId) || state === 'recovered';
+        return {
+          sessionId,
+          restarted: true,
+          recovered,
+          force,
+          sessionCount: affected.size,
+        };
+      }
+
+      await replacementPromise;
+      for (const sid of affected) {
+        try {
+          await this.resumeSession(sid, { workspaceCwd: key });
+        } catch (err) {
+          if (sid === sessionId) throw err;
+        }
+      }
+      return {
+        sessionId,
+        restarted: true,
+        recovered: true,
+        force,
+        sessionCount: affected.size,
+      };
+    } finally {
+      release();
+    }
   }
 
   private removeSession(id: string): void {

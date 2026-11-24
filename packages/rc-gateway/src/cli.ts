@@ -1524,9 +1524,9 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       }),
     });
     daemonPool.setRecoveryProvider(recoveryOrchestrator);
-    daemonPool.setOnDaemonDeath((key, sessions, exit) => {
-      void recoveryOrchestrator.recover(key, sessions, exit);
-    });
+    daemonPool.setOnDaemonDeath((key, sessions, exit) =>
+      recoveryOrchestrator.recover(key, sessions, exit),
+    );
 
     // Startup reconciliation (design: "Reconciliation"): running/blocked agent
     // records whose daemon session is gone become `orphaned` - surfaced in

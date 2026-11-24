@@ -261,6 +261,7 @@ import type { TerminalRequestLog } from './terminals.js';
 import { RECENT_WORKSPACES_CAP, mergeRecentWorkspaces } from './terminals.js';
 import type { HostAttachedWorkspaces } from './hostAttachedWorkspaces.js';
 import { createSessionResumeRoute } from './routes/sessionResume.js';
+import { createSessionRestartDaemonRoute } from './routes/sessionRestartDaemon.js';
 import { createSessionWorktreeResetRoute } from './routes/sessionWorktreeReset.js';
 import {
   createListTokensRoute,
@@ -1894,6 +1895,8 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       hostTabs: deps.hostTabs !== undefined,
       githubClone: deps.github !== undefined,
       workspaceConfigApprovals: deps.workspaceConfigApprovals !== undefined,
+      sessionDaemonRestart:
+        typeof deps.daemon.restartSessionDaemon === 'function',
       maxAttachmentBytes: attachmentLimit,
       daemonQwenBin: deps.daemonQwenBin,
       daemonQwenBinHealthy: deps.daemonQwenBinHealthy,
@@ -2093,6 +2096,14 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       hostTabs: deps.hostTabs?.registry,
     }),
   );
+  if (typeof deps.daemon.restartSessionDaemon === 'function') {
+    app.post(
+      '/rc/sessions/:id/restart-daemon',
+      requireScope(OWNER, audit),
+      recordActivity(workingDevice),
+      createSessionRestartDaemonRoute(deps.daemon, audit),
+    );
+  }
   // POST /rc/sessions/catalog (#132): the session catalog across workspaces,
   // one merged order and one cursor. OWNER like the listing and the
   // live-state above, since it names the same sessions: a looser scope would

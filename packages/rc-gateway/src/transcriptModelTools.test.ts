@@ -148,6 +148,70 @@ describe('a to-do list closes the thought before it (#171)', () => {
     ]);
   });
 
+  it('retains toolName and attaches or upserts assistant files across updates and pages', () => {
+    const m = api.createTranscriptModel() as Model & {
+      upsertAssistantFile(spec: Record<string, unknown>, time?: number): Item;
+      removeAssistantFile(key: string): boolean;
+    };
+    m.upsertTool({
+      toolCallId: 'rec1',
+      title: 'Recording artifact report.pdf',
+      status: 'in_progress',
+      _meta: { toolName: 'record_artifact' },
+      rawInput: { title: 'Q3 Report', workspacePath: 'reports/report.pdf' },
+    });
+    m.upsertTool({ toolCallId: 'rec1', status: 'completed' });
+    expect((m.items[0] as Item & { toolName?: string }).toolName).toBe(
+      'record_artifact',
+    );
+    const owner = m.upsertAssistantFile({
+      key: 'ws:reports/report.pdf',
+      artifactId: 'art-1',
+      toolCallId: 'rec1',
+      name: 'report.pdf',
+      workspacePath: 'reports/report.pdf',
+      size: 4096,
+      kind: 'pdf',
+    });
+    expect(owner.id).toBe(m.items[0].id);
+    expect(m.items).toHaveLength(1);
+    expect(
+      (m.items[0] as Item & { artifactFiles?: unknown[] }).artifactFiles,
+    ).toHaveLength(1);
+
+    // Standalone file without a toolCallId renders its own `file` row and can be removed.
+    const standalone = m.upsertAssistantFile(
+      {
+        key: 'art:snap-1',
+        artifactId: 'snap-1',
+        snapshotId: 'snap-1',
+        name: 'Dashboard',
+        kind: 'html',
+        size: 1024,
+      },
+      2000,
+    );
+    expect(standalone.kind).toBe('file');
+    expect(m.items).toHaveLength(2);
+    expect(m.removeAssistantFile('art:snap-1')).toBe(true);
+    expect(m.items).toHaveLength(1);
+
+    const pageRows = api.replayStoredPage([
+      flat('agent_message_chunk', text('Sending summary:')),
+      flat('agent_message_chunk', {
+        content: {
+          type: 'resource_link',
+          uri: 'file:///repo/docs/summary.csv',
+          name: 'summary.csv',
+          mimeType: 'text/csv',
+          size: 512,
+        },
+      }),
+    ]);
+    expect(pageRows).toHaveLength(1);
+    expect(pageRows[0].parts).toHaveLength(1);
+  });
+
   it('retains record_artifact rawInput workspacePath and result across completion updates (#285)', () => {
     const m = api.createTranscriptModel();
     m.upsertTool({

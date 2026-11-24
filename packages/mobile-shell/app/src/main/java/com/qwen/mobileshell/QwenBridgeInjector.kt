@@ -5,6 +5,7 @@ internal data class WatchedSessionPointer(
     val lastEventId: String? = null,
     val title: String? = null,
     val cwd: String? = null,
+    val outbox: List<String> = emptyList(),
 )
 
 internal data class BridgeRpcRequest(
@@ -13,11 +14,14 @@ internal data class BridgeRpcRequest(
     val token: String? = null,
     val url: String? = null,
     val reason: String? = null,
+    val sessionId: String? = null,
     val watched: WatchedSessionPointer? = null,
     val watchedCleared: Boolean = false,
     val filePath: String? = null,
     val workspace: String? = null,
     val filename: String? = null,
+    val dataBase64: String? = null,
+    val mimeType: String? = null,
 )
 
 internal object QwenBridgeInjector {
@@ -104,12 +108,20 @@ internal object QwenBridgeInjector {
     showConnections: function() { return rpc('showConnections'); },
     setWatchedSession: function(ptr) {
       if (!ptr || !ptr.sessionId) return rpc('setWatchedSession', { cleared: true });
+      var ob = Array.isArray(ptr.outbox)
+        ? ptr.outbox.filter(function(x) { return typeof x === 'string' && x.trim().length > 0; }).slice(0, 32)
+        : [];
       return rpc('setWatchedSession', {
         sessionId: String(ptr.sessionId),
         lastEventId: ptr.lastEventId === null || ptr.lastEventId === undefined ? null : String(ptr.lastEventId),
         title: ptr.title ? String(ptr.title) : null,
-        cwd: ptr.cwd ? String(ptr.cwd) : null
+        cwd: ptr.cwd ? String(ptr.cwd) : null,
+        outbox: ob
       });
+    },
+    consumeDispatchedOutbox: function(sessionId) {
+      if (!sessionId) return Promise.resolve([]);
+      return rpc('consumeDispatchedOutbox', { sessionId: String(sessionId) });
     },
     downloadWorkspaceFile: function(opts) {
       if (!opts || !opts.path) return Promise.reject(new Error('invalid_path'));
@@ -117,6 +129,14 @@ internal object QwenBridgeInjector {
         filePath: String(opts.path),
         workspace: opts.workspace ? String(opts.workspace) : null,
         filename: opts.filename ? String(opts.filename) : null
+      });
+    },
+    saveBase64File: function(opts) {
+      if (!opts || typeof opts.dataBase64 !== 'string') return Promise.reject(new Error('invalid_data'));
+      return rpc('saveBase64File', {
+        dataBase64: opts.dataBase64,
+        filename: opts.filename ? String(opts.filename) : null,
+        mimeType: opts.mimeType ? String(opts.mimeType) : null
       });
     }
   };
@@ -130,19 +150,23 @@ internal object QwenBridgeInjector {
     fun formatErrorReply(id: String, errorCode: String): String =
         """{"id":${jsStringLiteral(id)},"ok":false,"error":${jsStringLiteral(errorCode)}}"""
 
+    private const val MAX_RPC_CHARS = 40 * 1024 * 1024
+
     fun parseRequest(raw: String?): BridgeRpcRequest? {
-        if (raw.isNullOrBlank() || raw.length > 32768) return null
+        if (raw.isNullOrBlank() || raw.length > MAX_RPC_CHARS) return null
         val fields = SimpleJson.parseFlatObject(raw) ?: return null
         val id = (fields["id"] as? String)?.takeIf { it.isNotBlank() && it.length <= 64 } ?: return null
         val method = (fields["method"] as? String)?.takeIf { it.isNotBlank() && it.length <= 64 } ?: return null
+        if (method != "saveBase64File" && raw.length > 32768) return null
         val cleared = fields["cleared"] == true
         val sessionId = (fields["sessionId"] as? String)?.takeIf { it.isNotBlank() && it.length <= 128 }
-        val watched = if (!cleared && sessionId != null) {
+        val watched = if (method == "setWatchedSession" && !cleared && sessionId != null) {
             WatchedSessionPointer(
                 sessionId = sessionId,
                 lastEventId = fields["lastEventId"] as? String,
                 title = fields["title"] as? String,
                 cwd = fields["cwd"] as? String,
+                outbox = SimpleJson.parseStringArray(fields["outbox"] as? String),
             )
         } else null
         return BridgeRpcRequest(
@@ -151,16 +175,45 @@ internal object QwenBridgeInjector {
             token = fields["token"] as? String,
             url = fields["url"] as? String,
             reason = fields["reason"] as? String,
+            sessionId = sessionId,
             watched = watched,
             watchedCleared = cleared || (method == "setWatchedSession" && watched == null),
             filePath = (fields["filePath"] as? String)?.takeIf { it.isNotBlank() && it.length <= 2048 },
             workspace = (fields["workspace"] as? String)?.takeIf { it.isNotBlank() && it.length <= 2048 },
             filename = (fields["filename"] as? String)?.takeIf { it.isNotBlank() && it.length <= 256 },
+            dataBase64 = (fields["dataBase64"] as? String)?.takeIf { it.isNotEmpty() },
+            mimeType = (fields["mimeType"] as? String)?.takeIf { it.isNotBlank() && it.length <= 128 },
         )
     }
 }
 
 internal object SimpleJson {
+    fun formatStringArray(items: List<String>): String =
+        items.joinToString(",", "[", "]") { QwenBridgeInjector.jsStringLiteral(it) }
+
+    fun parseStringArray(raw: String?): List<String> {
+        if (raw.isNullOrBlank()) return emptyList()
+        var i = skipWs(raw, 0)
+        if (i >= raw.length || raw[i] != '[') return emptyList()
+        i = skipWs(raw, i + 1)
+        if (i < raw.length && raw[i] == ']') {
+            return if (skipWs(raw, i + 1) == raw.length) emptyList() else emptyList()
+        }
+        val out = ArrayList<String>()
+        while (i < raw.length) {
+            val strRes = readString(raw, i) ?: return emptyList()
+            if (strRes.first.isNotBlank()) out.add(strRes.first)
+            i = skipWs(raw, strRes.second)
+            if (i >= raw.length) return emptyList()
+            if (raw[i] == ']') {
+                return if (skipWs(raw, i + 1) == raw.length) out else emptyList()
+            }
+            if (raw[i] != ',') return emptyList()
+            i = skipWs(raw, i + 1)
+        }
+        return emptyList()
+    }
+
     fun parseFlatObject(raw: String): Map<String, Any?>? {
         var i = skipWs(raw, 0)
         if (i >= raw.length || raw[i] != '{') return null

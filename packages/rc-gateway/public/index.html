@@ -75,6 +75,14 @@
            the one verb that destroys something (its .ic.end). */
         --g1-on: #1f2937;
         --g1-danger: #f38ba8;
+        /* Canonical status-dot palette shared by #h1-status, #past-list,
+           #live-strip, #agents-chip, and #agents-sheet. */
+        --g1-dot-idle: #3fb950;
+        --g1-dot-run: var(--g1-link);
+        --g1-dot-wait: var(--g1-warn);
+        --g1-dot-bg: #a371f7;
+        --g1-dot-off: #f85149;
+        --g1-dot-dim: var(--g1-ink-dim);
       }
       body {
         font-family: system-ui, sans-serif;
@@ -487,9 +495,14 @@
          scheme, so the model picker opened as a white sheet over the dark page.
          Its rows are buttons that clear their own ground and border, so they
          sit on this one. */
-      #model-picker-dialog {
+      #model-picker-dialog,
+      #rename-dialog {
         background: var(--g1-band);
         color: var(--g1-ink);
+      }
+      #rename-dialog::backdrop,
+      #model-picker-dialog::backdrop {
+        background: rgba(0, 0, 0, 0.55);
       }
       /* #177. Every Operations, Settings and Diagnostics card is a band in
          g1's sense: the band ground under the line rule. #187 (h1): a card is
@@ -1004,17 +1017,17 @@
         height: 8px;
         flex: none;
         border-radius: 50%;
-        background: var(--g1-ink-dim);
+        background: var(--g1-dot-dim);
       }
       #h1-status[data-state='idle'] .dot {
-        background: #3fb950;
+        background: var(--g1-dot-idle);
       }
       #h1-status[data-state='run'] .dot {
-        background: var(--g1-link);
+        background: var(--g1-dot-run);
       }
       #h1-status[data-state='wait'] .dot,
       #h1-status[data-state='paused'] .dot {
-        background: var(--g1-warn);
+        background: var(--g1-dot-wait);
       }
       #h1-status[data-state='paused'] .f {
         flex: 0 100 auto;
@@ -1023,10 +1036,10 @@
          the process is still going after the answer finished, and not a second
          shade of the turn's own blue. */
       #h1-status[data-state='bg'] .dot {
-        background: #a371f7;
+        background: var(--g1-dot-bg);
       }
       #h1-status[data-state='off'] .dot {
-        background: #f85149;
+        background: var(--g1-dot-off);
       }
       #h1-state {
         flex: 0 1 auto;
@@ -1329,6 +1342,116 @@
         background: var(--g1-page);
         color: var(--g1-ink-hi);
         font-size: 14px;
+      }
+      /* Conversation GUID + copy and workspace daemon reload/restart controls
+         inside #h1-sheet, rendered as a persistent sibling of #session-footer
+         so copy feedback, two-tap restart confirmation, and dead-daemon
+         recovery survive context/usage redraws and missing ctxInfo. */
+      #h1-session-meta {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      #h1-session-meta[hidden],
+      #h1-session-meta .sm-col[hidden],
+      #h1-session-meta button[hidden],
+      #h1-daemon-note[hidden] {
+        display: none;
+      }
+      #h1-session-meta .sm-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 6px 12px;
+        min-height: 36px;
+      }
+      #h1-session-meta .sm-col {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      #h1-session-meta .sm-lbl {
+        flex: none;
+        font-size: 12px;
+        color: var(--g1-ink-mid);
+      }
+      #h1-session-meta .sm-id-group {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        min-width: 0;
+        width: 100%;
+      }
+      #h1-conv-guid {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12.5px;
+        color: var(--g1-ink-hi);
+        user-select: all;
+      }
+      #h1-session-meta .sm-acts {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-left: auto;
+      }
+      #h1-session-meta button {
+        flex: none;
+        min-height: 36px;
+        padding: 0 12px;
+        border-radius: 8px;
+        border: 1px solid var(--g1-edge);
+        background: var(--g1-page);
+        color: var(--g1-ink-hi);
+        font-size: 13px;
+        white-space: nowrap;
+        cursor: pointer;
+        transition:
+          background-color 160ms cubic-bezier(0.22, 1, 0.36, 1),
+          border-color 160ms cubic-bezier(0.22, 1, 0.36, 1),
+          color 160ms cubic-bezier(0.22, 1, 0.36, 1);
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #h1-session-meta button {
+          transition: none;
+        }
+      }
+      #h1-session-meta button:hover:not([disabled]) {
+        background: var(--g1-raise);
+      }
+      #h1-session-meta button:focus-visible {
+        outline: 2px solid var(--g1-link);
+        outline-offset: 2px;
+      }
+      #h1-session-meta button[disabled] {
+        opacity: 0.55;
+        cursor: default;
+      }
+      #h1-conv-copy[data-copied='true'] {
+        border-color: var(--g1-link);
+        color: var(--g1-link);
+      }
+      #h1-session-meta button.sm-danger {
+        color: var(--g1-danger);
+      }
+      #h1-daemon-note {
+        font-size: 12px;
+        line-height: 1.4;
+        color: var(--g1-ink-mid);
+        overflow-wrap: anywhere;
+      }
+      #h1-daemon-note[data-tone='error'] {
+        color: var(--g1-danger);
+      }
+      #h1-daemon-note[data-tone='warn'] {
+        color: var(--g1-warn);
       }
       /* #256. More > Host > Closed tabs: one entry per conversation, its
          title, folder and how the tab ended, and a 44px Reopen. */
@@ -2776,23 +2899,26 @@
         width: 8px;
         height: 8px;
         border-radius: 50%;
-        background: #3fb950;
+        background: var(--g1-dot-idle);
       }
       /* #255. What the conversation is doing, in the status line's colours
          (#h1-status .dot), so the list and the open conversation agree:
          waiting on you, working, background work, open. The words are the
          dot's name and title (LIVE_DOT_WORDS), never the colour alone. */
       #past-list .s .dot[data-state='wait'] {
-        background: var(--g1-warn);
+        background: var(--g1-dot-wait);
       }
       #past-list .s .dot[data-state='run'] {
-        background: var(--g1-link);
+        background: var(--g1-dot-run);
       }
       #past-list .s .dot[data-state='bg'] {
-        background: #a371f7;
+        background: var(--g1-dot-bg);
       }
       #past-list .s .dot[data-state='idle'] {
-        background: #3fb950;
+        background: var(--g1-dot-idle);
+      }
+      #past-list .s .dot[data-state='off'] {
+        background: var(--g1-dot-off);
       }
       /* #255. How many agents a working row has running: "2 agents", words
          in a pill after the dot. It never shrinks; the title gives way. */
@@ -3399,8 +3525,53 @@
       #agents-chip[data-state='paused'] {
         color: var(--g1-warn);
       }
-      #agents-chip[hidden] {
+      #agents-chip[hidden],
+      #live-strip-chip[hidden] {
         display: none;
+      }
+      #live-strip-chip {
+        flex: none;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        height: 44px;
+        min-width: 44px;
+        padding: 0 12px;
+        border: 0;
+        border-left: 1px solid var(--g1-line);
+        border-radius: 0;
+        background: transparent;
+        color: var(--g1-ink-mid);
+        font-size: 13px;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+      #live-strip-chip:hover {
+        color: var(--g1-ink-hi);
+        background: var(--g1-raise);
+      }
+      #live-strip-chip .dot {
+        width: 8px;
+        height: 8px;
+        flex: none;
+        border-radius: 50%;
+        background: var(--g1-dot-dim);
+      }
+      #live-strip-chip[data-state='idle'] .dot {
+        background: var(--g1-dot-idle);
+      }
+      #live-strip-chip[data-state='run'] .dot {
+        background: var(--g1-dot-run);
+      }
+      #live-strip-chip[data-state='wait'] .dot,
+      #live-strip-chip[data-state='paused'] .dot {
+        background: var(--g1-dot-wait);
+      }
+      #live-strip-chip[data-state='bg'] .dot {
+        background: var(--g1-dot-bg);
+      }
+      #live-strip-chip[data-state='off'] .dot {
+        background: var(--g1-dot-off);
       }
       /* #110. A More row that is not offered: the row rule sets display, which
          beats the hidden attribute, so this says it again. */
@@ -3426,11 +3597,11 @@
         height: 8px;
         flex: none;
         border-radius: 50%;
-        background: var(--g1-link);
+        background: var(--g1-dot-run);
         animation: ag-pulse 1.6s ease-in-out infinite;
       }
       #agents-chip[data-state='paused'] .dot {
-        background: var(--g1-warn);
+        background: var(--g1-dot-wait);
         animation: none;
       }
       @keyframes ag-pulse {
@@ -3839,20 +4010,20 @@
         height: 8px;
         flex: none;
         border-radius: 50%;
-        background: var(--g1-ink-dim);
+        background: var(--g1-dot-dim);
       }
       #agents-sheet .ag-dot[data-state='running'] {
-        background: var(--g1-link);
+        background: var(--g1-dot-run);
       }
       #agents-sheet .ag-dot[data-state='completed'] {
-        background: #3fb950;
+        background: var(--g1-dot-idle);
       }
       #agents-sheet .ag-dot[data-state='failed'] {
-        background: #f85149;
+        background: var(--g1-dot-off);
       }
       #agents-sheet .ag-dot[data-state='cancelled'],
       #agents-sheet .ag-dot[data-state='paused'] {
-        background: var(--g1-warn);
+        background: var(--g1-dot-wait);
       }
       #agents-sheet .ag-empty {
         padding: 16px;
@@ -3953,11 +4124,11 @@
         height: 8px;
         flex: none;
         border-radius: 50%;
-        background: var(--g1-link);
+        background: var(--g1-dot-run);
         animation: ag-pulse 1.6s ease-in-out infinite;
       }
       #agents-sheet .ag-live-ind[data-phase='waiting_approval'] .ag-live-dot {
-        background: var(--g1-warn);
+        background: var(--g1-dot-wait);
         animation: none;
       }
       #agents-sheet .ag-live-ind .ag-clock {
@@ -6419,6 +6590,17 @@
           >
             <span class="dot" aria-hidden="true"></span><span id="agents-chip-text"></span>
           </button>
+          <button
+            id="live-strip-chip"
+            type="button"
+            aria-expanded="false"
+            aria-controls="live-strip"
+            aria-label="Expand active conversations"
+            title="Expand active conversations"
+            hidden
+          >
+            <span class="dot" aria-hidden="true"></span><span id="live-strip-chip-text"></span>
+          </button>
           <!-- issue #48: hidden by default; self-heal shows it when the retry
                budget is exhausted, and any fresh watch / Unwatch hides it -->
           <button
@@ -6432,6 +6614,14 @@
             ↻
           </button>
         </div>
+        <!-- Active & warm conversations strip: one-tap zero-reload switching
+             between daemon-attached / warm sessions. Hidden unless >= 2 exist. -->
+        <div
+          id="live-strip"
+          role="navigation"
+          aria-label="Active conversations"
+          hidden
+        ></div>
         <!-- #184. The inspector sheet, opened in place under the status line.
              #session-footer is the drawer band's old box and renderFooter still
              fills it, now as the sheet's rows: the model (tap to switch), the
@@ -6453,6 +6643,54 @@
             Nothing to show until a conversation is open.
           </div>
           <div id="session-footer" style="display: none"></div>
+          <div id="h1-session-meta" hidden>
+            <div class="sm-col" id="h1-conv-id-row">
+              <span class="sm-lbl">Conversation</span>
+              <div class="sm-id-group">
+                <code id="h1-conv-guid"></code>
+                <button
+                  type="button"
+                  id="h1-conv-copy"
+                  aria-label="Copy conversation ID"
+                >
+                  Copy
+                </button>
+              </div>
+            </div>
+            <div class="sm-col" id="h1-daemon-ctrl" hidden>
+              <div class="sm-row">
+                <span class="sm-lbl">Daemon</span>
+                <div class="sm-acts" id="h1-daemon-acts">
+                  <button type="button" id="h1-daemon-reload" hidden>
+                    Reload
+                  </button>
+                  <button type="button" id="h1-daemon-restart" hidden>
+                    Restart
+                  </button>
+                  <button
+                    type="button"
+                    id="h1-daemon-force"
+                    class="sm-danger"
+                    hidden
+                  >
+                    Force restart
+                  </button>
+                  <button type="button" id="h1-daemon-confirm" hidden>
+                    Confirm restart
+                  </button>
+                  <button type="button" id="h1-daemon-cancel" hidden>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+              <div
+                id="h1-daemon-note"
+                role="status"
+                aria-live="polite"
+                hidden
+              ></div>
+            </div>
+          </div>
           <!-- #134. A checkout handover is the one conversation control that
                changes WHICH conversation owns the work: the daemon moves the
                git checkout's ownership to a fresh session and links the pair,
@@ -7091,25 +7329,126 @@
             text-transform: none;
             letter-spacing: 0;
           }
-          #transcript .tool-file-acts {
+          #transcript .tool-file-acts,
+          #transcript .asst-files {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 8px;
+          }
+          #transcript .tool-file-acts[hidden],
+          #transcript .asst-files[hidden] {
+            display: none;
+          }
+          #transcript .asst-file-card {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            padding: 8px 10px;
+            border: 1px solid var(--g1-rule);
+            border-radius: 8px;
+            background: #14171c;
+            color: var(--g1-ink-hi);
+            font-family: system-ui, -apple-system, sans-serif;
+          }
+          #transcript .asst-file-preview[hidden] {
+            display: none;
+          }
+          #transcript .asst-file-preview.att-loading {
+            min-height: 96px;
+            background: rgba(0, 0, 0, 0.25);
+            border-radius: 6px;
+          }
+          #transcript .asst-file-preview .att-link {
+            display: block;
+            line-height: 0;
+          }
+          #transcript .asst-file-preview .att-thumb {
+            display: block;
+            max-width: 100%;
+            max-height: 240px;
+            object-fit: contain;
+            border-radius: 6px;
+            background: rgba(0, 0, 0, 0.25);
+          }
+          #transcript .asst-file-row {
             display: flex;
             flex-wrap: wrap;
             align-items: center;
             gap: 8px;
-            margin-top: 6px;
+          }
+          #transcript .asst-file-ext {
+            flex: none;
+            padding: 2px 6px;
+            border: 1px solid var(--g1-rule);
+            border-radius: 4px;
+            background: var(--g1-raise);
+            color: var(--g1-ink-mid);
+            font-family: ui-monospace, monospace;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+          }
+          #transcript .asst-file-info {
+            flex: 1 1 140px;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 1px;
+          }
+          #transcript .asst-file-name {
+            color: var(--g1-ink-hi);
+            font-size: 13px;
+            font-weight: 500;
+            line-height: 1.3;
+            overflow-wrap: anywhere;
+          }
+          #transcript .asst-file-meta {
+            color: var(--g1-ink-mid);
+            font-family: ui-monospace, monospace;
+            font-size: 11px;
+            line-height: 1.3;
+            overflow-wrap: anywhere;
+          }
+          #transcript .asst-file-meta[hidden] {
+            display: none;
+          }
+          #transcript .image-file-acts {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 8px;
+            background: #14171c;
+            border-top: 1px solid var(--g1-rule);
           }
           #transcript .tool-dl {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
             min-height: 36px;
             padding: 4px 12px;
             border: 1px solid var(--g1-rule);
             border-radius: 6px;
-            background: #14171c;
+            background: var(--g1-raise);
             color: var(--g1-ink-hi);
             font-size: 12px;
+            font-weight: 500;
+            text-decoration: none;
             cursor: pointer;
           }
           #transcript .tool-dl:hover {
             border-color: var(--g1-ink-mid);
+            background: #222730;
+          }
+          #transcript .tool-dl:active {
+            background: #191d24;
+          }
+          #transcript .tool-dl:focus-visible,
+          #transcript a.md-ws-link:focus-visible,
+          #stored-list button:focus-visible {
+            outline: 2px solid var(--g1-ink-hi);
+            outline-offset: 2px;
           }
           #transcript .tool-dl:disabled {
             opacity: 0.6;
@@ -7122,6 +7461,236 @@
           #transcript .tool-dl-note[hidden],
           #transcript .tool-dl-note:empty {
             display: none;
+          }
+          #live-strip {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            background: var(--g1-page);
+            border-bottom: 1px solid var(--g1-line);
+            flex: none;
+            min-width: 0;
+          }
+          #live-strip[hidden] {
+            display: none;
+          }
+          #live-strip .live-strip-pills {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            overflow-x: auto;
+            scrollbar-width: none;
+            min-width: 0;
+            flex: 1 1 auto;
+          }
+          #live-strip .live-strip-pills::-webkit-scrollbar {
+            display: none;
+          }
+          #live-strip .live-strip-toggle {
+            flex: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            min-height: 32px;
+            min-width: 30px;
+            padding: 4px 7px;
+            border: 1px solid var(--g1-edge);
+            border-radius: 999px;
+            background: var(--g1-raise);
+            color: var(--g1-ink-mid);
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            white-space: nowrap;
+          }
+          #live-strip .live-strip-toggle.is-collapsed {
+            padding: 4px 11px;
+          }
+          #live-strip .live-strip-toggle:hover {
+            border-color: var(--g1-ink-mid);
+            color: var(--g1-ink-hi);
+          }
+          #live-strip .live-strip-toggle:active {
+            background: var(--g1-on);
+          }
+          #live-strip .live-strip-toggle:focus-visible {
+            outline: 2px solid var(--g1-link);
+            outline-offset: 2px;
+          }
+          #live-strip .live-pill-group {
+            flex: none;
+            display: inline-flex;
+            align-items: stretch;
+            border: 1px solid var(--g1-link);
+            border-radius: 999px;
+            background: var(--g1-on);
+            overflow: hidden;
+          }
+          #live-strip .live-pill-group:focus-within {
+            outline: 2px solid var(--g1-link);
+            outline-offset: 2px;
+          }
+          #live-strip .live-pill {
+            flex: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            min-height: 34px;
+            max-width: 200px;
+            padding: 4px 11px;
+            border: 1px solid var(--g1-edge);
+            border-radius: 999px;
+            background: var(--g1-raise);
+            color: var(--g1-ink-mid);
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            white-space: nowrap;
+          }
+          #live-strip .live-pill-group .live-pill {
+            border: none;
+            border-radius: 0;
+            background: transparent;
+            color: var(--g1-ink-hi);
+            padding-right: 8px;
+          }
+          #live-strip .live-pill-group .live-pill:focus-visible,
+          #live-strip .live-pill-group .live-pill-edit:focus-visible {
+            outline: none;
+          }
+          #live-strip .live-pill-edit {
+            flex: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 30px;
+            padding: 0 8px 0 6px;
+            border: none;
+            border-left: 1px solid var(--g1-edge);
+            background: transparent;
+            color: var(--g1-link);
+            cursor: pointer;
+          }
+          #live-strip .live-pill-edit:hover {
+            background: rgba(88, 166, 255, 0.14);
+            color: var(--g1-ink-hi);
+          }
+          #live-strip .live-pill-edit:active {
+            background: rgba(88, 166, 255, 0.24);
+          }
+          #live-strip .live-pill:hover {
+            border-color: var(--g1-ink-mid);
+            color: var(--g1-ink-hi);
+          }
+          #live-strip .live-pill:active {
+            background: var(--g1-on);
+          }
+          #live-strip .live-pill:focus-visible {
+            outline: 2px solid var(--g1-link);
+            outline-offset: 2px;
+          }
+          #live-strip .live-pill[aria-current='true']:not(.in-group) {
+            border-color: var(--g1-link);
+            background: var(--g1-on);
+            color: var(--g1-ink-hi);
+          }
+          #rename-dialog {
+            padding: 0;
+            border: 1px solid var(--g1-line);
+            border-radius: 10px;
+            max-width: 24rem;
+            width: 90vw;
+          }
+          #rename-dialog .rd-head {
+            padding: 12px 16px;
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--g1-ink-hi);
+            border-bottom: 1px solid var(--g1-line);
+          }
+          #rename-dialog .rd-body {
+            padding: 12px 16px;
+          }
+          #rename-dialog input {
+            width: 100%;
+            box-sizing: border-box;
+            min-height: 40px;
+            padding: 8px 10px;
+            border-radius: 6px;
+            border: 1px solid var(--g1-edge);
+            background: var(--g1-page);
+            color: var(--g1-ink-hi);
+            font-size: 16px;
+          }
+          #rename-dialog input:focus-visible {
+            outline: 2px solid var(--g1-link);
+            outline-offset: 1px;
+          }
+          #rename-dialog .rd-note {
+            margin-top: 8px;
+            font-size: 12px;
+            color: var(--g1-danger);
+          }
+          #rename-dialog .rd-foot {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+            padding: 10px 16px;
+            border-top: 1px solid var(--g1-line);
+          }
+          #rename-dialog .rd-foot button {
+            min-height: 38px;
+            padding: 6px 14px;
+            border-radius: 6px;
+            border: 1px solid var(--g1-edge);
+            background: var(--g1-raise);
+            color: var(--g1-ink);
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+          }
+          #rename-dialog .rd-foot button.primary {
+            border-color: #2ea043;
+            background: #238636;
+            color: #ffffff;
+          }
+          #rename-dialog .rd-foot button:disabled {
+            opacity: 0.55;
+            cursor: default;
+          }
+          #live-strip .lp-dot {
+            flex: none;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--g1-dot-dim);
+          }
+          #live-strip .lp-dot[data-state='idle'] {
+            background: var(--g1-dot-idle);
+          }
+          #live-strip .lp-dot[data-state='run'] {
+            background: var(--g1-dot-run);
+          }
+          #live-strip .lp-dot[data-state='wait'],
+          #live-strip .lp-dot[data-state='paused'] {
+            background: var(--g1-dot-wait);
+          }
+          #live-strip .lp-dot[data-state='bg'] {
+            background: var(--g1-dot-bg);
+          }
+          #live-strip .lp-dot[data-state='off'] {
+            background: var(--g1-dot-off);
+          }
+          #live-strip .lp-title {
+            overflow: hidden;
+            text-overflow: ellipsis;
+          }
+          @media (prefers-reduced-motion: reduce) {
+            #transcript .processing .proc-spin {
+              animation: none;
+            }
           }
           /* Fork-lineage breadcrumb above the transcript (add-session-forking). */
           #lineage {
@@ -7231,6 +7800,25 @@
           >
             <button type="button" id="model-picker-cancel">Cancel</button>
           </div>
+        </dialog>
+        <dialog id="rename-dialog" aria-labelledby="rename-dialog-heading">
+          <form id="rename-dialog-form" method="dialog">
+            <div class="rd-head" id="rename-dialog-heading">Rename conversation</div>
+            <div class="rd-body">
+              <input
+                type="text"
+                id="rename-dialog-input"
+                maxlength="200"
+                autocomplete="off"
+                placeholder="Conversation name"
+              />
+              <div id="rename-dialog-note" class="rd-note" hidden></div>
+            </div>
+            <div class="rd-foot">
+              <button type="button" id="rename-dialog-cancel">Cancel</button>
+              <button type="submit" id="rename-dialog-save" class="primary">Save</button>
+            </div>
+          </form>
         </dialog>
         <div
           id="session-title"
@@ -8066,6 +8654,7 @@
           clearInterval(healthPollId);
           healthPollId = null;
         }
+        if (typeof clearWarmSessions === 'function') clearWarmSessions();
         $('auth-gate').hidden = false;
         $('app-body').hidden = true;
       }
@@ -9290,7 +9879,71 @@
       // renders it into #transcript, mounting only the rows near the
       // viewport. The functions below keep the names the frame handlers have
       // always called, as thin wrappers over the model.
-      const transcriptModel = TranscriptModel.createTranscriptModel();
+      let activeModel = TranscriptModel.createTranscriptModel();
+      const facadeListeners = [];
+      let activeModelUnsub = activeModel.subscribe((ev) => {
+        const copy = facadeListeners.slice();
+        for (let i = 0; i < copy.length; i++) {
+          try {
+            copy[i](ev);
+          } catch (err) {
+            console.error('transcript facade listener failed', err);
+          }
+        }
+      });
+      function swapActiveModel(nextModel, place) {
+        if (!nextModel) return;
+        if (nextModel !== activeModel) {
+          if (activeModelUnsub) activeModelUnsub();
+          activeModel = nextModel;
+          activeModelUnsub = activeModel.subscribe((ev) => {
+            const copy = facadeListeners.slice();
+            for (let i = 0; i < copy.length; i++) {
+              try {
+                copy[i](ev);
+              } catch (err) {
+                console.error('transcript facade listener failed', err);
+              }
+            }
+          });
+        }
+        if (transcriptView && typeof transcriptView.setModel === 'function') {
+          transcriptView.setModel(activeModel, place || null);
+        }
+        const copy = facadeListeners.slice();
+        for (let i = 0; i < copy.length; i++) {
+          try {
+            copy[i]({ type: 'reset' });
+          } catch (err) {
+            console.error('transcript facade listener failed', err);
+          }
+        }
+      }
+      const transcriptModel = new Proxy(
+        {},
+        {
+          get(_target, prop) {
+            if (prop === 'subscribe') {
+              return (fn) => {
+                facadeListeners.push(fn);
+                return () => {
+                  const idx = facadeListeners.indexOf(fn);
+                  if (idx >= 0) facadeListeners.splice(idx, 1);
+                };
+              };
+            }
+            const val = activeModel[prop];
+            return typeof val === 'function' ? val.bind(activeModel) : val;
+          },
+          set(_target, prop, value) {
+            activeModel[prop] = value;
+            return true;
+          },
+          has(_target, prop) {
+            return prop === 'subscribe' || prop in activeModel;
+          },
+        },
+      );
 
       // ---- Turn accounting for "Fork from here" (add-session-forking) ------
       // The daemon bridge publishes one `user_message_chunk` echo per
@@ -9451,7 +10104,7 @@
 
       function createTranscriptView(virtualCore, markdownIt) {
         return TranscriptView.createTranscriptView({
-          model: transcriptModel,
+          model: activeModel,
           scroller: $('transcript'),
           virtualCore,
           markdownIt,
@@ -9483,10 +10136,17 @@
           // offered only where the gateway and daemon serve the agent reads.
           onTraceSubagent: (item) => openAgentTrace(item && item.toolCallId),
           canTraceSubagent: () => agentsOn(),
-          // #282: inline one-tap download on completed file-write/edit tool rows.
+          // #282: inline file cards + previews + downloads for assistant files.
           toolDownloadPath: (item) => resolveToolDownloadPath(item),
           onDownloadToolFile: (item, relPath) =>
             void doDownloadToolFile(item, relPath),
+          resolveToolFiles: (item) => resolveToolFiles(item),
+          resolveWorkspaceFile: (href, label) =>
+            resolveMarkdownWorkspaceFile(href, label),
+          loadWorkspaceThumb: (relPath) => loadWorkspaceThumb(relPath),
+          onDownloadFile: (spec, item) =>
+            void doDownloadAssistantFile(spec, item),
+          onDiscoverFiles: (files) => noteDiscoveredAssistantFiles(files),
           // May still be null if the boot read has not landed; the view then
           // starts in its own default and applyStampZone corrects it below.
           stampZone,
@@ -9695,6 +10355,9 @@
         const added = transcriptModel.prependItems(rows, () => {
           if (transcriptView) transcriptView.anchorReader();
         });
+        for (let i = 0; i < added; i++) {
+          noteAssistantFilesFromRow(rows[i]);
+        }
         let prependedUsers = 0;
         for (let i = 0; i < added; i++) {
           if (rows[i] && rows[i].kind === 'user' && !rows[i].midTurn) {
@@ -9964,7 +10627,11 @@
         runningToolIds.clear();
         stopQuietWatch();
         setProcessing(false);
+        if (typeof setRowIdleInList === 'function' && watchedSessionId) {
+          setRowIdleInList(watchedSessionId);
+        }
         renderStatusLine(); // #184: Send comes back in Stop's place
+        if (typeof renderLiveStrip === 'function') renderLiveStrip();
       }
       // A running tool row is itself proof of work, and a better one than a
       // spinner, so it holds the indicator back while it lasts. Terminal
@@ -9991,6 +10658,7 @@
         stopQuietWatch();
         setProcessing(true);
         renderStatusLine(); // #184: Stop takes Send's place
+        if (typeof renderLiveStrip === 'function') renderLiveStrip();
       }
       // ---- Crash-recovery banner (add-mid-turn-recovery §7) ---------------
       // `session_interrupted` / `session_recovered` are WAL-persisted markers,
@@ -10065,6 +10733,7 @@
         findClose(false); // #138: a search belongs to the conversation it ran in
         // Every item, the tool/subagent bookkeeping and the turn pointers.
         transcriptModel.clear();
+        clearAssistantFiles();
         // The cursor belongs to the conversation, not to the window: a page
         // read from one session must never be sent as a position in another.
         transcriptCursor = null;
@@ -10116,6 +10785,26 @@
       // this fetches nothing and reaches no host the model named (#100).
       function addAssistantImage(mimeType, data) {
         transcriptModel.addImage(mimeType, data);
+        const last =
+          transcriptModel.items[transcriptModel.items.length - 1] || null;
+        if (last && last.kind === 'image' && last.data) {
+          const ext = String(last.mime || 'image/png')
+            .split('/')[1]
+            .replace('jpeg', 'jpg');
+          registerAssistantFile({
+            key: 'inline:' + last.id,
+            name: 'assistant-image.' + (ext || 'png'),
+            mimeType: last.mime || 'image/png',
+            size: last.bytes || 0,
+            kind: 'image',
+            data: last.data,
+          });
+        }
+        scrollTranscript();
+      }
+      function addAssistantPart(part, sentAt) {
+        const res = transcriptModel.addAssistantPart(part, sentAt);
+        if (res && res.item) noteAssistantFilesFromRow(res.item);
         scrollTranscript();
       }
       function appendThought(text, sentAt) {
@@ -10162,7 +10851,8 @@
       // settles the nested subagent indicator (⏳ → ✔/✖ with total elapsed
       // time).
       function renderTool(u, sentAt) {
-        transcriptModel.upsertTool(u, sentAt);
+        const tool = transcriptModel.upsertTool(u, sentAt);
+        if (tool) noteAssistantFilesFromRow(tool);
         scrollTranscript();
       }
       // The daemon re-emits the whole list every time it changes, so this upserts the
@@ -11752,10 +12442,14 @@
       function renderFooter() {
         const f = $('session-footer');
         renderStatusLine();
+        if (typeof renderSessionMeta === 'function') renderSessionMeta();
         if (!ctxInfo) {
           f.style.display = 'none';
           f.innerHTML = '';
-          $('h1-sheet-empty').hidden = false;
+          $('h1-sheet-empty').hidden = !!(
+            typeof currentWatchedSessionId === 'function' &&
+            currentWatchedSessionId()
+          );
           return;
         }
         $('h1-sheet-empty').hidden = true;
@@ -12394,6 +13088,23 @@
         } else if (!watchedSessionId) {
           state = 'none';
           word = 'no conversation';
+        } else if (
+          typeof daemonSessionDead === 'object' &&
+          daemonSessionDead &&
+          daemonSessionDead.has(watchedSessionId)
+        ) {
+          state = 'off';
+          word =
+            (typeof sessionErrors === 'object' &&
+              sessionErrors &&
+              sessionErrors.get(watchedSessionId)) ||
+            'daemon issue';
+        } else if (
+          $('reconnect') &&
+          $('reconnect').style.display !== 'none'
+        ) {
+          state = 'off';
+          word = 'disconnected';
         } else if (pin) {
           state = 'wait';
           word = pin.kind === 'question' ? 'asking you' : 'waiting for you';
@@ -12424,7 +13135,10 @@
           state = 'paused';
           word = agentsPausedWord();
         }
-        if (btn.dataset.state !== state) btn.dataset.state = state;
+        if (btn.dataset.state !== state) {
+          btn.dataset.state = state;
+          if (typeof renderLiveStrip === 'function') renderLiveStrip();
+        }
         h1Text($('h1-state'), word);
         // #190: a context with no model named prints `no model`, muted, so
         // the line still has a model field and it reads as an absence.
@@ -14972,7 +15686,57 @@
       // download whole rather than truncated at 256 KiB.
       const WORKSPACE_DL_WINDOW_BYTES = 256 * 1024;
       const WORKSPACE_DL_MAX_BYTES = 50 * 1024 * 1024;
+      const WORKSPACE_THUMB_MAX_BYTES = 3 * 1024 * 1024;
+      const WORKSPACE_THUMB_URL_CAP = 32;
+      const WORKSPACE_THUMB_MIMES = {
+        png: 'image/png',
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        gif: 'image/gif',
+        webp: 'image/webp',
+        avif: 'image/avif',
+        bmp: 'image/bmp',
+      };
       let workspaceDownloadUrl = null;
+      const workspaceThumbUrls = new Map();
+      // Assistant-sent / session-produced files known in the watched session,
+      // surfaced inline in the conversation AND under `+ -> Files` (#stored).
+      const sessionAsstFiles = new Map();
+      function dropWorkspaceThumbs() {
+        workspaceThumbUrls.forEach((p) => {
+          void p.then((r) => {
+            if (r && r.url) URL.revokeObjectURL(r.url);
+          });
+        });
+        workspaceThumbUrls.clear();
+      }
+      function clearAssistantFiles() {
+        const had = sessionAsstFiles.size > 0;
+        sessionAsstFiles.clear();
+        dropWorkspaceThumbs();
+        if (had && typeof renderStored === 'function') renderStored();
+      }
+      function inferWorkspaceMime(relPath, explicitMime) {
+        const cleanMime = strOr(explicitMime, '').split(';')[0].trim().toLowerCase();
+        if (cleanMime) return cleanMime;
+        const ext = strOr(relPath, '')
+          .split('.')
+          .pop()
+          .toLowerCase();
+        if (WORKSPACE_THUMB_MIMES[ext]) return WORKSPACE_THUMB_MIMES[ext];
+        const map = {
+          pdf: 'application/pdf',
+          csv: 'text/csv',
+          md: 'text/markdown',
+          json: 'application/json',
+          html: 'text/html',
+          htm: 'text/html',
+          txt: 'text/plain',
+          ipynb: 'application/x-ipynb+json',
+          zip: 'application/zip',
+        };
+        return map[ext] || '';
+      }
       function safeDownloadLeaf(relPath, fallbackName) {
         const raw =
           strOr(fallbackName, '') ||
@@ -14985,15 +15749,29 @@
           .trim();
         return cleaned || 'file';
       }
-      function toWorkspaceRelPath(rawPath) {
-        let p = strOr(rawPath, '').trim();
-        if (!p || /^https?:\/\//i.test(p)) return '';
-        const cwd = (
+      function currentWorkspaceRoot() {
+        return (
           watchedSessionCwd ||
           (ctxInfo && ctxInfo.cwd) ||
           orgCwd() ||
           ''
         ).replace(/\/+$/, '');
+      }
+      function toWorkspaceRelPath(rawPath) {
+        let p = strOr(rawPath, '').trim();
+        if (!p || p.startsWith('#') || p.startsWith('?')) return '';
+        if (/^file:\/\//i.test(p)) {
+          try {
+            const parsed = new URL(p);
+            p = decodeURIComponent(parsed.pathname || '');
+          } catch {
+            return '';
+          }
+        } else if (/^[a-z][a-z0-9+.-]*:/i.test(p)) {
+          return '';
+        }
+        p = p.split(/[?#]/)[0];
+        const cwd = currentWorkspaceRoot();
         if (p.startsWith('/')) {
           if (cwd && p.startsWith(cwd + '/')) {
             p = p.slice(cwd.length + 1);
@@ -15002,40 +15780,139 @@
           }
         }
         p = p.replace(/^\.\/+/, '');
-        if (!p || p === '.' || p.startsWith('../') || p.includes('/../')) {
+        if (
+          !p ||
+          p === '.' ||
+          p.endsWith('/') ||
+          p.startsWith('../') ||
+          p.includes('/../') ||
+          p === '..'
+        ) {
           return '';
         }
         return p;
       }
-      function resolveToolDownloadPath(item) {
-        if (!item || item.kind !== 'tool' || item.status !== 'completed') {
-          return '';
+      function resolveMarkdownWorkspaceFile(rawHref, fallbackLabel) {
+        if (!daemonHasFeature('workspace_file_read')) return null;
+        const raw = strOr(rawHref, '').trim();
+        if (!raw) return null;
+        const isExplicitLocal =
+          /^file:\/\//i.test(raw) || raw.startsWith('/');
+        if (!isExplicitLocal && !currentWorkspaceRoot()) return null;
+        const rel = toWorkspaceRelPath(raw);
+        if (!rel) return null;
+        const leaf = rel.split('/').pop() || '';
+        if (!isExplicitLocal && !/\.[a-z0-9]{1,10}$/i.test(leaf)) {
+          return null;
         }
-        if (!daemonHasFeature('workspace_file_read')) return '';
+        const mime = inferWorkspaceMime(rel, '');
+        return {
+          key: 'ws:' + rel,
+          name: safeDownloadLeaf(rel, strOr(fallbackLabel, '') ? leaf : ''),
+          workspacePath: rel,
+          mimeType: mime,
+          kind: WORKSPACE_THUMB_MIMES[leaf.split('.').pop().toLowerCase()]
+            ? 'image'
+            : 'file',
+        };
+      }
+      function toolResultTextSnippet(result) {
+        if (typeof result === 'string') return result;
+        if (!Array.isArray(result)) return '';
+        const out = [];
+        for (const c of result) {
+          if (typeof c === 'string') out.push(c);
+          else if (
+            c &&
+            c.type === 'content' &&
+            c.content &&
+            typeof c.content.text === 'string'
+          ) {
+            out.push(c.content.text);
+          }
+        }
+        return out.join('\n');
+      }
+      function resolveToolFiles(item) {
+        if (!item || item.kind !== 'tool') return [];
+        const out = [];
+        const seen = new Set();
+        const addSpec = (spec) => {
+          if (!spec || !spec.key || seen.has(spec.key)) return;
+          seen.add(spec.key);
+          out.push(spec);
+        };
+        if (Array.isArray(item.artifactFiles)) {
+          for (const af of item.artifactFiles) {
+            if (!af) continue;
+            if (af.workspacePath && !daemonHasFeature('workspace_file_read')) {
+              continue;
+            }
+            addSpec(af);
+          }
+        }
         const inp =
           item.input && typeof item.input === 'object' ? item.input : null;
         const label = strOr(item.label, '');
-        const isRecordArtifactKind =
+        const tname = strOr(item.toolName, '').toLowerCase();
+        const resText = toolResultTextSnippet(item.result);
+        const isDisplayImage =
+          tname === 'display_image' ||
+          /^(display_image|displayimage)\b/i.test(label);
+        // display_image validates the PNG on disk before checking terminal
+        // graphics support, so on a headless daemon it may report failed solely
+        // because no terminal renderer is attached while the file is valid.
+        const statusOk =
+          item.status === 'completed' ||
+          (isDisplayImage &&
+            item.status === 'failed' &&
+            /image was not displayed/i.test(resText));
+        if (!statusOk || !daemonHasFeature('workspace_file_read')) {
+          return out;
+        }
+        const isRecordArtifact =
+          tname === 'record_artifact' ||
           /^(record_artifact|recordartifact|recording artifact)\b/i.test(
             label,
-          ) || !!(inp && typeof inp.workspacePath === 'string');
+          ) ||
+          !!(inp && typeof inp.workspacePath === 'string');
+        const isImageGen =
+          tname === 'image_gen' ||
+          /^(image_gen|generateimage|generate an image)\b/i.test(label);
+        const isPublishArtifact =
+          tname === 'artifact' ||
+          /^(artifact|publishartifact|publishing artifact from)\b/i.test(label);
         const isEditKind =
           item.toolKind === 'edit' ||
-          /^(write_file|writefile|edit|create_file|save_file)\b/i.test(label) ||
+          tname === 'write_file' ||
+          tname === 'edit' ||
+          tname === 'notebook_edit' ||
+          /^(write_file|writefile|edit|notebook_edit|notebookedit|create_file|save_file)\b/i.test(
+            label,
+          ) ||
           /\b(writing to|wrote|created|updated|edited)\b/i.test(label) ||
           !!(
             inp &&
             (typeof inp.content === 'string' ||
               typeof inp.new_string === 'string' ||
-              typeof inp.newText === 'string')
+              typeof inp.newText === 'string' ||
+              typeof inp.new_source === 'string')
           ) ||
           (Array.isArray(item.result) &&
             item.result.some(
               (c) => c && c.type === 'diff' && typeof c.path === 'string',
             ));
-        if (!isEditKind && !isRecordArtifactKind) return '';
+        if (
+          !isRecordArtifact &&
+          !isDisplayImage &&
+          !isImageGen &&
+          !isPublishArtifact &&
+          !isEditKind
+        ) {
+          return out;
+        }
         let candidate = '';
-        if (isRecordArtifactKind && Array.isArray(item.result)) {
+        if (isRecordArtifact && Array.isArray(item.result)) {
           for (const c of item.result) {
             const text =
               c && typeof c.text === 'string'
@@ -15045,7 +15922,7 @@
                   : '';
             if (!text) continue;
             if (/^Recorded \d+ artifacts? from directory\b/m.test(text)) {
-              return '';
+              return out;
             }
             const m = text.match(/(?:^|\n)workspacePath:\s*([^\r\n]+)/);
             if (m && m[1]) {
@@ -15058,6 +15935,7 @@
           candidate =
             strOr(inp.workspacePath, '') ||
             strOr(inp.file_path, '') ||
+            strOr(inp.notebook_path, '') ||
             strOr(inp.path, '') ||
             strOr(inp.filePath, '') ||
             strOr(inp.target_file, '');
@@ -15071,7 +15949,237 @@
           );
           if (diff) candidate = diff.path;
         }
-        return toWorkspaceRelPath(candidate);
+        if (!candidate && isImageGen && resText) {
+          const m = /saved to \*?\*?([^\s*]+)\*?\*?/i.exec(resText);
+          if (m) candidate = m[1].replace(/\.$/, '');
+        }
+        const rel = toWorkspaceRelPath(candidate);
+        if (rel) {
+          const leaf = rel.split('/').pop() || rel;
+          const givenTitle =
+            isRecordArtifact && inp ? strOr(inp.title, '') : '';
+          const mime = inferWorkspaceMime(
+            rel,
+            inp ? strOr(inp.mimeType, '') : '',
+          );
+          const size =
+            inp && typeof inp.sizeBytes === 'number' && inp.sizeBytes >= 0
+              ? inp.sizeBytes
+              : 0;
+          addSpec({
+            key: 'ws:' + rel,
+            name:
+              givenTitle && /\.[a-z0-9]{1,10}$/i.test(givenTitle)
+                ? givenTitle
+                : leaf,
+            workspacePath: rel,
+            mimeType: mime,
+            size: size,
+            kind:
+              (inp && strOr(inp.kind, '')) ||
+              (WORKSPACE_THUMB_MIMES[leaf.split('.').pop().toLowerCase()]
+                ? 'image'
+                : 'file'),
+          });
+        }
+        return out;
+      }
+      function resolveToolDownloadPath(item) {
+        const files = resolveToolFiles(item);
+        for (const f of files) {
+          if (f && f.workspacePath) return f.workspacePath;
+        }
+        return '';
+      }
+      function loadWorkspaceThumb(relPath) {
+        const cleanRel = toWorkspaceRelPath(relPath) || strOr(relPath, '').trim();
+        if (!cleanRel || !watchedSessionId || !token()) {
+          return Promise.resolve(null);
+        }
+        const ext = cleanRel.split('.').pop().toLowerCase();
+        const mime = WORKSPACE_THUMB_MIMES[ext];
+        if (!mime) return Promise.resolve(null);
+        const cacheKey = watchedSessionId + '\n' + cleanRel;
+        const cached = workspaceThumbUrls.get(cacheKey);
+        if (cached) return cached;
+        const sid = watchedSessionId;
+        const pending = (async () => {
+          const chunks = [];
+          let offset = 0;
+          let totalSize = 0;
+          while (offset < WORKSPACE_THUMB_MAX_BYTES) {
+            let res;
+            try {
+              res = await fetch(
+                wsTargetQuery(
+                  '/rc/workspace/file/bytes?path=' +
+                    encodeURIComponent(cleanRel) +
+                    '&offset=' +
+                    offset +
+                    '&maxBytes=' +
+                    WORKSPACE_DL_WINDOW_BYTES,
+                ),
+                { headers: { Authorization: 'Bearer ' + token() } },
+              );
+            } catch {
+              return null;
+            }
+            if (!res.ok || watchedSessionId !== sid) return null;
+            const data = await res.json().catch(() => null);
+            if (!data || watchedSessionId !== sid) return null;
+            if (
+              typeof data.sizeBytes === 'number' &&
+              data.sizeBytes > WORKSPACE_THUMB_MAX_BYTES
+            ) {
+              return null;
+            }
+            const b64 =
+              typeof data.contentBase64 === 'string' ? data.contentBase64 : '';
+            const bin = b64 ? atob(b64) : '';
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            chunks.push(bytes);
+            const returned =
+              typeof data.returnedBytes === 'number'
+                ? data.returnedBytes
+                : bytes.length;
+            if (typeof data.sizeBytes === 'number') totalSize = data.sizeBytes;
+            offset += returned;
+            if (
+              !data.truncated ||
+              returned <= 0 ||
+              (totalSize > 0 && offset >= totalSize)
+            ) {
+              break;
+            }
+          }
+          if (!chunks.length || watchedSessionId !== sid) return null;
+          return {
+            url: URL.createObjectURL(new Blob(chunks, { type: mime })),
+            mime,
+          };
+        })();
+        workspaceThumbUrls.set(cacheKey, pending);
+        void pending.then((r) => {
+          if (!r && workspaceThumbUrls.get(cacheKey) === pending) {
+            workspaceThumbUrls.delete(cacheKey);
+          }
+        });
+        while (workspaceThumbUrls.size > WORKSPACE_THUMB_URL_CAP) {
+          const oldest = workspaceThumbUrls.keys().next().value;
+          const gone = workspaceThumbUrls.get(oldest);
+          workspaceThumbUrls.delete(oldest);
+          if (gone) {
+            void gone.then((r) => {
+              if (r && r.url) URL.revokeObjectURL(r.url);
+            });
+          }
+        }
+        return pending;
+      }
+      function registerAssistantFile(spec, renderNow = true) {
+        if (!spec || !spec.key) return false;
+        const prev = sessionAsstFiles.get(spec.key);
+        const merged = prev
+          ? {
+              ...prev,
+              ...spec,
+              size: spec.size || spec.sizeBytes || prev.size || 0,
+              mimeType: spec.mimeType || prev.mimeType || '',
+              artifactId: spec.artifactId || prev.artifactId || '',
+              snapshotId: spec.snapshotId || prev.snapshotId || '',
+            }
+          : {
+              ...spec,
+              size: spec.size || spec.sizeBytes || 0,
+            };
+        const changed =
+          !prev ||
+          prev.name !== merged.name ||
+          prev.size !== merged.size ||
+          prev.mimeType !== merged.mimeType ||
+          prev.artifactId !== merged.artifactId ||
+          prev.workspacePath !== merged.workspacePath;
+        sessionAsstFiles.set(spec.key, merged);
+        if (changed && renderNow && typeof renderStored === 'function') {
+          renderStored();
+        }
+        return changed;
+      }
+      function noteDiscoveredAssistantFiles(files) {
+        if (!Array.isArray(files)) return;
+        let any = false;
+        for (const f of files) {
+          if (registerAssistantFile(f, false)) any = true;
+        }
+        if (any && typeof renderStored === 'function') renderStored();
+      }
+      function noteAssistantFilesFromRow(item) {
+        if (!item) return;
+        let any = false;
+        if (item.kind === 'tool') {
+          for (const f of resolveToolFiles(item)) {
+            if (registerAssistantFile(f, false)) any = true;
+          }
+        } else if (item.kind === 'file' && item.file) {
+          if (registerAssistantFile(item.file, false)) any = true;
+        } else if (item.kind === 'image' && item.data) {
+          const ext = String(item.mime || 'image/png')
+            .split('/')[1]
+            .replace('jpeg', 'jpg');
+          if (
+            registerAssistantFile(
+              {
+                key: 'inline:' + item.id,
+                name: 'assistant-image.' + (ext || 'png'),
+                mimeType: item.mime || 'image/png',
+                size: item.bytes || 0,
+                kind: 'image',
+                data: item.data,
+              },
+              false,
+            )
+          ) {
+            any = true;
+          }
+        } else if (item.kind === 'asst' && Array.isArray(item.parts)) {
+          item.parts.forEach((p, idx) => {
+            if (!p) return;
+            const rel = p.uri ? toWorkspaceRelPath(p.uri) : '';
+            const key =
+              (rel ? 'ws:' + rel : '') ||
+              (p.attachmentId ? 'att:' + p.attachmentId : '') ||
+              (p.uri ? 'uri:' + p.uri : '') ||
+              'part:' + item.id + ':' + idx;
+            if (
+              registerAssistantFile(
+                {
+                  key,
+                  name: p.name || (rel ? rel.split('/').pop() : 'file'),
+                  workspacePath: rel,
+                  uri: p.uri || '',
+                  attachmentId: p.attachmentId || '',
+                  mimeType: p.mimeType || inferWorkspaceMime(rel, ''),
+                  size: p.size || 0,
+                  kind: p.kind || 'file',
+                  data: p.data,
+                  textData: p.textData,
+                },
+                false,
+              )
+            ) {
+              any = true;
+            }
+          });
+        }
+        if (any && typeof renderStored === 'function') renderStored();
+      }
+      function rebuildAssistantFilesFromTranscript() {
+        sessionAsstFiles.clear();
+        for (const item of transcriptModel.items) {
+          noteAssistantFilesFromRow(item);
+        }
+        if (typeof renderStored === 'function') renderStored();
       }
       async function downloadWorkspaceFileBytes(relPath, fallbackName) {
         const cleanRel = toWorkspaceRelPath(relPath) || strOr(relPath, '').trim();
@@ -15165,19 +16273,170 @@
           sizeBytes: totalSize || offset,
         };
       }
+      function triggerByteStreamDownload(bytesOrChunks, fallbackName, explicitMime) {
+        const name = safeDownloadLeaf('', fallbackName || 'file');
+        const parts = Array.isArray(bytesOrChunks)
+          ? bytesOrChunks
+          : [bytesOrChunks];
+        let total = 0;
+        for (const p of parts) total += p.byteLength || p.length || 0;
+        const q = typeof window.qwen === 'object' ? window.qwen : null;
+        if (q && typeof q.saveBase64File === 'function' && total <= 25 * 1024 * 1024) {
+          const merged = new Uint8Array(total);
+          let off = 0;
+          for (const p of parts) {
+            const u8 = p instanceof Uint8Array ? p : new Uint8Array(p);
+            merged.set(u8, off);
+            off += u8.byteLength;
+          }
+          let bin = '';
+          const step = 0x8000;
+          for (let i = 0; i < merged.length; i += step) {
+            bin += String.fromCharCode(...merged.subarray(i, i + step));
+          }
+          return q
+            .saveBase64File({
+              dataBase64: btoa(bin),
+              filename: name,
+              mimeType: strOr(explicitMime, 'application/octet-stream'),
+            })
+            .then(
+              (r) => ({
+                ok: true,
+                name: (r && strOr(r.filename, '')) || name,
+                sizeBytes: total,
+                nativeSaved: true,
+              }),
+              () => ({ ok: false, error: 'Native save failed.' }),
+            );
+        }
+        if (workspaceDownloadUrl) URL.revokeObjectURL(workspaceDownloadUrl);
+        workspaceDownloadUrl = URL.createObjectURL(
+          new Blob(parts, { type: 'application/octet-stream' }),
+        );
+        const link = document.createElement('a');
+        link.href = workspaceDownloadUrl;
+        link.download = name;
+        link.rel = 'noopener';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        return Promise.resolve({ ok: true, name, sizeBytes: total });
+      }
+      async function downloadAssistantSpecBytes(spec) {
+        if (!spec) return { ok: false, error: 'Missing file metadata.' };
+        if (spec.workspacePath) {
+          return downloadWorkspaceFileBytes(spec.workspacePath, spec.name);
+        }
+        if (spec.snapshotId && watchedSessionId) {
+          if (!artifactsCanOpen()) {
+            return {
+              ok: false,
+              error: 'Opening a saved webpage needs a token that can write.',
+            };
+          }
+          try {
+            const res = await fetch(
+              '/session/' +
+                encodeURIComponent(watchedSessionId) +
+                '/artifacts/' +
+                encodeURIComponent(spec.snapshotId) +
+                '/content',
+              { headers: { Authorization: 'Bearer ' + token() } },
+            );
+            if (!res.ok) {
+              const e = await res.json().catch(() => ({}));
+              return { ok: false, error: artOpenRefusal(res.status, e) };
+            }
+            const buf = await res.arrayBuffer();
+            const dispName = artFileName(
+              { id: spec.snapshotId, title: spec.name },
+              res.headers.get('Content-Disposition'),
+            );
+            return triggerByteStreamDownload(new Uint8Array(buf), dispName);
+          } catch (err) {
+            return {
+              ok: false,
+              error: err && err.message ? err.message : String(err),
+            };
+          }
+        }
+        if (spec.attachmentId && watchedSessionId) {
+          try {
+            const res = await fetch(
+              '/session/' +
+                encodeURIComponent(watchedSessionId) +
+                '/attachments/' +
+                encodeURIComponent(spec.attachmentId),
+              { headers: { Authorization: 'Bearer ' + token() } },
+            );
+            const body = await res.json().catch(() => null);
+            if (!res.ok || !body || typeof body.data !== 'string') {
+              return {
+                ok: false,
+                error: describeFailure(res, body, 'downloading file'),
+              };
+            }
+            const bytes = Uint8Array.from(atob(body.data), (c) =>
+              c.charCodeAt(0),
+            );
+            return triggerByteStreamDownload(bytes, spec.name || spec.attachmentId);
+          } catch (err) {
+            return {
+              ok: false,
+              error: err && err.message ? err.message : String(err),
+            };
+          }
+        }
+        if (typeof spec.data === 'string' && spec.data) {
+          try {
+            const bytes = Uint8Array.from(atob(spec.data), (c) =>
+              c.charCodeAt(0),
+            );
+            return triggerByteStreamDownload(bytes, spec.name || 'file');
+          } catch {
+            return { ok: false, error: 'File bytes could not be decoded.' };
+          }
+        }
+        if (typeof spec.textData === 'string') {
+          const enc = new TextEncoder().encode(spec.textData);
+          return triggerByteStreamDownload(enc, spec.name || 'file.txt');
+        }
+        return { ok: false, error: 'File is not downloadable.' };
+      }
+      async function doDownloadAssistantFile(spec, item) {
+        if (!spec) return;
+        const stateKey = spec.key || spec.workspacePath || spec.name || 'file';
+        if (item) {
+          const cur = (item.fileDl && item.fileDl[stateKey]) || null;
+          if (cur && cur.busy) return;
+          if (!item.fileDl) item.fileDl = {};
+          item.fileDl[stateKey] = { busy: true, note: '' };
+          transcriptModel.touch(item);
+        }
+        const r = await downloadAssistantSpecBytes(spec);
+        if (item) {
+          if (!item.fileDl) item.fileDl = {};
+          item.fileDl[stateKey] = {
+            busy: false,
+            note: r.ok
+              ? 'Downloaded ' +
+                r.name +
+                (r.sizeBytes > 0 ? ' (' + formatBytes(r.sizeBytes) + ')' : '')
+              : 'Download failed: ' + r.error,
+          };
+          transcriptModel.touch(item);
+        }
+      }
       async function doDownloadToolFile(item, relPath) {
-        if (!item || item.dlBusy) return;
-        item.dlBusy = true;
-        item.dlNote = '';
-        transcriptModel.touch(item);
-        const r = await downloadWorkspaceFileBytes(relPath);
-        item.dlBusy = false;
-        item.dlNote = r.ok
-          ? 'Downloaded ' +
-            r.name +
-            (r.sizeBytes > 0 ? ' (' + formatBytes(r.sizeBytes) + ')' : '')
-          : 'Download failed: ' + r.error;
-        transcriptModel.touch(item);
+        return doDownloadAssistantFile(
+          {
+            key: 'ws:' + relPath,
+            name: safeDownloadLeaf(relPath),
+            workspacePath: relPath,
+          },
+          item,
+        );
       }
 
       // A 422 binary_file is the daemon's cue that the path is not text, and
@@ -16688,11 +17947,20 @@
           // a conversation opened by a deep link into a folder never listed
           // shows $HOME's rows and not its own.
           if (ctxInfo.cwd) {
-            if (id === watchedSessionId && !watchedSessionCwd) {
+            const unlockedCwd = id === watchedSessionId && !watchedSessionCwd;
+            if (unlockedCwd) {
               watchedSessionCwd = ctxInfo.cwd;
               persistWatch();
             }
             noteWatchedFolder(ctxInfo.cwd);
+            if (unlockedCwd) {
+              rebuildAssistantFilesFromTranscript();
+              for (const item of transcriptModel.items) {
+                if (item.kind === 'tool' || item.kind === 'asst') {
+                  transcriptModel.touch(item);
+                }
+              }
+            }
           }
           // rc-workspace-scoping (#28): watching a session in a non-default
           // workspace targets the workspace controls at it, but never over a
@@ -16928,6 +18196,9 @@
         // so it both stands the indicator down and restarts the quiet beat.
         // Doing it once here rather than at each branch is what keeps the
         // subagent path from being forgotten the way the first-frame path was.
+        if (!insideReplay && typeof clearSessionError === 'function' && watchedSessionId) {
+          clearSessionError(watchedSessionId);
+        }
         noteFrameActivity();
         goalFromFrame(u);
         const su = u.sessionUpdate;
@@ -17028,7 +18299,12 @@
           // every idle session with a prompt history claiming work forever on
           // every attach, which is the failure that made the ungated version
           // unusable.
-          if (!insideReplay) showProcessing();
+          if (!insideReplay) {
+            if (typeof clearSessionError === 'function' && watchedSessionId) {
+              clearSessionError(watchedSessionId);
+            }
+            showProcessing();
+          }
           return;
         }
         // An image the assistant produced arrives as an agent_message_chunk
@@ -17037,9 +18313,27 @@
         if (
           su === 'agent_message_chunk' &&
           u.content &&
-          u.content.type === 'image'
+          u.content.type === 'image' &&
+          !u.content.attachmentId &&
+          !u.content.uri
         ) {
+          if (userTurnsSeen > forkTurnCount) forkTurnCount = userTurnsSeen;
+          asstThisTurn = true;
           return addAssistantImage(u.content.mimeType, u.content.data);
+        }
+        if (su === 'agent_message_chunk') {
+          const apart =
+            typeof TranscriptModel.asstBlockOf === 'function'
+              ? TranscriptModel.asstBlockOf(u.content)
+              : null;
+          if (apart) {
+            if (userTurnsSeen > forkTurnCount) forkTurnCount = userTurnsSeen;
+            asstThisTurn = true;
+            addAssistantPart(apart, sentAt);
+            const fork = transcriptModel.forkItem;
+            if (fork && fork.turn === forkTurnCount) placeForkButton();
+            return;
+          }
         }
         if (su === 'config_options_update' && Array.isArray(u.configOptions)) {
           if (ctxInfo) {
@@ -17134,17 +18428,30 @@
                 (secs ? ' after ' + secs : '') +
                 (se.reason === 'silence' ? ' of silence' : '');
               lastTurnStopReason = 'prompt_timeout';
+              if (!insideReplay && typeof markSessionError === 'function' && watchedSessionId) {
+                markSessionError(watchedSessionId, 'turn timed out', false);
+              }
               renderStreamStateReadout();
               showContinueNudge(detail);
               return addSystem('error: ' + detail, true);
             }
             const errWord = strOr(se.error || se.code, 'stream_error');
             lastTurnStopReason = errWord;
+            if (!insideReplay && typeof markSessionError === 'function' && watchedSessionId) {
+              markSessionError(watchedSessionId, errWord, false);
+            }
             renderStreamStateReadout();
             return addSystem('error: ' + errWord, true);
           }
           case 'session_died':
             endTurn();
+            if (!insideReplay && typeof markSessionError === 'function' && watchedSessionId) {
+              markSessionError(
+                watchedSessionId,
+                'session ended',
+                true,
+              );
+            }
             return addSystem(
               'session ended: ' +
                 strOr(ev.data && ev.data.reason, 'session_died'),
@@ -17161,9 +18468,20 @@
             // Crash marker (add-mid-turn-recovery §7). The unrecovered
             // variant persists until the next prompt is accepted.
             const d = ev.data && typeof ev.data === 'object' ? ev.data : {};
+            if (
+              !insideReplay &&
+              d.recovered === false &&
+              typeof markSessionError === 'function' &&
+              watchedSessionId
+            ) {
+              markSessionError(watchedSessionId, 'daemon stopped', true);
+            }
             return showCrashBanner(d.recovered === false);
           }
           case 'session_recovered':
+            if (typeof clearSessionError === 'function' && watchedSessionId) {
+              clearSessionError(watchedSessionId);
+            }
             // Clear the crash banner; brief auto-fading note, and re-read
             // recovered/paused agents and background tasks now that the daemon
             // has restored the session (#274).
@@ -17218,6 +18536,9 @@
             const tc = ev.data && typeof ev.data === 'object' ? ev.data : {};
             const tcStop = strOr(tc.stopReason, '');
             lastTurnStopReason = tcStop || 'end_turn';
+            if (typeof clearSessionError === 'function' && watchedSessionId) {
+              clearSessionError(watchedSessionId);
+            }
             renderStreamStateReadout();
             // The just-finished turn is a valid fork point: place "Fork from
             // here" under the turn's last assistant bubble. Replayed history
@@ -17290,6 +18611,9 @@
                   ? ev.id
                   : frameEventId;
             transcriptModel.failTurn(TranscriptModel.turnErrorText(d), failKey);
+            if (!insideReplay && typeof markSessionError === 'function' && watchedSessionId) {
+              markSessionError(watchedSessionId, 'turn error', false);
+            }
             scrollTranscript();
             endTurn();
             // A prompt this window sent holds Send until its request settles;
@@ -17327,6 +18651,7 @@
               // will reference those ids again), the fork row, the
               // processing row and the current-turn pointers.
               transcriptModel.cutAtUserTurn(keep);
+              rebuildAssistantFilesFromTranscript();
               // The in-memory turn state must reflect the kept view, or
               // the next "Fork from here" posts a fromTurn past the tip.
               userTurnsSeen = keep;
@@ -17385,10 +18710,11 @@
             if (said.length) scrollTranscript();
             return;
           }
-          // #127: an artifact was recorded, changed or removed. Nothing is
-          // drawn in the transcript; an open Artifacts sheet re-reads.
+          // #127: an artifact was recorded, changed or removed. Assistant
+          // file artifacts render inline in chat and under `+ -> Files`, and
+          // an open Artifacts sheet re-reads once per burst.
           case 'artifact_changed':
-            return noteArtifactChanged(ev.data);
+            return noteArtifactChanged(ev.data, frameStamp(ev));
           // #230: a background run installed or settled. This is the roster's
           // transition feed, and it is what the once-a-second re-read used to
           // discover by asking again.
@@ -17750,6 +19076,7 @@
           // then run the standard watch hand-off (no freeform id field
           // anymore, so the hand-off is a direct startWatch call).
           const forkCwd = watchedSessionCwd;
+          parkCurrentSession(data.sessionId);
           if ($('watch').disabled) $('stop').onclick();
           // #173: the fork route returns no cursor, so this is the rewind's
           // move: clear, then replay from 0. With no cursor startWatch sent no
@@ -22930,6 +24257,8 @@
           // Budget exhausted: hand back to the user via the Chat-tab
           // Reconnect button (a fresh watch or Unwatch hides it).
           $('reconnect').style.display = '';
+          renderStatusLine();
+          if (typeof renderLiveStrip === 'function') renderLiveStrip();
           setStatus(
             'reconnect failed after ' +
               watchRetryMax +
@@ -22942,6 +24271,8 @@
             Math.min(watchRetryAttempt, watchRetryDelays.length - 1)
           ];
         watchRetryAttempt += 1;
+        renderStatusLine();
+        if (typeof renderLiveStrip === 'function') renderLiveStrip();
         setStatus(
           'reconnecting (attempt ' +
             watchRetryAttempt +
@@ -22955,8 +24286,9 @@
           watchRetryTimer = null;
           // Guards: the user may have unwatched or switched sessions, a
           // fresh watch may already be running, or the tab may be hidden
-          // (the visibilitychange handler reconnects on return instead).
-          if (document.hidden) return;
+          // (in web browsers visibilitychange reconnects on return; in the
+          // native Android shell keep reconnecting in the background).
+          if (document.hidden && !isNativeShell()) return;
           if (!watchedSessionId || !token() || watchStreamAlive) return;
           // A watch button still disabled means some OTHER startWatch is
           // already in flight (it sets the flag at its top and the finally
@@ -23063,12 +24395,15 @@
             'setWatchedSession' in bridge &&
             typeof bridge.setWatchedSession === 'function'
           ) {
+            const outboxSnap = Array.isArray(outbox) ? outbox.slice() : [];
             const sig =
               String(watchedSessionId) +
               '\n' +
               String(watchedSessionTitle || '') +
               '\n' +
-              String(watchedSessionCwd || '');
+              String(watchedSessionCwd || '') +
+              '\n' +
+              JSON.stringify(outboxSnap);
             const now = Date.now();
             if (
               sig !== lastBridgeWatchSig ||
@@ -23083,6 +24418,7 @@
                   lastEventId: lastSeenEventId,
                   title: watchedSessionTitle || null,
                   cwd: watchedSessionCwd || null,
+                  outbox: outboxSnap,
                 });
               } catch {
                 /* best-effort native sync */
@@ -23281,8 +24617,14 @@
       );
       // The phone's last chance: a tab going to the background may never run
       // its timers again before it is evicted.
+      let lastPageHiddenAt = 0;
+      let lastWatchByteAt = 0;
+      const WAKE_STALE_STREAM_MS = 28_000;
       document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'hidden') savePlace();
+        if (document.visibilityState === 'hidden') {
+          lastPageHiddenAt = Date.now();
+          savePlace();
+        }
       });
       window.addEventListener('pagehide', savePlace);
 
@@ -24081,6 +25423,7 @@
         if (!watchedSessionId) return;
         if (outbox.length === 0) {
           localStorage.removeItem(outboxKey(watchedSessionId));
+          persistWatch();
           return;
         }
         try {
@@ -24092,6 +25435,45 @@
               ((e && e.name) || 'Error') +
               (e && e.message ? ' (' + e.message + ')' : ''),
           );
+        }
+        persistWatch();
+      }
+
+      async function syncNativeDispatchedOutbox(id) {
+        const targetId = id || watchedSessionId;
+        if (
+          !targetId ||
+          !('consumeDispatchedOutbox' in bridge) ||
+          typeof bridge.consumeDispatchedOutbox !== 'function'
+        ) {
+          return;
+        }
+        try {
+          const sent = await bridge.consumeDispatchedOutbox(targetId);
+          if (!Array.isArray(sent) || sent.length === 0) return;
+          const current =
+            targetId === watchedSessionId ? outbox.slice() : loadOutbox(targetId);
+          let changed = false;
+          for (const item of sent) {
+            if (typeof item !== 'string' || !item) continue;
+            const idx = current.indexOf(item);
+            if (idx >= 0) {
+              current.splice(idx, 1);
+              changed = true;
+            }
+          }
+          if (!changed) return;
+          if (targetId === watchedSessionId) {
+            outbox = current;
+            saveOutbox();
+            renderQueued();
+          } else if (current.length === 0) {
+            localStorage.removeItem(outboxKey(targetId));
+          } else {
+            localStorage.setItem(outboxKey(targetId), JSON.stringify(current));
+          }
+        } catch {
+          /* best-effort native outbox sync */
         }
       }
 
@@ -24874,14 +26256,28 @@
       let storedPreviewNote = '';
       let storedPreviewName = '';
 
+      function assistantStoredList() {
+        const uploadedIds = new Set(
+          storedFiles.map((e) => e && e.attachmentId).filter(Boolean),
+        );
+        const out = [];
+        sessionAsstFiles.forEach((entry) => {
+          if (!entry || !entry.key) return;
+          if (entry.attachmentId && uploadedIds.has(entry.attachmentId)) return;
+          out.push(entry);
+        });
+        return out;
+      }
+
       function renderStored() {
         const box = $('stored');
         const list = $('stored-list');
         if (!box || !list) return;
-        // #184: Files (n) under the +, once the store has been asked.
-        $('stored-count').textContent = storedFiles.length
-          ? ' (' + storedFiles.length + ')'
-          : '';
+        const asstList = assistantStoredList();
+        const total = storedFiles.length + asstList.length;
+        // #184: Files (n) under the +, counting both uploaded attachments and
+        // files sent/produced by the assistant in this conversation.
+        $('stored-count').textContent = total ? ' (' + total + ')' : '';
         list.textContent = '';
         for (const entry of storedFiles) {
           const row = document.createElement('span');
@@ -24898,11 +26294,6 @@
           const remove = document.createElement('button');
           remove.type = 'button';
           remove.style.marginLeft = '6px';
-          // Two presses rather than a dialog. The verifier dismisses every
-          // dialog unconditionally (its page.on('dialog') handler in
-          // scripts/verify-transcript-virtualization.mts), so a confirm() gate
-          // could never be driven here, and a control nobody can drive is a
-          // control nobody can show works.
           if (storedArmed === entry.attachmentId) {
             remove.textContent = 'Confirm remove';
             remove.onclick = () => removeStored(entry);
@@ -24923,7 +26314,60 @@
           row.appendChild(remove);
           list.appendChild(row);
         }
-        $('stored-note').textContent = storedNote;
+        for (const entry of asstList) {
+          const row = document.createElement('span');
+          row.className = 'stored-asst-row';
+          row.style.display = 'block';
+          row.style.marginTop = '4px';
+          const label = document.createElement('span');
+          const detailBits = [];
+          if (entry.size > 0) detailBits.push(formatBytes(entry.size));
+          detailBits.push(
+            'assistant' +
+              (entry.kind && entry.kind !== 'file' ? ' \u00b7 ' + entry.kind : ''),
+          );
+          label.textContent =
+            (entry.name || entry.workspacePath || 'file') +
+            ' (' +
+            detailBits.join(', ') +
+            ')';
+          row.appendChild(label);
+          const open = document.createElement('button');
+          open.type = 'button';
+          open.style.marginLeft = '6px';
+          open.textContent = 'Open';
+          open.onclick = () => void openStoredAssistant(entry);
+          row.appendChild(open);
+          const dl = document.createElement('button');
+          dl.type = 'button';
+          dl.style.marginLeft = '6px';
+          dl.textContent = 'Download';
+          dl.onclick = () => void downloadStoredAssistant(entry);
+          row.appendChild(dl);
+          if (entry.artifactId && artifactsWritable()) {
+            const armKey = 'art:' + entry.artifactId;
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.style.marginLeft = '6px';
+            if (storedArmed === armKey) {
+              remove.textContent = 'Confirm remove';
+              remove.onclick = () => void removeStoredArtifact(entry);
+            } else {
+              remove.textContent = 'Remove';
+              remove.onclick = () => {
+                storedArmed = armKey;
+                renderStored();
+              };
+            }
+            row.appendChild(remove);
+          }
+          list.appendChild(row);
+        }
+        const effectiveNote =
+          storedNote === 'nothing stored yet' && asstList.length > 0
+            ? ''
+            : storedNote;
+        $('stored-note').textContent = effectiveNote;
       }
 
       function dropStoredPreview() {
@@ -25043,6 +26487,156 @@
         renderStoredPreview();
       }
 
+      async function openStoredAssistant(entry) {
+        const id = watchedSessionId;
+        if (!id || !entry) return;
+        if (entry.attachmentId) {
+          return openStored({ attachmentId: entry.attachmentId });
+        }
+        dropStoredPreview();
+        storedPreviewNote = 'opening…';
+        renderStoredPreview();
+        if (entry.workspacePath) {
+          const ext = entry.workspacePath.split('.').pop().toLowerCase();
+          const rasterMime = WORKSPACE_THUMB_MIMES[ext] || '';
+          if (rasterMime) {
+            const thumb = await loadWorkspaceThumb(entry.workspacePath);
+            if (watchedSessionId !== id) return;
+            if (!thumb || !thumb.url) {
+              storedPreviewNote = 'could not preview ' + (entry.name || entry.workspacePath);
+              renderStoredPreview();
+              return;
+            }
+            const res = await fetch(thumb.url).catch(() => null);
+            const blob = res ? await res.blob().catch(() => null) : null;
+            if (watchedSessionId !== id || !blob) return;
+            storedPreviewUrl = URL.createObjectURL(blob);
+            storedPreviewMime = rasterMime;
+            storedPreviewName = entry.name || entry.workspacePath;
+            storedPreviewNote = '';
+            renderStoredPreview();
+            return;
+          }
+          const r = await downloadWorkspaceFileBytes(
+            entry.workspacePath,
+            entry.name,
+          );
+          if (watchedSessionId !== id) return;
+          storedPreviewNote = r.ok
+            ? 'Downloaded ' + r.name
+            : 'Open failed: ' + r.error;
+          renderStoredPreview();
+          return;
+        }
+        if (typeof entry.data === 'string' && entry.data) {
+          try {
+            const bytes = Uint8Array.from(atob(entry.data), (c) =>
+              c.charCodeAt(0),
+            );
+            const mime = /^image\/(png|jpeg|gif|webp|bmp|avif)$/i.test(
+              entry.mimeType || '',
+            )
+              ? entry.mimeType.toLowerCase()
+              : 'application/octet-stream';
+            storedPreviewUrl = URL.createObjectURL(
+              new Blob([bytes], { type: mime }),
+            );
+            storedPreviewMime = mime;
+            storedPreviewName = entry.name || 'file';
+            storedPreviewNote = '';
+            renderStoredPreview();
+            return;
+          } catch {
+            storedPreviewNote = 'the file bytes did not decode';
+            renderStoredPreview();
+            return;
+          }
+        }
+        const r = await downloadAssistantSpecBytes(entry);
+        if (watchedSessionId !== id) return;
+        storedPreviewNote = r.ok
+          ? 'Downloaded ' + r.name
+          : 'Open failed: ' + r.error;
+        renderStoredPreview();
+      }
+
+      async function downloadStoredAssistant(entry) {
+        const id = watchedSessionId;
+        if (!id || !entry) return;
+        storedPreviewNote = 'downloading ' + (entry.name || 'file') + '…';
+        renderStoredPreview();
+        const r = await downloadAssistantSpecBytes(entry);
+        if (watchedSessionId !== id) return;
+        storedPreviewNote = r.ok
+          ? 'Downloaded ' +
+            r.name +
+            (r.sizeBytes > 0 ? ' (' + formatBytes(r.sizeBytes) + ')' : '')
+          : 'Download failed: ' + r.error;
+        renderStoredPreview();
+      }
+
+      async function removeStoredArtifact(entry) {
+        storedArmed = null;
+        const id = watchedSessionId;
+        if (!id || !entry || !entry.artifactId) return;
+        const r = await convCall(
+          '/session/' +
+            encodeURIComponent(id) +
+            '/artifacts/' +
+            encodeURIComponent(entry.artifactId),
+          { method: 'DELETE' },
+        );
+        if (watchedSessionId !== id) return;
+        if (!r.ok) {
+          storedNote = artRefusalText(r);
+          renderStored();
+          return;
+        }
+        sessionAsstFiles.delete(entry.key);
+        transcriptModel.removeAssistantFile(entry.key);
+        storedNote = '';
+        renderStored();
+      }
+
+      function artifactToFileSpec(a) {
+        if (!a || typeof a !== 'object') return null;
+        if (artHasWorkspaceFile(a)) {
+          const rel = toWorkspaceRelPath(a.workspacePath) || strOr(a.workspacePath, '');
+          if (!rel) return null;
+          return {
+            key: 'ws:' + rel,
+            artifactId: strOr(a.id, ''),
+            toolCallId: strOr(a.toolCallId, ''),
+            name: artTitle(a),
+            workspacePath: rel,
+            mimeType: inferWorkspaceMime(rel, strOr(a.mimeType, '')),
+            size:
+              typeof a.sizeBytes === 'number' && a.sizeBytes >= 0
+                ? a.sizeBytes
+                : 0,
+            kind: strOr(a.kind, 'file'),
+          };
+        }
+        if (artIsSnapshot(a)) {
+          const aid = strOr(a.id, '');
+          if (!aid) return null;
+          return {
+            key: 'art:' + aid,
+            artifactId: aid,
+            snapshotId: aid,
+            toolCallId: strOr(a.toolCallId, ''),
+            name: artTitle(a),
+            mimeType: 'text/html',
+            size:
+              typeof a.sizeBytes === 'number' && a.sizeBytes >= 0
+                ? a.sizeBytes
+                : 0,
+            kind: 'html',
+          };
+        }
+        return null;
+      }
+
       async function loadStored() {
         // Snapshot the conversation, because every write below happens after an
         // await. syncStoredForSession clears and refetches on a switch but cannot
@@ -25056,6 +26650,11 @@
           renderStored();
           return;
         }
+        const artPromise = artifactsOn()
+          ? convCall('/session/' + encodeURIComponent(id) + '/artifacts').catch(
+              () => null,
+            )
+          : Promise.resolve(null);
         let res;
         try {
           res = await fetch(
@@ -25072,17 +26671,29 @@
           renderStored();
           return;
         }
-        const body = await res.json().catch(() => null);
+        const [body, artRes] = await Promise.all([
+          res.json().catch(() => null),
+          artPromise,
+        ]);
         if (watchedSessionId !== id) return;
+        if (artRes && artRes.ok && Array.isArray(artRes.body.artifacts)) {
+          for (const a of artRes.body.artifacts) {
+            if (!a || (a.source !== 'tool' && a.source !== 'hook')) continue;
+            const spec = artifactToFileSpec(a);
+            if (spec) registerAssistantFile(spec, false);
+          }
+        }
         if (!res.ok || !body || !Array.isArray(body.attachments)) {
           storedNote = describeFailure(res, body, 'listing the stored files');
           storedFiles = [];
           renderStored();
           return;
         }
-        storedNote =
-          body.attachments.length === 0 ? 'nothing stored yet' : '';
         storedFiles = body.attachments;
+        storedNote =
+          storedFiles.length === 0 && assistantStoredList().length === 0
+            ? 'nothing stored yet'
+            : '';
         storedArmed = null;
         dropStoredPreview();
         renderStoredPreview();
@@ -25094,8 +26705,16 @@
       // changes, or the rows get drawn against the session being left. Refetched
       // only when the reader is already looking at it, because the list is the
       // daemon's answer and nobody else asked for it.
-      function syncStoredForSession() {
+      function syncStoredForSession(switching, keepWarm) {
         storedFiles = [];
+        if (!keepWarm) {
+          clearAssistantFiles();
+          if (!switching) {
+            for (const item of transcriptModel.items) {
+              noteAssistantFilesFromRow(item);
+            }
+          }
+        }
         storedNote = '';
         storedArmed = null;
         // Revoked rather than cleared, and before the switch is drawn: the
@@ -25464,14 +27083,48 @@
       // The sheet names the conversation it was opened in, so a switch shuts it.
       function syncArtifactsForSession() {
         if (artSheet.open && artSheet.sid !== watchedSessionId) closeArtSheet(false);
+        if (typeof syncSessionMetaForSession === 'function') {
+          syncSessionMetaForSession();
+        }
       }
       // The daemon announces each change on the conversation's stream
       // (`artifact_changed`, DaemonArtifactChangedData). An open sheet
       // re-reads its list for it, once per burst: a turn that saves several
       // pages sends several, and a replay sends them all again.
-      function noteArtifactChanged(data) {
-        if (!artSheet.open) return;
+      function noteArtifactChanged(data, sentAt) {
         const sid = data && typeof data.sessionId === 'string' ? data.sessionId : null;
+        if (sid && watchedSessionId && sid !== watchedSessionId) return;
+        const change = data && data.change && typeof data.change === 'object' ? data.change : null;
+        if (change && watchedSessionId && (!sid || sid === watchedSessionId)) {
+          if (change.action === 'removed') {
+            const goneSpec = change.artifact ? artifactToFileSpec(change.artifact) : null;
+            const goneId = strOr(change.artifactId, '');
+            if (goneSpec) {
+              sessionAsstFiles.delete(goneSpec.key);
+              transcriptModel.removeAssistantFile(goneSpec.key);
+            }
+            if (goneId) {
+              sessionAsstFiles.forEach((v, k) => {
+                if (v && v.artifactId === goneId) sessionAsstFiles.delete(k);
+              });
+              transcriptModel.removeAssistantFile('art:' + goneId);
+              transcriptModel.removeAssistantFile(goneId);
+            }
+            renderStored();
+          } else if (
+            (change.action === 'created' || change.action === 'updated') &&
+            change.artifact &&
+            (change.artifact.source === 'tool' || change.artifact.source === 'hook')
+          ) {
+            const spec = artifactToFileSpec(change.artifact);
+            if (spec) {
+              registerAssistantFile(spec, true);
+              transcriptModel.upsertAssistantFile(spec, sentAt);
+              scrollTranscript();
+            }
+          }
+        }
+        if (!artSheet.open) return;
         if (sid && sid !== artSheet.sid) return;
         clearTimeout(artSheet.refresh);
         artSheet.refresh = setTimeout(() => {
@@ -26169,7 +27822,306 @@
         // capability) must not leave an armed button behind, because its next
         // press would still fire.
         if (!supported) disarmWtReset();
+        renderSessionMeta();
       }
+
+      // ---- Conversation GUID copy & per-conversation daemon controls -------
+      let convGuidCopiedFor = null;
+      let convGuidCopiedTimer = null;
+      let daemonRestartArmed = null; // null | 'graceful' | 'force'
+      let daemonCtrlBusy = null; // null | 'reload' | 'restart' | 'force'
+      let daemonNoteText = '';
+      let daemonNoteTone = ''; // '' | 'warn' | 'error'
+      let daemonNoteFor = null;
+
+      function currentWatchedSessionId() {
+        try {
+          return watchedSessionId || null;
+        } catch {
+          return null;
+        }
+      }
+
+      function canRestartSessionDaemon() {
+        const rc = caps && caps.remoteControl;
+        return !!(
+          rc &&
+          rc.sessionDaemonRestart === true &&
+          rc.ownerScope === true
+        );
+      }
+
+      function canReloadSessionDaemon() {
+        return wsmGate('workspaceReload', 'workspace_reload');
+      }
+
+      function setDaemonNote(forSid, text, tone = '') {
+        daemonNoteFor = forSid || null;
+        daemonNoteText = text || '';
+        daemonNoteTone = tone || '';
+        renderSessionMeta();
+      }
+
+      function disarmDaemonRestart(clearNote = false) {
+        const wasArmed = daemonRestartArmed !== null;
+        daemonRestartArmed = null;
+        if (clearNote || (wasArmed && daemonNoteTone === 'warn')) {
+          daemonNoteText = '';
+          daemonNoteTone = '';
+          daemonNoteFor = null;
+        }
+        renderSessionMeta();
+      }
+
+      function syncSessionMetaForSession() {
+        const sid = currentWatchedSessionId();
+        if (convGuidCopiedFor && convGuidCopiedFor !== sid) {
+          convGuidCopiedFor = null;
+          if (convGuidCopiedTimer) {
+            clearTimeout(convGuidCopiedTimer);
+            convGuidCopiedTimer = null;
+          }
+        }
+        disarmDaemonRestart(true);
+      }
+
+      function renderSessionMeta() {
+        const box = $('h1-session-meta');
+        if (!box) return;
+        const sid = currentWatchedSessionId();
+        const emptyEl = $('h1-sheet-empty');
+        if (!sid) {
+          box.hidden = true;
+          if (emptyEl && !ctxInfo) emptyEl.hidden = false;
+          return;
+        }
+        box.hidden = false;
+        if (emptyEl) emptyEl.hidden = true;
+
+        const guidEl = $('h1-conv-guid');
+        if (guidEl) {
+          h1Text(guidEl, sid);
+          guidEl.title = sid;
+        }
+        const copyBtn = $('h1-conv-copy');
+        if (copyBtn) {
+          const copied = convGuidCopiedFor === sid;
+          h1Text(copyBtn, copied ? 'Copied' : 'Copy');
+          if (copied) copyBtn.dataset.copied = 'true';
+          else delete copyBtn.dataset.copied;
+        }
+
+        const ctrl = $('h1-daemon-ctrl');
+        if (!ctrl) return;
+        const restartOk = canRestartSessionDaemon();
+        const reloadOk = canReloadSessionDaemon();
+        if (!restartOk && !reloadOk) {
+          ctrl.hidden = true;
+          if (daemonRestartArmed !== null) daemonRestartArmed = null;
+          return;
+        }
+        if (!restartOk && daemonRestartArmed !== null) {
+          daemonRestartArmed = null;
+        }
+        ctrl.hidden = false;
+
+        const btnReload = $('h1-daemon-reload');
+        const btnRestart = $('h1-daemon-restart');
+        const btnForce = $('h1-daemon-force');
+        const btnConfirm = $('h1-daemon-confirm');
+        const btnCancel = $('h1-daemon-cancel');
+        const noteEl = $('h1-daemon-note');
+
+        const armed = daemonRestartArmed;
+        const busy = daemonCtrlBusy;
+
+        if (armed && !busy) {
+          btnReload.hidden = true;
+          btnRestart.hidden = true;
+          btnForce.hidden = true;
+          btnConfirm.hidden = false;
+          btnCancel.hidden = false;
+          btnConfirm.disabled = false;
+          btnCancel.disabled = false;
+          btnConfirm.classList.toggle('sm-danger', armed === 'force');
+          h1Text(
+            btnConfirm,
+            armed === 'force' ? 'Confirm force restart' : 'Confirm restart',
+          );
+        } else {
+          btnConfirm.hidden = true;
+          btnCancel.hidden = true;
+          btnReload.hidden = !reloadOk;
+          btnRestart.hidden = !restartOk;
+          btnForce.hidden = !restartOk;
+          btnReload.disabled = !!busy;
+          btnRestart.disabled = !!busy;
+          btnForce.disabled = !!busy;
+          h1Text(btnReload, busy === 'reload' ? 'Reloading\u2026' : 'Reload');
+          h1Text(
+            btnRestart,
+            busy === 'restart' ? 'Restarting\u2026' : 'Restart',
+          );
+          h1Text(
+            btnForce,
+            busy === 'force' ? 'Force-restarting\u2026' : 'Force restart',
+          );
+        }
+
+        if (noteEl) {
+          const showNote = !!daemonNoteText && daemonNoteFor === sid;
+          noteEl.hidden = !showNote;
+          h1Text(noteEl, showNote ? daemonNoteText : '');
+          if (showNote && daemonNoteTone) noteEl.dataset.tone = daemonNoteTone;
+          else delete noteEl.dataset.tone;
+        }
+      }
+
+      $('h1-conv-copy').addEventListener('click', async () => {
+        const sid = currentWatchedSessionId();
+        if (!sid) return;
+        const ok = await copyText(sid);
+        if (!ok) {
+          setStatus('could not copy conversation id');
+          return;
+        }
+        convGuidCopiedFor = sid;
+        if (convGuidCopiedTimer) clearTimeout(convGuidCopiedTimer);
+        renderSessionMeta();
+        convGuidCopiedTimer = setTimeout(() => {
+          if (convGuidCopiedFor === sid) convGuidCopiedFor = null;
+          convGuidCopiedTimer = null;
+          renderSessionMeta();
+        }, 1800);
+      });
+
+      $('h1-daemon-reload').addEventListener('click', async () => {
+        const sid = currentWatchedSessionId();
+        if (!sid || daemonCtrlBusy) return;
+        daemonCtrlBusy = 'reload';
+        setDaemonNote(sid, 'Reloading workspace settings and tools\u2026');
+        const cwd =
+          (ctxInfo && ctxInfo.cwd) || resolveWatchedSessionCwd(sid) || '';
+        try {
+          const res = await fetch('/rc/workspace/reload', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: 'Bearer ' + token(),
+            },
+            body: JSON.stringify(cwd ? { workspace: cwd } : {}),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (res.ok) {
+            setDaemonNote(sid, wsmReloadText(data));
+            if (currentWatchedSessionId() === sid) void fetchContext(sid);
+          } else {
+            setDaemonNote(
+              sid,
+              'Not reloaded: ' + wsFilesErrorText(res.status, data),
+              'error',
+            );
+          }
+        } catch (err) {
+          setDaemonNote(sid, 'Not reloaded: ' + err.message, 'error');
+        } finally {
+          daemonCtrlBusy = null;
+          renderSessionMeta();
+        }
+      });
+
+      $('h1-daemon-restart').addEventListener('click', () => {
+        const sid = currentWatchedSessionId();
+        if (!sid || daemonCtrlBusy) return;
+        daemonRestartArmed = 'graceful';
+        setDaemonNote(
+          sid,
+          "Stops this folder's daemon (interrupting any running turn) and resumes this conversation on a fresh process.",
+          'warn',
+        );
+      });
+
+      $('h1-daemon-force').addEventListener('click', () => {
+        const sid = currentWatchedSessionId();
+        if (!sid || daemonCtrlBusy) return;
+        daemonRestartArmed = 'force';
+        setDaemonNote(
+          sid,
+          "Immediately kills this folder's daemon process group (SIGKILL) and resumes this conversation on a fresh process.",
+          'warn',
+        );
+      });
+
+      $('h1-daemon-cancel').addEventListener('click', () => {
+        disarmDaemonRestart(true);
+      });
+
+      $('h1-daemon-confirm').addEventListener('click', async () => {
+        const sid = currentWatchedSessionId();
+        const mode = daemonRestartArmed;
+        if (!sid || !mode || daemonCtrlBusy) return;
+        const force = mode === 'force';
+        daemonRestartArmed = null;
+        daemonCtrlBusy = force ? 'force' : 'restart';
+        setDaemonNote(
+          sid,
+          (force
+            ? 'Force-stopping daemon (SIGKILL)'
+            : 'Stopping daemon') + ' and resuming conversation\u2026',
+        );
+        const cwd =
+          (ctxInfo && ctxInfo.cwd) || resolveWatchedSessionCwd(sid) || '';
+        try {
+          const res = await fetch(
+            '/rc/sessions/' + encodeURIComponent(sid) + '/restart-daemon',
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer ' + token(),
+              },
+              body: JSON.stringify({
+                force,
+                ...(cwd ? { workspaceCwd: cwd } : {}),
+              }),
+            },
+          );
+          const body = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            const msg =
+              body && typeof body.error === 'string'
+                ? body.error
+                : 'Restart failed (' + res.status + ')';
+            setDaemonNote(sid, msg, 'error');
+            return;
+          }
+          if (body && body.recovered === false) {
+            setDaemonNote(
+              sid,
+              'Daemon restarted, but this conversation could not be resumed automatically.',
+              'error',
+            );
+            return;
+          }
+          setDaemonNote(
+            sid,
+            (force ? 'Daemon force-restarted' : 'Daemon restarted') +
+              ' \u00b7 conversation resumed.',
+          );
+          if (currentWatchedSessionId() === sid) {
+            if (typeof clearSessionError === 'function') clearSessionError(sid);
+            void fetchContext(sid);
+            if (typeof readHostTabs === 'function') void readHostTabs();
+            const recon = $('reconnect');
+            if (recon && recon.style.display !== 'none') recon.click();
+          }
+        } catch (err) {
+          setDaemonNote(sid, 'Restart failed: ' + err.message, 'error');
+        } finally {
+          daemonCtrlBusy = null;
+          renderSessionMeta();
+        }
+      });
 
       $('wt-reset').onclick = () => {
         if (wtResetArmed) void handOverCheckout();
@@ -28411,25 +30363,1417 @@
       const ROW_MORE_SVG =
         '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>';
 
-      // A row is a switch: the list goes, and with it anything ⌘K opened it
-      // over (opening the list shut More and its panel screen), and the
-      // conversation follows through the one hand-off every past row has
-      // used. issue #67: the host's terminal follows the conversation you
-      // picked. #193: resumed in the folder the row was read from, which is
-      // no longer always the current one.
-      function pickConversation(s) {
+      // ---- Warm session pool & background live SSE multiplexer --------------
+      // Keeps active and recently visited conversations resident in memory so
+      // switching between conversations (especially active daemon-attached ones)
+      // renders in a single animation frame without clearing the transcript or
+      // running a full POST /session/:id/resume reload.
+      const WARM_SESSION_CAP = 8;
+      const MAX_BG_STREAMS = 8;
+      const BG_STALL_MS = 45_000;
+      const BG_RETRY_DELAYS = [1000, 2000, 5000, 10000, 20000];
+      const LIVE_STRIP_COLLAPSED_KEY = 'liveStripCollapsed';
+      const warmSessions = new Map(); // sessionId -> slot (insertion order = LRU)
+      const warmHistory = []; // stack of previously visited sessionIds for Back
+      const liveStripOrder = []; // stable display order of sessionIds in #live-strip
+      const sessionErrors = new Map(); // sessionId -> short error label (paints red 'off' dot)
+      const daemonSessionDead = new Set(); // sessionIds whose daemon/session died or disconnected
+      const prewarmedIds = new Set(); // live sessionIds already queued for background warm streaming
+      let liveStripSig = '';
+      let liveStripLastWatched = null;
+      let liveStripCollapsed =
+        uiRead(LIVE_STRIP_COLLAPSED_KEY, (v) => typeof v === 'boolean') === true;
+
+      function markSessionError(sid, reason, isDaemonDead) {
+        if (!sid) return;
+        sessionErrors.set(sid, strOr(reason, 'error'));
+        if (isDaemonDead) daemonSessionDead.add(sid);
+        if (sid === watchedSessionId) renderStatusLine();
+        if (typeof paintRowMarks === 'function') paintRowMarks();
+        renderLiveStrip();
+      }
+
+      function clearSessionError(sid) {
+        if (!sid) return;
+        const hadErr = sessionErrors.delete(sid);
+        const hadDead = daemonSessionDead.delete(sid);
+        if (hadErr || hadDead) {
+          if (sid === watchedSessionId) renderStatusLine();
+          if (typeof paintRowMarks === 'function') paintRowMarks();
+          renderLiveStrip();
+        }
+      }
+
+      const STRIP_CHEVRON_UP_SVG =
+        '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10l4-4 4 4"/></svg>';
+      const STRIP_CHEVRON_DOWN_SVG =
+        '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg>';
+      const STRIP_EDIT_SVG =
+        '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.5 2.5a1.4 1.4 0 0 1 2 2L5.5 12.5 2.5 13.5l1-3z"/></svg>';
+
+      function setLiveStripCollapsed(next) {
+        liveStripCollapsed = !!next;
+        uiWrite(LIVE_STRIP_COLLAPSED_KEY, liveStripCollapsed ? true : undefined);
+        liveStripSig = '';
+        renderLiveStrip();
+      }
+
+      function isSessionLiveInList(sid) {
+        if (!sid) return false;
+        const row = pastConvos.find((c) => c && c.sessionId === sid);
+        if (row && row.live) return true;
+        if (typeof folderRows === 'object' && folderRows) {
+          for (const got of folderRows.values()) {
+            if (got && got.live && got.live.has && got.live.has(sid)) return true;
+          }
+        }
+        return false;
+      }
+
+      function liveRowMeta(sid) {
+        const row = pastConvos.find((c) => c && c.sessionId === sid);
+        if (row) return row;
+        if (typeof folderRows === 'object' && folderRows) {
+          for (const [cwd, got] of folderRows.entries()) {
+            if (got && got.live && got.live.has && got.live.has(sid)) {
+              const l = got.live.get(sid);
+              return { ...l, sessionId: sid, cwd: (l && l.cwd) || cwd, live: true };
+            }
+          }
+        }
+        return null;
+      }
+
+      function setRowIdleInList(sid) {
+        if (!sid) return;
+        for (const c of pastConvos) {
+          if (c && c.sessionId === sid) {
+            c.hasActivePrompt = false;
+            if (c.activity === 'running') c.activity = 'idle';
+            if (c.liveState && typeof c.liveState === 'object') {
+              c.liveState.hasActivePrompt = false;
+              if (c.liveState.activeWorkState === 'active') {
+                c.liveState.activeWorkState = 'idle';
+              }
+            }
+          }
+        }
+        if (typeof folderRows === 'object' && folderRows) {
+          for (const got of folderRows.values()) {
+            if (got && got.live && got.live.has && got.live.has(sid)) {
+              const l = got.live.get(sid);
+              if (l && typeof l === 'object') {
+                l.hasActivePrompt = false;
+                if (l.activity === 'running') l.activity = 'idle';
+                if (l.activeWorkState === 'active') l.activeWorkState = 'idle';
+              }
+            }
+          }
+        }
+      }
+
+      function armBgIdleVerify(slot) {
+        if (!slot) return;
+        if (slot.bgIdleVerifyTimer) {
+          clearTimeout(slot.bgIdleVerifyTimer);
+          slot.bgIdleVerifyTimer = null;
+        }
+        if (!slot.turnOpen && !slot.daemonTurnActive) return;
+        slot.bgIdleVerifyTimer = setTimeout(() => {
+          slot.bgIdleVerifyTimer = null;
+          if (!warmSessions.has(slot.sessionId) || !token()) return;
+          if (slot.sessionId === watchedSessionId) return;
+          if (!slot.turnOpen && !slot.daemonTurnActive) return;
+          void rcCall(
+            '/session/' + encodeURIComponent(slot.sessionId) + '/status',
+          ).then((st) => {
+            if (!st.ok || !st.body || typeof st.body !== 'object') return;
+            if (
+              st.body.hasActivePrompt === false &&
+              st.body.activeWorkState !== 'active'
+            ) {
+              slot.turnOpen = false;
+              slot.daemonTurnActive = false;
+              slot.runningToolIds.clear();
+              slot.bgHasBgTasks = st.body.hasRunningBackgroundTasks === true;
+              setRowIdleInList(slot.sessionId);
+              if (typeof paintRowMarks === 'function') paintRowMarks();
+              renderLiveStrip();
+            }
+          });
+        }, 2500);
+      }
+
+      function stopBgStream(slot) {
+        if (!slot) return;
+        if (slot.bgIdleVerifyTimer) {
+          clearTimeout(slot.bgIdleVerifyTimer);
+          slot.bgIdleVerifyTimer = null;
+        }
+        if (slot.bgRetryTimer) {
+          clearTimeout(slot.bgRetryTimer);
+          slot.bgRetryTimer = null;
+        }
+        if (!slot.bgStream) return;
+        const bg = slot.bgStream;
+        slot.bgStream = null;
+        bg.alive = false;
+        if (bg.stallTimer) {
+          clearTimeout(bg.stallTimer);
+          bg.stallTimer = null;
+        }
+        try {
+          bg.controller.abort();
+        } catch {
+          /* ignore */
+        }
+      }
+
+      function evictWarmSession(sid) {
+        sessionErrors.delete(sid);
+        daemonSessionDead.delete(sid);
+        prewarmedIds.delete(sid);
+        const slot = warmSessions.get(sid);
+        if (!slot) return;
+        stopBgStream(slot);
+        warmSessions.delete(sid);
+        const idx = warmHistory.indexOf(sid);
+        if (idx >= 0) warmHistory.splice(idx, 1);
+        renderLiveStrip();
+      }
+
+      function clearWarmSessions() {
+        warmSessions.forEach((slot) => stopBgStream(slot));
+        warmSessions.clear();
+        warmHistory.length = 0;
+        liveStripOrder.length = 0;
+        sessionErrors.clear();
+        daemonSessionDead.clear();
+        prewarmedIds.clear();
+        renderLiveStrip();
+      }
+
+      function enforceBgStreamCap() {
+        const running = [];
+        warmSessions.forEach((slot) => {
+          if (slot.bgStream && slot.bgStream.alive) running.push(slot);
+        });
+        while (running.length > MAX_BG_STREAMS) {
+          const victim = running.shift();
+          if (victim) stopBgStream(victim);
+        }
+      }
+
+      function markBgSlotAdvanced(slot) {
+        if (!slot) return;
+        slot.bgAdvanced = true;
+        slot.savedPlace = { end: true };
+        uiSessionWrite(PLACE_NAME, slot.sessionId, undefined);
+      }
+
+      function applyBackgroundFrame(slot, ev, eventId) {
+        if (!slot || !ev || typeof ev !== 'object') return;
+        if (Number.isFinite(eventId)) slot.lastSeenEventId = eventId;
+        const sentAt = TranscriptModel.frameStamp(ev);
+        if (ev.type === 'permission_request' && ev.data) {
+          slot.hasPendingPermission = true;
+          markBgSlotAdvanced(slot);
+          renderLiveStrip();
+          return;
+        }
+        if (ev.type === 'permission_resolved') {
+          slot.hasPendingPermission = false;
+          renderLiveStrip();
+          return;
+        }
+        if (ev.type === 'session_update') {
+          const d = ev.data;
+          const u =
+            d && typeof d === 'object'
+              ? d.update && typeof d.update === 'object' && !Array.isArray(d.update)
+                ? d.update
+                : typeof d.sessionUpdate === 'string'
+                  ? d
+                  : null
+              : null;
+          if (!u) return;
+          if (!slot.insideReplay) {
+            clearSessionError(slot.sessionId);
+            if (slot.turnOpen || slot.daemonTurnActive) {
+              armBgIdleVerify(slot);
+            }
+          }
+          const su = u.sessionUpdate;
+          const text = u.content && u.content.text;
+          const parentId =
+            u._meta && typeof u._meta.parentToolCallId === 'string'
+              ? u._meta.parentToolCallId
+              : '';
+          markBgSlotAdvanced(slot);
+          if (parentId) {
+            slot.model.setSubagentType(parentId, u._meta.subagentType);
+            if (su === 'agent_thought_chunk' && text)
+              slot.model.appendSubagentThought(parentId, text, sentAt);
+            else if (su === 'agent_message_chunk' && text)
+              slot.model.appendSubagentText(parentId, text, sentAt);
+            else if (su === 'tool_call' || su === 'tool_call_update')
+              slot.model.upsertSubagentTool(u, parentId, sentAt);
+            return;
+          }
+          const usage = u._meta && u._meta.usage;
+          if (usage && typeof usage === 'object') {
+            if (typeof usage.inputTokens === 'number') slot.liveIn = usage.inputTokens;
+            if (typeof usage.outputTokens === 'number') slot.liveOut = usage.outputTokens;
+          }
+          if (su === 'user_message_chunk') {
+            if (!slot.insideReplay) clearSessionError(slot.sessionId);
+            const recId = TranscriptModel.recordIdOf(ev, u);
+            if (
+              u._meta &&
+              u._meta.source === 'mid_turn_message_injected' &&
+              typeof text === 'string' &&
+              text
+            ) {
+              slot.model.addMidTurnUser(text, sentAt, recId);
+              return;
+            }
+            const part = TranscriptModel.userBlockOf
+              ? TranscriptModel.userBlockOf(u.content)
+              : null;
+            if (part) {
+              const added = slot.model.addUserPart(part, sentAt, recId);
+              if (!added.merged) {
+                slot.userTurnsSeen += 1;
+                slot.asstThisTurn = false;
+              }
+              if (!slot.insideReplay) {
+                slot.turnOpen = true;
+                armBgIdleVerify(slot);
+                renderLiveStrip();
+              }
+              return;
+            }
+            if (typeof text !== 'string' || !text) return;
+            const added = slot.model.addUserChunk(text, sentAt, recId);
+            if (!added.merged) {
+              slot.userTurnsSeen += 1;
+              slot.asstThisTurn = false;
+            }
+            if (!slot.insideReplay) {
+              slot.turnOpen = true;
+              armBgIdleVerify(slot);
+              renderLiveStrip();
+            }
+            return;
+          }
+          if (su === 'agent_message_chunk') {
+            if (
+              u.content &&
+              u.content.type === 'image' &&
+              !u.content.attachmentId &&
+              !u.content.uri
+            ) {
+              if (slot.userTurnsSeen > slot.forkTurnCount)
+                slot.forkTurnCount = slot.userTurnsSeen;
+              slot.asstThisTurn = true;
+              slot.model.addImage(u.content.mimeType, u.content.data);
+              return;
+            }
+            const apart = TranscriptModel.asstBlockOf
+              ? TranscriptModel.asstBlockOf(u.content)
+              : null;
+            if (apart) {
+              if (slot.userTurnsSeen > slot.forkTurnCount)
+                slot.forkTurnCount = slot.userTurnsSeen;
+              slot.asstThisTurn = true;
+              slot.model.addAssistantPart(apart, sentAt);
+              return;
+            }
+            if (text) {
+              if (slot.userTurnsSeen > slot.forkTurnCount)
+                slot.forkTurnCount = slot.userTurnsSeen;
+              slot.asstThisTurn = true;
+              slot.model.appendAssistant(text, sentAt);
+            }
+            return;
+          }
+          if (su === 'agent_thought_chunk' && text) {
+            slot.model.appendThought(text, sentAt);
+            return;
+          }
+          if (su === 'tool_call' || su === 'tool_call_update') {
+            const st = TranscriptModel.toolStatusOf(u);
+            if (u.toolCallId) {
+              if (st === 'completed' || st === 'failed' || st === 'cancelled') {
+                slot.runningToolIds.delete(u.toolCallId);
+              } else if (su === 'tool_call' || st) {
+                slot.runningToolIds.add(u.toolCallId);
+              }
+            }
+            slot.model.upsertTool(u, sentAt);
+            return;
+          }
+          if (su === 'plan') {
+            slot.planFramesSeen += 1;
+            slot.model.setPlan(u.entries);
+            return;
+          }
+          return;
+        }
+        if (ev.type === 'replay_complete') {
+          slot.insideReplay = false;
+          armBgIdleVerify(slot);
+          renderLiveStrip();
+          return;
+        }
+        if (ev.type === 'turn_complete') {
+          const tc = ev.data && typeof ev.data === 'object' ? ev.data : {};
+          slot.lastTurnStopReason = strOr(tc.stopReason, '') || 'end_turn';
+          slot.model.finishThought();
+          slot.model.settleAllSubagents();
+          slot.turnOpen = false;
+          slot.daemonTurnActive = false;
+          slot.runningToolIds.clear();
+          if (slot.bgIdleVerifyTimer) {
+            clearTimeout(slot.bgIdleVerifyTimer);
+            slot.bgIdleVerifyTimer = null;
+          }
+          if (slot.asstThisTurn && slot.model.curAsst) {
+            slot.model.placeFork(slot.forkTurnCount);
+            if (slot.model.forkItem) slot.model.forkItem.hideActs = true;
+            slot.model.curAsst.turnEnd = true;
+          }
+          setRowIdleInList(slot.sessionId);
+          markBgSlotAdvanced(slot);
+          clearSessionError(slot.sessionId);
+          if (typeof paintRowMarks === 'function') paintRowMarks();
+          renderLiveStrip();
+          return;
+        }
+        if (ev.type === 'turn_error') {
+          const d = ev.data && typeof ev.data === 'object' ? ev.data : {};
+          const failKey =
+            typeof d.promptId === 'string' && d.promptId ? d.promptId : ev.id;
+          slot.model.failTurn(TranscriptModel.turnErrorText(d), failKey);
+          slot.turnOpen = false;
+          slot.daemonTurnActive = false;
+          slot.runningToolIds.clear();
+          setRowIdleInList(slot.sessionId);
+          markBgSlotAdvanced(slot);
+          if (!slot.insideReplay) {
+            markSessionError(slot.sessionId, 'turn error', false);
+          } else {
+            renderLiveStrip();
+          }
+          return;
+        }
+        if (ev.type === 'session_interrupted') {
+          const d = ev.data && typeof ev.data === 'object' ? ev.data : {};
+          slot.turnOpen = false;
+          slot.daemonTurnActive = false;
+          slot.runningToolIds.clear();
+          setRowIdleInList(slot.sessionId);
+          if (!slot.insideReplay && d.recovered === false) {
+            markSessionError(slot.sessionId, 'daemon stopped', true);
+          }
+          renderLiveStrip();
+          return;
+        }
+        if (ev.type === 'session_recovered') {
+          clearSessionError(slot.sessionId);
+          renderLiveStrip();
+          return;
+        }
+        if (
+          ev.type === 'stream_error' ||
+          ev.type === 'session_died' ||
+          ev.type === 'client_evicted'
+        ) {
+          slot.model.finishThought();
+          slot.turnOpen = false;
+          slot.daemonTurnActive = false;
+          slot.runningToolIds.clear();
+          markBgSlotAdvanced(slot);
+          if (!slot.insideReplay && ev.type === 'session_died') {
+            markSessionError(slot.sessionId, 'session ended', true);
+          } else if (!slot.insideReplay && ev.type === 'stream_error') {
+            markSessionError(slot.sessionId, 'stream error', false);
+          } else {
+            renderLiveStrip();
+          }
+          return;
+        }
+        if (ev.type === 'artifact_changed' && ev.data && ev.data.change) {
+          const ch = ev.data.change;
+          if (
+            (ch.action === 'created' || ch.action === 'updated') &&
+            ch.artifact &&
+            (ch.artifact.source === 'tool' || ch.artifact.source === 'hook')
+          ) {
+            const spec = artifactToFileSpec(ch.artifact);
+            if (spec) {
+              slot.asstFiles.set(spec.key, spec);
+              slot.model.upsertAssistantFile(spec, sentAt);
+              markBgSlotAdvanced(slot);
+            }
+          } else if (ch.action === 'removed') {
+            const goneId = strOr(ch.artifactId, '');
+            if (goneId) {
+              slot.asstFiles.forEach((v, k) => {
+                if (v && v.artifactId === goneId) slot.asstFiles.delete(k);
+              });
+              slot.model.removeAssistantFile('art:' + goneId);
+              slot.model.removeAssistantFile(goneId);
+            }
+          }
+        }
+      }
+
+      function noteWarmSlotAssistantFilesFromRows(slot, rows) {
+        if (!slot || !Array.isArray(rows)) return;
+        for (const item of rows) {
+          if (!item) continue;
+          if (item.kind === 'tool') {
+            for (const f of resolveToolFiles(item)) {
+              if (f && f.key) slot.asstFiles.set(f.key, f);
+            }
+          } else if (item.kind === 'file' && item.file && item.file.key) {
+            slot.asstFiles.set(item.file.key, item.file);
+          } else if (item.kind === 'asst_file' && item.file && item.file.key) {
+            slot.asstFiles.set(item.file.key, item.file);
+          }
+        }
+      }
+
+      async function hydrateLiveWarmSlotReadOnly(slot, stBody) {
+        const res = await fetch(
+          '/session/' +
+            encodeURIComponent(slot.sessionId) +
+            '/transcript?limit=' +
+            String(TRANSCRIPT_PAGE_SIZE) +
+            '&direction=backward',
+          { headers: { Authorization: 'Bearer ' + token() } },
+        );
+        if (!res.ok || slot.sessionId === watchedSessionId) return false;
+        const page = await res.json();
+        if (slot.sessionId === watchedSessionId) return false;
+        const freshModel = TranscriptModel.createTranscriptModel();
+        const rows = TranscriptModel.replayStoredPage(
+          page && Array.isArray(page.events) ? page.events : [],
+        );
+        markStoredTurnEnds(rows);
+        freshModel.prependItems(rows, () => {});
+        slot.model = freshModel;
+        slot.userTurnsSeen = rows.filter(
+          (r) => r && r.kind === 'user' && !r.midTurn,
+        ).length;
+        slot.forkTurnCount = 0;
+        slot.asstThisTurn = false;
+        slot.runningToolIds.clear();
+        slot.asstFiles.clear();
+        noteWarmSlotAssistantFilesFromRows(slot, rows);
+        slot.insideReplay = false;
+        slot.transcriptAnchorRecordId = null;
+        slot.transcriptCursor = strOr(page && page.nextCursor, '') || null;
+        slot.transcriptExhausted =
+          !page || page.hasMore !== true || !slot.transcriptCursor;
+        const watermark =
+          stBody && typeof stBody.lastEventId === 'number' && stBody.lastEventId >= 0
+            ? stBody.lastEventId
+            : typeof slot.lastSeenEventId === 'number' && slot.lastSeenEventId > 0
+              ? slot.lastSeenEventId
+              : null;
+        slot.lastSeenEventId = watermark;
+        slot.daemonTurnActive = !!(stBody && stBody.hasActivePrompt === true);
+        slot.turnOpen = slot.daemonTurnActive;
+        slot.hasPendingPermission = !!(
+          stBody &&
+          (stBody.isWaitingForPermission === true ||
+            stBody.isWaitingForUserQuestion === true)
+        );
+        slot.needsResync = false;
+        slot.everConnected = true;
+        markBgSlotAdvanced(slot);
+        clearSessionError(slot.sessionId);
+        return true;
+      }
+
+      async function resyncWarmSlotInBackground(slot) {
+        if (!slot || !token() || slot.resyncing || slot.sessionId === watchedSessionId)
+          return false;
+        slot.resyncing = true;
+        try {
+          // Prefer read-only /status + /transcript hydration whenever the
+          // session is already loaded in its workspace daemon: POST /resume
+          // triggers daemon `load`, which costs ~1-2s per session and clears
+          // the SSE event ring for other attached streams.
+          const st = await rcCall(
+            '/session/' + encodeURIComponent(slot.sessionId) + '/status',
+          );
+          if (slot.sessionId === watchedSessionId) return false;
+          if (st.ok && st.body) {
+            const hydrated = await hydrateLiveWarmSlotReadOnly(slot, st.body);
+            if (hydrated) return true;
+          } else if (st.status >= 500) {
+            markSessionError(slot.sessionId, 'daemon unavailable', true);
+            return false;
+          }
+
+          const cwd = slot.cwd || (liveRowMeta(slot.sessionId) || {}).cwd || '';
+          if (!cwd || !tokenCanResume()) {
+            slot.needsResync = true;
+            return false;
+          }
+          const res = await fetch(
+            '/session/' + encodeURIComponent(slot.sessionId) + '/resume',
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer ' + token(),
+              },
+              body: JSON.stringify({ cwd }),
+            },
+          );
+          if (!res.ok || slot.sessionId === watchedSessionId) {
+            if (res.status >= 500) {
+              markSessionError(slot.sessionId, 'daemon unavailable', true);
+            }
+            return false;
+          }
+          const j = await res.json();
+          if (slot.sessionId === watchedSessionId) return false;
+          const freshModel = TranscriptModel.createTranscriptModel();
+          slot.model = freshModel;
+          slot.userTurnsSeen = 0;
+          slot.forkTurnCount = 0;
+          slot.asstThisTurn = false;
+          slot.runningToolIds.clear();
+          slot.asstFiles.clear();
+          slot.insideReplay = true;
+          const replay = [].concat(
+            Array.isArray(j.compactedReplay) ? j.compactedReplay : [],
+            Array.isArray(j.liveJournal) ? j.liveJournal : [],
+          );
+          let from = 0;
+          for (const f of replay) {
+            if (f && Number.isFinite(f.id) && f.id > from) from = f.id;
+            applyBackgroundFrame(slot, f, f && Number.isFinite(f.id) ? f.id : null);
+          }
+          slot.insideReplay = false;
+          if (typeof j.lastEventId === 'number' && j.lastEventId >= 0) {
+            from = j.lastEventId;
+          }
+          slot.lastSeenEventId = from;
+          slot.daemonTurnActive = j.hasActivePrompt === true;
+          slot.turnOpen = j.hasActivePrompt === true;
+          if (j.historyHasMore === true && typeof j.historyAnchorRecordId === 'string') {
+            slot.transcriptAnchorRecordId = j.historyAnchorRecordId;
+            slot.transcriptExhausted = false;
+          } else if (j.historyHasMore === false && replay.length > 0) {
+            slot.transcriptAnchorRecordId = null;
+            slot.transcriptExhausted = true;
+          }
+          slot.needsResync = false;
+          slot.everConnected = true;
+          markBgSlotAdvanced(slot);
+          clearSessionError(slot.sessionId);
+          return true;
+        } catch {
+          return false;
+        } finally {
+          slot.resyncing = false;
+        }
+      }
+
+      function scheduleBgStreamRetry(slot) {
+        if (!slot || !warmSessions.has(slot.sessionId)) return;
+        if (slot.sessionId === watchedSessionId && watchStreamAlive) return;
+        if (slot.bgRetryTimer) return;
+        const attempt = slot.bgRetryAttempt || 0;
+        if (attempt >= 8) return;
+        const delay =
+          BG_RETRY_DELAYS[Math.min(attempt, BG_RETRY_DELAYS.length - 1)];
+        slot.bgRetryAttempt = attempt + 1;
+        slot.bgRetryTimer = setTimeout(() => {
+          slot.bgRetryTimer = null;
+          if (!warmSessions.has(slot.sessionId) || !token()) return;
+          if (document.hidden && !isNativeShell()) return;
+          if (slot.sessionId === watchedSessionId && watchStreamAlive) return;
+          startBackgroundWarmStream(slot, false);
+        }, delay);
+      }
+
+      function startBackgroundWarmStream(slot, parkingNow) {
+        if (
+          !slot ||
+          !token() ||
+          (!parkingNow && slot.sessionId === watchedSessionId && watchStreamAlive)
+        )
+          return;
+        if (slot.bgStream && slot.bgStream.alive) return;
+        stopBgStream(slot);
+        const ctl = new AbortController();
+        const bg = { controller: ctl, alive: true, stallTimer: null };
+        slot.bgStream = bg;
+        enforceBgStreamCap();
+        if (slot.bgStream !== bg) return;
+        void (async () => {
+          let shouldRetry = false;
+          let needsBgResync = false;
+          const armStall = () => {
+            if (bg.stallTimer) clearTimeout(bg.stallTimer);
+            bg.stallTimer = setTimeout(() => {
+              bg.stallTimer = null;
+              if (slot.bgStream !== bg) return;
+              shouldRetry = true;
+              try {
+                ctl.abort();
+              } catch {
+                /* ignore */
+              }
+            }, BG_STALL_MS);
+          };
+          try {
+            const headers = { Authorization: 'Bearer ' + token() };
+            const from = slot.lastSeenEventId;
+            slot.insideReplay = from != null;
+            if (from != null) {
+              headers['Last-Event-ID'] = String(from);
+            }
+            const res = await fetch(
+              '/session/' + encodeURIComponent(slot.sessionId) + '/events',
+              { headers, signal: ctl.signal },
+            );
+            if (!res.ok || slot.bgStream !== bg) {
+              if (res && slot.bgStream === bg) {
+                if (res.status === 412) {
+                  needsBgResync = true;
+                } else if (res.status >= 500) {
+                  markSessionError(slot.sessionId, 'daemon unavailable', true);
+                  shouldRetry = true;
+                } else if (
+                  res.status === 404 &&
+                  (slot.everConnected || slot.model.items.length > 0)
+                ) {
+                  if (slot.turnOpen || slot.daemonTurnActive) {
+                    markSessionError(slot.sessionId, 'stopped prematurely', true);
+                  }
+                  slot.turnOpen = false;
+                  slot.daemonTurnActive = false;
+                }
+              }
+              return;
+            }
+            slot.everConnected = true;
+            slot.bgRetryAttempt = 0;
+            slot.lastBgByteAt = Date.now();
+            if (daemonSessionDead.has(slot.sessionId)) {
+              clearSessionError(slot.sessionId);
+            }
+            armBgIdleVerify(slot);
+            const reader = res.body.getReader();
+            const dec = new TextDecoder();
+            let buf = '';
+            armStall();
+            for (;;) {
+              const { value, done } = await reader.read();
+              if (done || slot.bgStream !== bg) {
+                if (done && slot.bgStream === bg) shouldRetry = true;
+                break;
+              }
+              if (value && value.length > 0) {
+                slot.lastBgByteAt = Date.now();
+                armStall();
+              }
+              buf += dec.decode(value, { stream: true });
+              const blocks = buf.split('\n\n');
+              buf = blocks.pop() || '';
+              for (const block of blocks) {
+                if (slot.bgStream !== bg) break;
+                const lines = block.split('\n');
+                const idLine = lines.find((l) => l.startsWith('id:'));
+                let eid = null;
+                if (idLine) {
+                  const p = Number(idLine.slice(3).trim());
+                  if (Number.isFinite(p)) eid = p;
+                }
+                const dataLine = lines.find((l) => l.startsWith('data:'));
+                if (!dataLine) continue;
+                let ev;
+                try {
+                  ev = JSON.parse(dataLine.slice(5).trim());
+                } catch {
+                  continue;
+                }
+                if (eid === null && ev && Number.isFinite(ev.id)) {
+                  eid = ev.id;
+                }
+                if (ev && ev.type === 'state_resync_required') {
+                  needsBgResync = true;
+                  ctl.abort();
+                  break;
+                }
+                applyBackgroundFrame(slot, ev, eid);
+              }
+            }
+          } catch {
+            if (!ctl.signal.aborted) shouldRetry = true;
+          } finally {
+            if (bg.stallTimer) {
+              clearTimeout(bg.stallTimer);
+              bg.stallTimer = null;
+            }
+            if (slot.bgStream === bg) {
+              bg.alive = false;
+              slot.bgStream = null;
+              if (needsBgResync) {
+                void resyncWarmSlotInBackground(slot).then((ok) => {
+                  if (ok && warmSessions.get(slot.sessionId) === slot) {
+                    startBackgroundWarmStream(slot, false);
+                  }
+                });
+              } else if (shouldRetry) {
+                if (slot.turnOpen || slot.daemonTurnActive) {
+                  void rcCall(
+                    '/session/' + encodeURIComponent(slot.sessionId) + '/status',
+                  ).then((st) => {
+                    if (!st.ok && (st.status >= 500 || st.status === 404)) {
+                      slot.turnOpen = false;
+                      slot.daemonTurnActive = false;
+                      markSessionError(slot.sessionId, 'daemon stopped', true);
+                    }
+                  });
+                }
+                if (
+                  slot.turnOpen ||
+                  slot.daemonTurnActive ||
+                  isSessionLiveInList(slot.sessionId)
+                ) {
+                  scheduleBgStreamRetry(slot);
+                }
+              }
+              renderLiveStrip();
+            }
+          }
+        })();
+      }
+
+      function ensureWarmStreamsAlive(waking) {
+        if (!token()) return;
+        const now = Date.now();
+        warmSessions.forEach((slot, sid) => {
+          if (sid === watchedSessionId) return;
+          if (slot.bgRetryTimer) {
+            clearTimeout(slot.bgRetryTimer);
+            slot.bgRetryTimer = null;
+          }
+          slot.bgRetryAttempt = 0;
+          if (
+            slot.bgStream &&
+            slot.bgStream.alive &&
+            now - (slot.lastBgByteAt || 0) >
+              (waking ? WAKE_STALE_STREAM_MS : BG_STALL_MS)
+          ) {
+            stopBgStream(slot);
+          }
+          if (slot.needsResync) {
+            void resyncWarmSlotInBackground(slot).then((ok) => {
+              if (ok && warmSessions.get(sid) === slot) {
+                startBackgroundWarmStream(slot, false);
+              }
+            });
+            return;
+          }
+          if (
+            (!slot.bgStream || !slot.bgStream.alive) &&
+            (slot.turnOpen || slot.daemonTurnActive || isSessionLiveInList(sid))
+          ) {
+            startBackgroundWarmStream(slot, false);
+          }
+        });
+      }
+
+      function prewarmLiveStripSessions() {
+        if (!watchedSessionId || !token()) return;
+        for (const s of pastConvos) {
+          if (!s || !s.live || s.parentSessionId || !s.sessionId) continue;
+          if (s.sessionId === watchedSessionId) continue;
+          if (warmSessions.has(s.sessionId) || prewarmedIds.has(s.sessionId)) continue;
+          if (warmSessions.size >= WARM_SESSION_CAP) break;
+          prewarmedIds.add(s.sessionId);
+          const ls = s.liveState;
+          const slot = {
+            sessionId: s.sessionId,
+            title: strOr(s.title, ''),
+            cwd: rowFolder(s) || '',
+            model: TranscriptModel.createTranscriptModel(),
+            lastSeenEventId: null,
+            transcriptCursor: null,
+            transcriptAnchorRecordId: null,
+            transcriptExhausted: false,
+            userTurnsSeen: 0,
+            forkTurnCount: 0,
+            asstThisTurn: false,
+            turnOpen: !!(
+              s.hasActivePrompt ||
+              s.activity === 'running' ||
+              (ls && (ls.hasActivePrompt || ls.activeWorkState === 'active'))
+            ),
+            daemonTurnActive: !!(
+              s.hasActivePrompt ||
+              s.activity === 'running' ||
+              (ls && (ls.hasActivePrompt || ls.activeWorkState === 'active'))
+            ),
+            insideReplay: true,
+            runningToolIds: new Set(),
+            lastTurnStopReason: '',
+            planFramesSeen: 0,
+            ctxInfo: null,
+            ctxUsage: null,
+            liveIn: 0,
+            liveOut: 0,
+            asstFiles: new Map(),
+            savedPlace: { end: true },
+            bgAdvanced: true,
+            everConnected: false,
+            hasPendingPermission: !!(
+              s.hasPendingPermission ||
+              (ls && (ls.isWaitingForPermission || ls.isWaitingForUserQuestion))
+            ),
+            needsResync: false,
+            resyncing: false,
+            bgRetryAttempt: 0,
+            bgRetryTimer: null,
+            bgStream: null,
+            lastBgByteAt: 0,
+          };
+          warmSessions.set(s.sessionId, slot);
+          // Hydrate read-only via /status + /transcript first so we attach at
+          // the live watermark instead of overflowing Last-Event-ID: 0 and
+          // triggering a heavy POST /session/:id/load across all live daemons.
+          void resyncWarmSlotInBackground(slot).then((ok) => {
+            if (warmSessions.get(s.sessionId) !== slot) return;
+            if (ok || slot.lastSeenEventId > 0) {
+              startBackgroundWarmStream(slot, false);
+            } else {
+              startBackgroundWarmStream(slot, false);
+            }
+          });
+        }
+      }
+
+      function parkCurrentSession(nextSessionId) {
+        const curId = watchedSessionId;
+        if (!curId || curId === nextSessionId) return;
+        const hasContent =
+          activeModel.items.length > 0 || lastSeenEventId != null;
+        if (!hasContent) return;
+        const prevSlot = warmSessions.get(curId);
+        if (prevSlot) stopBgStream(prevSlot);
+        activeModel.hideProcessing();
+        const savedPlace =
+          transcriptView && typeof transcriptView.readerAnchor === 'function'
+            ? transcriptView.readerAnchor()
+            : { end: true };
+        const slot = {
+          sessionId: curId,
+          title:
+            watchedSessionTitle ||
+            (prevSlot && prevSlot.title) ||
+            '',
+          cwd:
+            watchedSessionCwd ||
+            (ctxInfo && ctxInfo.cwd) ||
+            (prevSlot && prevSlot.cwd) ||
+            '',
+          model: activeModel,
+          lastSeenEventId,
+          transcriptCursor,
+          transcriptAnchorRecordId,
+          transcriptExhausted,
+          userTurnsSeen,
+          forkTurnCount,
+          asstThisTurn,
+          turnOpen,
+          daemonTurnActive,
+          insideReplay: false,
+          runningToolIds: new Set(runningToolIds),
+          lastTurnStopReason,
+          planFramesSeen,
+          ctxInfo: ctxInfo ? { ...ctxInfo } : null,
+          ctxUsage: ctxUsage ? { ...ctxUsage } : null,
+          liveIn,
+          liveOut,
+          asstFiles: new Map(sessionAsstFiles),
+          savedPlace,
+          bgAdvanced: false,
+          everConnected: true,
+          hasPendingPermission: false,
+          needsResync: false,
+          resyncing: false,
+          bgRetryAttempt: 0,
+          bgRetryTimer: null,
+          bgStream: null,
+          lastBgByteAt: Date.now(),
+        };
+        warmSessions.delete(curId);
+        warmSessions.set(curId, slot);
+        while (warmSessions.size > WARM_SESSION_CAP) {
+          const oldestKey = warmSessions.keys().next().value;
+          if (!oldestKey || oldestKey === curId) break;
+          evictWarmSession(oldestKey);
+        }
+        const hIdx = warmHistory.indexOf(curId);
+        if (hIdx >= 0) warmHistory.splice(hIdx, 1);
+        warmHistory.push(curId);
+        if (warmHistory.length > 12) warmHistory.shift();
+
+        // Save place & abort the outgoing foreground stream BEFORE detaching
+        // activeModel so neither savePlace() nor an in-flight SSE chunk sees
+        // the empty transitional model while a cold /resume is in flight.
+        savePlace();
+        placeSavedBeforeClear = curId;
+        clearWatchRetry();
+        const prevCtl = controller;
+        controller = null;
+        watchStreamAlive = false;
+        if (prevCtl) {
+          try {
+            prevCtl.abort();
+          } catch {
+            /* ignore */
+          }
+        }
+
+        // Detach onto a fresh empty model BEFORE clearTranscript/resume runs so
+        // the outgoing session's model stays untouched in warmSessions.
+        swapActiveModel(TranscriptModel.createTranscriptModel(), null);
+
+        if (slot.turnOpen || slot.daemonTurnActive || isSessionLiveInList(curId)) {
+          startBackgroundWarmStream(slot, true);
+        }
+        renderLiveStrip();
+      }
+
+      function activateWarmSession(sessionId, opts) {
+        const slot = warmSessions.get(sessionId);
+        if (!slot || slot.needsResync) return false;
+        if (watchedSessionId && watchedSessionId !== sessionId) {
+          parkCurrentSession(sessionId);
+        }
+        stopBgStream(slot);
+        warmSessions.delete(sessionId);
+        warmSessions.set(sessionId, slot);
+
+        const nextTitle = strOr(opts && opts.title, '') || slot.title || null;
+        const nextCwd = strOr(opts && opts.cwd, '') || slot.cwd || null;
+        slot.title = nextTitle || '';
+        slot.cwd = nextCwd || '';
+
+        findClose(false);
+        stopQuietWatch();
+        processingShown = false;
+        clearCrashBanner();
+        clearUnsent();
+        selfEchoes.length = 0;
+
+        watchedSessionCwd = nextCwd;
+        lastSeenEventId = slot.lastSeenEventId;
+        transcriptCursor = slot.transcriptCursor;
+        transcriptAnchorRecordId = slot.transcriptAnchorRecordId;
+        transcriptExhausted = slot.transcriptExhausted;
+        transcriptPaging = false;
+        userTurnsSeen = slot.userTurnsSeen;
+        forkTurnCount = slot.forkTurnCount;
+        asstThisTurn = slot.asstThisTurn;
+        turnOpen = slot.turnOpen;
+        daemonTurnActive = slot.daemonTurnActive;
+        runningToolIds.clear();
+        slot.runningToolIds.forEach((id) => runningToolIds.add(id));
+        lastTurnStopReason = slot.lastTurnStopReason || '';
+        planFramesSeen = slot.planFramesSeen;
+        ctxInfo = slot.ctxInfo ? { ...slot.ctxInfo } : null;
+        ctxUsage = slot.ctxUsage ? { ...slot.ctxUsage } : null;
+        liveIn = slot.liveIn || 0;
+        liveOut = slot.liveOut || 0;
+        sessionAsstFiles.clear();
+        slot.asstFiles.forEach((v, k) => sessionAsstFiles.set(k, v));
+        slot.hasPendingPermission = false;
+        const targetPlace = slot.bgAdvanced ? { end: true } : slot.savedPlace;
+        slot.bgAdvanced = false;
+        cancelPlaceRestore();
+
+        swapActiveModel(slot.model, targetPlace);
+        if (turnOpen && runningToolIds.size === 0) {
+          setProcessing(true);
+        }
+        renderPlanStrip();
+        renderFooter();
+        renderStatusLine();
+        renderStored();
+
+        void startWatch(
+          sessionId,
+          slot.lastSeenEventId ?? 0,
+          nextTitle,
+          { keepWarm: true },
+        );
+        if (opts && opts.hostTerminal) {
+          void requestHostTerminal(sessionId);
+        }
+        renderLiveStrip();
+        return true;
+      }
+
+      function switchToConversation(sessionId, cwd, title, opts) {
+        if (!sessionId) return;
         closeListToChat();
         if (
-          s &&
-          s.sessionId === watchedSessionId &&
+          sessionId === watchedSessionId &&
           watchStreamAlive &&
           transcriptModel.items.length > 0
         ) {
-          void requestHostTerminal(s.sessionId);
+          if (opts && opts.hostTerminal) void requestHostTerminal(sessionId);
           return;
         }
-        void resumeConversation(s.sessionId, rowFolder(s), strOr(s.title, ''), {
+        const warm = warmSessions.get(sessionId);
+        if (warm && !warm.needsResync && (warm.model.items.length > 0 || warm.lastSeenEventId != null)) {
+          activateWarmSession(sessionId, { cwd, title, ...opts });
+          return;
+        }
+        const liveRow = liveRowMeta(sessionId);
+        const isLive = !!(opts && opts.live) || !!(liveRow && liveRow.live);
+        const effCwd = strOr(cwd, '') || (liveRow && strOr(liveRow.cwd, '')) || '';
+        const effTitle = strOr(title, '') || (liveRow && strOr(liveRow.title, '')) || '';
+        parkCurrentSession(sessionId);
+        if (isLive) {
+          // Daemon already has this session open in memory: attach directly to
+          // its SSE stream without running a full disk POST /session/:id/resume.
+          lastSeenEventId = null;
+          watchedSessionCwd = effCwd || null;
+          void startWatch(sessionId, 0, effTitle || null);
+          if (opts && opts.hostTerminal) void requestHostTerminal(sessionId);
+          renderLiveStrip();
+          return;
+        }
+        void resumeConversation(sessionId, effCwd, effTitle, opts);
+        renderLiveStrip();
+      }
+
+      const STRIP_STATE_RANK = {
+        off: 5,
+        wait: 4,
+        paused: 4,
+        run: 3,
+        bg: 2,
+        idle: 1,
+        warm: 0,
+      };
+      const STRIP_STATE_WORDS = {
+        off: 'gateway unreachable',
+        wait: 'waiting on you',
+        paused: 'paused',
+        run: 'working',
+        bg: 'background work',
+        idle: 'open',
+        warm: 'recent',
+      };
+
+      function dropSessionErrorQuiet(sid) {
+        if (!sid) return;
+        sessionErrors.delete(sid);
+        daemonSessionDead.delete(sid);
+      }
+
+      function rowStripDotState(s) {
+        if (!s || !s.live) {
+          return s && s.sessionId && sessionErrors.has(s.sessionId) ? 'off' : 'warm';
+        }
+        if (s.liveState && typeof liveDotState === 'function') {
+          const lsState = liveDotState(s.liveState);
+          if (lsState === 'wait' || lsState === 'run' || lsState === 'bg') {
+            dropSessionErrorQuiet(s.sessionId);
+            return lsState;
+          }
+          return s.sessionId && sessionErrors.has(s.sessionId) ? 'off' : lsState;
+        }
+        if (s.hasPendingPermission === true || s.isWaitingForPermission === true) {
+          dropSessionErrorQuiet(s.sessionId);
+          return 'wait';
+        }
+        if (s.activity === 'running' || s.hasActivePrompt === true) {
+          dropSessionErrorQuiet(s.sessionId);
+          return 'run';
+        }
+        return s.sessionId && sessionErrors.has(s.sessionId) ? 'off' : 'idle';
+      }
+
+      if ($('live-strip-chip')) {
+        $('live-strip-chip').addEventListener('click', () => setLiveStripCollapsed(false));
+      }
+
+      function collectStripEntries() {
+        const map = new Map();
+        const put = (sid, title, cwd, state, authoritative) => {
+          if (!sid) return;
+          const prev = map.get(sid);
+          if (prev) {
+            if (authoritative ? title : !prev.title && title) prev.title = title;
+            if (authoritative ? cwd : !prev.cwd && cwd) prev.cwd = cwd;
+            if (authoritative) {
+              prev.state = state;
+            } else if ((STRIP_STATE_RANK[state] || 0) > (STRIP_STATE_RANK[prev.state] || 0)) {
+              prev.state = state;
+            }
+            return;
+          }
+          map.set(sid, { sessionId: sid, title: title || '', cwd: cwd || '', state });
+        };
+        for (const s of pastConvos) {
+          if (!s || !s.live || s.parentSessionId) continue;
+          const slot = warmSessions.get(s.sessionId);
+          // Reconcile stuck slot.turnOpen when a fresh liveState snapshot says idle
+          if (
+            slot &&
+            s.liveState &&
+            s.liveState.hasActivePrompt === false &&
+            s.liveState.activeWorkState !== 'active' &&
+            !slot.bgStream
+          ) {
+            slot.turnOpen = false;
+            slot.daemonTurnActive = false;
+          }
+          put(s.sessionId, strOr(s.title, ''), rowFolder(s), rowStripDotState(s), false);
+        }
+        warmSessions.forEach((slot, sid) => {
+          if (sid === watchedSessionId) return;
+          const curRow = pastConvos.find((c) => c && c.sessionId === sid);
+          const ls = curRow && curRow.live ? curRow.liveState : null;
+          const isWaiting =
+            slot.hasPendingPermission ||
+            (ls && (ls.isWaitingForPermission === true || ls.isWaitingForUserQuestion === true));
+          const isWorking =
+            slot.turnOpen ||
+            slot.daemonTurnActive ||
+            (ls && (ls.hasActivePrompt === true || ls.activeWorkState === 'active'));
+          const isBg =
+            slot.bgHasBgTasks || (ls && ls.hasRunningBackgroundTasks === true);
+          if (isWaiting || isWorking || isBg) {
+            dropSessionErrorQuiet(sid);
+          }
+          const st = isWaiting
+            ? 'wait'
+            : isWorking
+              ? 'run'
+              : isBg
+                ? 'bg'
+                : sessionErrors.has(sid)
+                  ? 'off'
+                  : (curRow && curRow.live) || isSessionLiveInList(sid) || (slot.bgStream && slot.bgStream.alive)
+                    ? 'idle'
+                    : 'warm';
+          // A connected warm slot's real-time SSE state is authoritative over a
+          // potentially 30s-stale pastConvos poll, so turn_complete flips blue -> green immediately.
+          put(sid, slot.title, slot.cwd, st, !!slot.everConnected);
+        });
+        if (watchedSessionId) {
+          const curRow = pastConvos.find((c) => c && c.sessionId === watchedSessionId);
+          const barState = $('h1-status') && $('h1-status').dataset.state;
+          let curState = 'warm';
+          if (
+            barState === 'wait' ||
+            barState === 'paused' ||
+            barState === 'run' ||
+            barState === 'bg'
+          ) {
+            dropSessionErrorQuiet(watchedSessionId);
+            curState = barState;
+          } else if (sessionErrors.has(watchedSessionId)) {
+            curState = 'off';
+          } else if (barState === 'off' || barState === 'idle') {
+            curState = barState;
+          } else if (turnOpen || daemonTurnActive) {
+            curState = 'run';
+          } else if (curRow && curRow.live) {
+            curState = rowStripDotState(curRow);
+          } else if (watchStreamAlive) {
+            curState = 'idle';
+          }
+          const curTitle = watchedSessionTitle || (curRow && strOr(curRow.title, '')) || '';
+          const curCwd = watchedSessionCwd || (curRow && strOr(curRow.cwd, '')) || '';
+          put(watchedSessionId, curTitle, curCwd, curState, true);
+        }
+        for (let i = liveStripOrder.length - 1; i >= 0; i--) {
+          if (!map.has(liveStripOrder[i])) liveStripOrder.splice(i, 1);
+        }
+        map.forEach((_, sid) => {
+          if (!liveStripOrder.includes(sid)) liveStripOrder.push(sid);
+        });
+        return liveStripOrder.map((sid) => map.get(sid)).filter(Boolean);
+      }
+
+      function renderLiveStrip() {
+        prewarmLiveStripSessions();
+        const box = $('live-strip');
+        const chip = $('live-strip-chip');
+        const chipText = $('live-strip-chip-text');
+        if (!box) return;
+        const entries = collectStripEntries();
+        if (entries.length < 2) {
+          if (!box.hidden) box.hidden = true;
+          if (chip && !chip.hidden) chip.hidden = true;
+          liveStripSig = '';
+          return;
+        }
+        const sig = JSON.stringify([
+          liveStripCollapsed,
+          entries.map((e) => [
+            e.sessionId,
+            e.title,
+            e.state,
+            e.sessionId === watchedSessionId,
+          ]),
+        ]);
+        if (sig === liveStripSig && box.hidden === liveStripCollapsed) return;
+        liveStripSig = sig;
+
+        if (liveStripCollapsed) {
+          box.hidden = true;
+          box.textContent = '';
+          if (chip && chipText) {
+            const hasErr = entries.some((e) => e.state === 'off');
+            const hasWait = entries.some((e) => e.state === 'wait' || e.state === 'paused');
+            const runningCount = entries.filter((e) => e.state === 'run').length;
+            const bgCount = entries.filter((e) => e.state === 'bg').length;
+            const hasIdle = entries.some((e) => e.state === 'idle');
+            const aggState = hasErr
+              ? 'off'
+              : hasWait
+                ? 'wait'
+                : runningCount > 0
+                  ? 'run'
+                  : bgCount > 0
+                    ? 'bg'
+                    : hasIdle
+                      ? 'idle'
+                      : 'warm';
+            chip.dataset.state = aggState;
+            let summary = entries.length + ' chats';
+            if (hasErr) summary += ' · issue';
+            else if (hasWait) summary += ' · waiting';
+            else if (runningCount > 0) summary += ' · ' + runningCount + ' working';
+            chipText.textContent = summary + ' ▾';
+            chip.hidden = false;
+          }
+          return;
+        }
+
+        if (chip && !chip.hidden) chip.hidden = true;
+        const prevPills = box.querySelector('.live-strip-pills');
+        const prevScrollLeft = prevPills ? prevPills.scrollLeft : 0;
+        const watchedChanged = liveStripLastWatched !== watchedSessionId;
+        liveStripLastWatched = watchedSessionId;
+
+        box.hidden = false;
+        box.classList.remove('is-collapsed');
+        box.textContent = '';
+
+        const collapseBtn = document.createElement('button');
+        collapseBtn.type = 'button';
+        collapseBtn.className = 'live-strip-toggle';
+        collapseBtn.setAttribute('aria-expanded', 'true');
+        collapseBtn.setAttribute('aria-label', 'Collapse active conversations');
+        collapseBtn.title = 'Collapse conversation bar';
+        collapseBtn.innerHTML = STRIP_CHEVRON_UP_SVG;
+        collapseBtn.addEventListener('click', () => setLiveStripCollapsed(true));
+        box.appendChild(collapseBtn);
+
+        const pills = document.createElement('div');
+        pills.className = 'live-strip-pills';
+        let activeNode = null;
+        for (const e of entries) {
+          const isCurrent = e.sessionId === watchedSessionId;
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = isCurrent ? 'live-pill in-group' : 'live-pill';
+          btn.dataset.session = e.sessionId;
+          if (isCurrent) btn.setAttribute('aria-current', 'true');
+          const dot = document.createElement('span');
+          dot.className = 'lp-dot';
+          dot.dataset.state = e.state;
+          dot.title = STRIP_STATE_WORDS[e.state] || '';
+          dot.setAttribute('aria-hidden', 'true');
+          const label = e.title || 'session ' + String(e.sessionId).slice(0, 8);
+          const ttl = document.createElement('span');
+          ttl.className = 'lp-title';
+          ttl.textContent = label;
+          const stateWord = STRIP_STATE_WORDS[e.state];
+          btn.title =
+            label +
+            (stateWord ? ' — ' + stateWord : '') +
+            (e.cwd ? ' (' + e.cwd + ')' : '');
+          btn.append(dot, ttl);
+          btn.addEventListener('click', () => {
+            switchToConversation(e.sessionId, e.cwd, e.title, {
+              hostTerminal: true,
+              live: e.state !== 'warm',
+            });
+          });
+          btn.addEventListener('contextmenu', (ev) => {
+            ev.preventDefault();
+            openRenameDialog({
+              sessionId: e.sessionId,
+              title: e.title,
+              cwd: e.cwd,
+            });
+          });
+          if (isCurrent) {
+            const grp = document.createElement('div');
+            grp.className = 'live-pill-group';
+            const editBtn = document.createElement('button');
+            editBtn.type = 'button';
+            editBtn.className = 'live-pill-edit';
+            editBtn.setAttribute('aria-label', 'Rename conversation');
+            editBtn.title = 'Rename conversation';
+            editBtn.innerHTML = STRIP_EDIT_SVG;
+            editBtn.addEventListener('click', (ev) => {
+              ev.stopPropagation();
+              openRenameDialog({
+                sessionId: e.sessionId,
+                title: e.title,
+                cwd: e.cwd,
+              });
+            });
+            grp.append(btn, editBtn);
+            pills.appendChild(grp);
+            activeNode = grp;
+          } else {
+            pills.appendChild(btn);
+          }
+        }
+        box.appendChild(pills);
+        if (prevScrollLeft > 0) pills.scrollLeft = prevScrollLeft;
+        if (watchedChanged && activeNode && typeof activeNode.scrollIntoView === 'function') {
+          const pr = pills.getBoundingClientRect();
+          const ar = activeNode.getBoundingClientRect();
+          if (pr.width > 0 && (ar.left < pr.left || ar.right > pr.right)) {
+            activeNode.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+          }
+        }
+      }
+
+      // A row is a switch: the list goes, and with it anything ⌘K opened it
+      // over (opening the list shut More and its panel screen), and the
+      // conversation switches instantly when warm or already live on the daemon.
+      function pickConversation(s) {
+        if (!s) {
+          closeListToChat();
+          return;
+        }
+        switchToConversation(s.sessionId, rowFolder(s), strOr(s.title, ''), {
           hostTerminal: true,
+          live: !!s.live,
         });
       }
       function rowFolder(s) {
@@ -28441,6 +31785,7 @@
       // filter keystroke, and whenever the conversation on screen changes
       // (showSessionTitle), so the blue rule follows it.
       function renderList() {
+        renderLiveStrip();
         // #132: what the catalog's foot looks like as drawn. Only once the
         // gateway has answered, so nothing here runs before it is declared.
         if (sessionCatalogOn()) catalogFootDrawn = catalogFootSig();
@@ -29114,15 +32459,95 @@
       // guards End session and Delete; nothing on the page edits inline), then
       // the same rename Operations > Rename session sends. Its answer goes to
       // the status line, since the panel's own result line is on another pane.
+      let renameDialogSubject = null;
+      function openRenameDialog(s) {
+        if (!token()) return setStatus('pair first');
+        if (!s || !s.sessionId) return setStatus('open a conversation first');
+        const dlg = $('rename-dialog');
+        const inp = $('rename-dialog-input');
+        const note = $('rename-dialog-note');
+        const saveBtn = $('rename-dialog-save');
+        if (!dlg || !inp) return;
+        const curTitle = strOr(s.title, '');
+        renameDialogSubject = {
+          sessionId: s.sessionId,
+          title: curTitle,
+          cwd: strOr(s.cwd, '') || (s.sessionId === watchedSessionId ? watchedSessionCwd || '' : ''),
+        };
+        $('rename-dialog-heading').textContent =
+          'Rename "' + convoTitle(s) + '"';
+        inp.value = curTitle;
+        note.textContent = '';
+        note.hidden = true;
+        saveBtn.disabled = false;
+        if (!dlg.open) dlg.showModal();
+        requestAnimationFrame(() => {
+          inp.focus();
+          inp.select();
+        });
+      }
+      if ($('rename-dialog')) {
+        $('rename-dialog-cancel').addEventListener('click', () => {
+          renameDialogSubject = null;
+          $('rename-dialog').close();
+        });
+        $('rename-dialog').addEventListener('click', (e) => {
+          if (e.target === $('rename-dialog')) {
+            renameDialogSubject = null;
+            $('rename-dialog').close();
+          }
+        });
+        $('rename-dialog-form').addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const subj = renameDialogSubject;
+          if (!subj) {
+            $('rename-dialog').close();
+            return;
+          }
+          const next = ($('rename-dialog-input').value || '').trim();
+          const note = $('rename-dialog-note');
+          if (!next) {
+            note.textContent = 'Enter a conversation name.';
+            note.hidden = false;
+            return;
+          }
+          if (next === subj.title) {
+            renameDialogSubject = null;
+            $('rename-dialog').close();
+            return;
+          }
+          const saveBtn = $('rename-dialog-save');
+          saveBtn.disabled = true;
+          note.hidden = true;
+          setStatus('renaming…');
+          const verdict = await renameSession(subj.sessionId, next, subj.cwd);
+          saveBtn.disabled = false;
+          if (verdict.startsWith('title set:')) {
+            setStatus(verdict);
+            renameDialogSubject = null;
+            $('rename-dialog').close();
+            void refreshPastConversations(curDirPath);
+          } else {
+            note.textContent = verdict;
+            note.hidden = false;
+            setStatus(verdict);
+          }
+        });
+      }
+
       async function renameFromList(s) {
         if (!token()) return setStatus('pair first');
+        if (isNativeShell()) {
+          openRenameDialog(s);
+          return;
+        }
         const now = strOr(s.title, '');
         const next = window.prompt('Rename "' + convoTitle(s) + '" to:', now);
         if (next === null) return;
         const title = next.trim();
         if (title === '' || title === now) return;
         setStatus('renaming…');
-        setStatus(await renameSession(s.sessionId, title));
+        setStatus(await renameSession(s.sessionId, title, rowFolder(s)));
         void refreshPastConversations(curDirPath);
       }
 
@@ -29729,11 +33154,26 @@
         return 'idle';
       }
       function paintLiveDot(dot, s) {
-        const state = liveDotState(s.liveState);
+        const lsState = liveDotState(s.liveState);
+        if (
+          s &&
+          s.sessionId &&
+          (lsState === 'wait' || lsState === 'run' || lsState === 'bg')
+        ) {
+          dropSessionErrorQuiet(s.sessionId);
+        }
+        const state =
+          s &&
+          s.sessionId &&
+          lsState === 'idle' &&
+          sessionErrors.has(s.sessionId)
+            ? 'off'
+            : lsState;
         if (dot.dataset.state === state) return;
         dot.dataset.state = state;
-        dot.setAttribute('aria-label', LIVE_DOT_WORDS[state]);
-        dot.title = LIVE_DOT_WORDS[state];
+        const label = state === 'off' ? 'error' : LIVE_DOT_WORDS[state];
+        dot.setAttribute('aria-label', label);
+        dot.title = label;
       }
       function liveDot(s) {
         const dot = document.createElement('span');
@@ -30031,6 +33471,7 @@
         pastConvos = withCatalog(mergeFolderRows(folders), folders);
         if (liveSessionIds() === was) {
           paintRowMarks();
+          renderLiveStrip();
           listRosterTick(true); // a row that began to work is read now
           return;
         }
@@ -30395,6 +33836,7 @@
           if (e.up) abandonUpload(sessionId, e);
         }
         pendingAttachmentsBySession.delete(sessionId);
+        evictWarmSession(sessionId);
         if (sessionId === watchedSessionId) $('stop').onclick();
         setStatus('deleted');
         // #193: the list is every folder's, so the refresh is the list's
@@ -30440,6 +33882,7 @@
           if (e.up) abandonUpload(sessionId, e);
         }
         pendingAttachmentsBySession.delete(sessionId);
+        evictWarmSession(sessionId);
         // The transcript has moved out of the dir the watch re-attaches from, so
         // a watch left up here could never be restored. Tear it down the way
         // delete does rather than leave one that only looks alive.
@@ -30721,6 +34164,7 @@
                 '… in ' +
                 (j.workspaceCwd || 'daemon workspace'),
             );
+            parkCurrentSession(j.sessionId);
             // issue #39: remember the resolved workspace for the
             // state_resync_required self-heal (re-resume needs the cwd).
             watchedSessionCwd = j.workspaceCwd || null;
@@ -30784,7 +34228,10 @@
         }
       };
 
-      async function startWatch(id, fromEventId, title) {
+      async function startWatch(id, fromEventId, title, watchOpts) {
+        const keepWarm = !!(watchOpts && watchOpts.keepWarm);
+        const existingWarm = warmSessions.get(id);
+        if (existingWarm) stopBgStream(existingWarm);
         // A fresh watch makes any pending self-heal retry stale.
         clearWatchRetry();
         // Any fresh watch (manual, deep-link, resume, or the user tapping
@@ -30836,7 +34283,7 @@
         }
         // The stored list names a conversation, so a switch refetches it rather
         // than leaving the previous session's files under this heading.
-        syncStoredForSession();
+        syncStoredForSession(switching, keepWarm);
         // Same rule for the summary: it describes the conversation it was
         // asked about, so it cannot stay on screen through a switch.
         syncRecapForSession();
@@ -30868,6 +34315,7 @@
         // other conversation would be the failure this control exists to avoid.
         outbox = loadOutbox(id);
         renderQueueControl();
+        void syncNativeDispatchedOutbox(id);
         watchedSessionTitle = title || null;
         showSessionTitle(watchedSessionTitle);
         // issue #46: a re-tap / deep link / resume replaces the previous
@@ -30949,8 +34397,12 @@
             if (res.status === 401 || res.status === 403) {
               setStatus('not authorized, re-pair: ' + failLine);
             } else if (res.status === 404) {
+              markSessionError(id, 'session gone', true);
               setStatus('session gone, pick another conversation: ' + failLine);
             } else {
+              if (res.status >= 500) {
+                markSessionError(id, 'daemon unavailable', true);
+              }
               setStatus(failLine);
             }
             if (terminal) {
@@ -31003,9 +34455,15 @@
           goneResumed.delete(id);
           setStatus('streaming');
           watchStreamAlive = true;
+          lastWatchByteAt = Date.now();
           watchRetryAttempt = 0; // healthy connect: reset the self-heal backoff
+          if (daemonSessionDead.has(id)) {
+            daemonSessionDead.delete(id);
+          }
+          renderStatusLine();
           $('composer').style.display = '';
-          if (fromEventId == null) clearTranscript(id);
+          if (fromEventId == null && !keepWarm) clearTranscript(id);
+          renderLiveStrip();
           // Drawn on every watch, not only the ones that cleared: a watermark
           // watch keeps the rows it already has (and so keeps the cursor that
           // goes with them), but it still has to show whether more exists.
@@ -31067,7 +34525,10 @@
           for (;;) {
             const { value, done } = await reader.read();
             if (done) break;
-            if (value.length > 0) armStall();
+            if (value.length > 0) {
+              lastWatchByteAt = Date.now();
+              armStall();
+            }
             buf += decoder.decode(value, { stream: true });
             const blocks = buf.split('\n\n');
             buf = blocks.pop() || '';
@@ -31945,15 +35406,15 @@
               : '');
           const dot = document.createElement('span');
           dot.style.cssText =
-            'display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px';
+            'display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px';
           dot.style.background =
             st === 'green'
-              ? 'green'
+              ? 'var(--g1-dot-idle)'
               : st === 'yellow'
-                ? 'yellow'
+                ? 'var(--g1-dot-wait)'
                 : st === 'unknown'
-                  ? '#666'
-                  : 'red';
+                  ? 'var(--g1-dot-dim)'
+                  : 'var(--g1-dot-off)';
           dot.title = 'health: ' + detail;
           row.appendChild(dot);
           const label = document.createElement('span');
@@ -32096,15 +35557,27 @@
       // visibility return (the interval alone would just keep skipping).
       // Also reconnects the session SSE stream if it died while backgrounded
       // (mobile screen-off kills connections).
-      function refreshOnWake() {
-        if (document.hidden) return;
+      function refreshOnWake(forceFromNative) {
+        if (document.hidden && !forceFromNative) return;
+        const now = Date.now();
+        const awayMs = lastPageHiddenAt > 0 ? now - lastPageHiddenAt : 0;
+        lastPageHiddenAt = 0;
+        void syncNativeDispatchedOutbox(watchedSessionId).then(() => {
+          if (watchedSessionId && outbox.length > 0 && !turnRunning()) {
+            drainOutbox(0);
+          }
+        });
         // #186: what is waiting on the reader is asked for first, ahead of
         // every other catch-up read, so a request raised while the page was
         // away is the first answer back and is pinned the moment it lands.
         // A card the stream delivered while hidden is already in place.
         if (watchedSessionId) {
           if (watchStreamAlive || !token()) {
-            void refreshPendingCards(watchedSessionId);
+            void refreshPendingCards(watchedSessionId).then(() => {
+              if (watchedSessionId && outbox.length > 0 && !turnRunning()) {
+                drainOutbox(0);
+              }
+            });
           }
           if (agentsOn() && (agentSheet.open || agentsLive() || (agentsState.rows && agentsState.rows.length > 0))) {
             agentsSchedule(0);
@@ -32116,21 +35589,37 @@
         void pollDaemonHealths();
         // issue #35: the 30 s tick is paused while hidden - catch up now.
         void refreshPastConversations(curDirPath);
-        if (watchedSessionId && !watchStreamAlive && token()) {
+        ensureWarmStreamsAlive(true);
+        // When Android freezes WebView during screen-off/Doze, JS timers do not
+        // advance, so watchStreamAlive can stay true on a half-dead socket that
+        // missed heartbeats. Detect missed >28s heartbeats and immediately
+        // reconnect from lastSeenEventId while keeping the warm transcript.
+        const watchZombieAfterSleep =
+          watchStreamAlive &&
+          lastWatchByteAt > 0 &&
+          now - lastWatchByteAt >
+            (forceFromNative || awayMs > 15_000 ? 20_000 : WAKE_STALE_STREAM_MS);
+        if (watchedSessionId && (!watchStreamAlive || watchZombieAfterSleep) && token()) {
           // The user is back: drop the pending backoff retry, reconnect
           // now, and give the stream a fresh retry budget.
           clearWatchRetry();
           watchRetryAttempt = 0;
-          startWatch(watchedSessionId, lastSeenEventId, watchedSessionTitle);
+          startWatch(watchedSessionId, lastSeenEventId, watchedSessionTitle, {
+            keepWarm: lastSeenEventId != null || activeModel.items.length > 0,
+          });
         }
         // issue #46: the 5 s tick is paused while hidden; the catch-up read
         // went out first, above. (startWatch's own refresh duplicates it when
         // the stream just reconnected; the card dedupe makes that harmless.)
         void refreshWorkspaceSections();
       }
-      document.addEventListener('visibilitychange', refreshOnWake);
+      window.__qwenNativeWake = () => {
+        refreshOnWake(true);
+      };
+      document.addEventListener('visibilitychange', () => refreshOnWake(false));
+      window.addEventListener('online', () => refreshOnWake(false));
       window.addEventListener('pageshow', (e) => {
-        if (e.persisted) refreshOnWake();
+        if (e.persisted) refreshOnWake(false);
       });
 
       async function loadDaemonManifest() {
@@ -32594,7 +36083,27 @@
       // rebuilds. A watch with no cursor would clear the rows and replay
       // nothing. `ready` is a promise to wait on before the switch (the deep
       // link's pending-card read).
-      async function openConversationById(id, ready) {
+      async function openConversationById(id, ready, hintCwd) {
+        const warm = warmSessions.get(id);
+        if (warm && !warm.needsResync && (warm.model.items.length > 0 || warm.lastSeenEventId != null)) {
+          if (ready) await ready;
+          activateWarmSession(id, { cwd: hintCwd || warm.cwd, title: warm.title, hostTerminal: true });
+          return;
+        }
+        const known = liveRowMeta(id);
+        if (known && (known.cwd || hintCwd)) {
+          if (ready) await ready;
+          switchToConversation(id, hintCwd || rowFolder(known), strOr(known.title, ''), {
+            hostTerminal: true,
+            live: !!known.live,
+          });
+          return;
+        }
+        if (typeof hintCwd === 'string' && hintCwd) {
+          if (ready) await ready;
+          switchToConversation(id, hintCwd, '', { hostTerminal: true });
+          return;
+        }
         // #172: the probe can take a folder's worth of reads, and a reader
         // who taps another conversation meanwhile has answered it. Without
         // this the probe's resume landed last and took the page back.
@@ -32613,8 +36122,9 @@
             if (s) {
               if (ready) await ready;
               if (gen !== switchGen) return;
-              void resumeConversation(id, cwd, strOr(s.title, ''), {
+              switchToConversation(id, cwd, strOr(s.title, ''), {
                 hostTerminal: true,
+                live: !!s.live,
               });
               return;
             }
@@ -32626,12 +36136,13 @@
         // restoreWatchedSession, so a persisted transcript rebuilds.
         if (ready) await ready;
         if (gen !== switchGen) return;
+        parkCurrentSession(id);
         void startWatch(id, 0);
       }
 
       // #281: allow the native Android shell to focus or open a session
       // deep-linked from a notification without destroying the live WebView.
-      window.__qwenOpenSession = (sessionId, permissionId) => {
+      window.__qwenOpenSession = (sessionId, _permissionId, cwd) => {
         setMoreOpen(false);
         closeListToChat();
         if (!sessionId || typeof sessionId !== 'string') {
@@ -32653,7 +36164,119 @@
           refreshPendingCards(sessionId, true),
           new Promise((r) => setTimeout(r, 1500)),
         ]);
-        void openConversationById(sessionId, pinned);
+        void openConversationById(sessionId, pinned, typeof cwd === 'string' ? cwd : '');
+      };
+
+      // Native Android system Back hook: closes open overlays/sheets first,
+      // then flips instantly back to the previous warm conversation or opens
+      // the conversation list, instead of destroying the live WebView.
+      let listOpenedViaBack = false;
+      if ($('h1-list')) {
+        $('h1-list').addEventListener('click', () => {
+          listOpenedViaBack = false;
+        });
+      }
+      window.__qwenHandleBack = () => {
+        const renameDlg = $('rename-dialog');
+        if (renameDlg && renameDlg.open) {
+          renameDialogSubject = null;
+          renameDlg.close();
+          return true;
+        }
+        const modelDlg = $('model-picker-dialog');
+        if (modelDlg && modelDlg.open) {
+          modelDlg.close();
+          return true;
+        }
+        const ask = $('h1-ask');
+        if (ask && !ask.hidden) {
+          const cancel = ask.querySelector('.cancel');
+          if (cancel) cancel.click();
+          else ask.hidden = true;
+          return true;
+        }
+        if (typeof artSheet === 'object' && artSheet.open) {
+          closeArtSheet(true);
+          return true;
+        }
+        for (const [id, closeBtnId] of [
+          ['agents-sheet', 'agents-close'],
+          ['sources-sheet', 'sources-close'],
+          ['org-sheet', 'org-close'],
+          ['goal-sheet', 'goal-close'],
+          ['hooks-sheet', 'hooks-close'],
+          ['wf-sheet', 'wf-close'],
+          ['task-output-sheet', 'task-output-close'],
+        ]) {
+          const el = $(id);
+          if (el && !el.hidden) {
+            const btn = $(closeBtnId);
+            if (btn) btn.click();
+            else el.hidden = true;
+            return true;
+          }
+        }
+        if (!$('panel-screen').hidden) {
+          closePanel(true);
+          return true;
+        }
+        if (!$('more-screen').hidden) {
+          setMoreOpen(false);
+          return true;
+        }
+        if (!$('h1-menu').hidden) {
+          closeH1Menu(true);
+          return true;
+        }
+        if (!$('h1-sheet').hidden && !paneLayout()) {
+          setSheetOpen(false);
+          return true;
+        }
+        if (!$('stored').hidden) {
+          $('stored-toggle').click();
+          return true;
+        }
+        if (!$('h1-tools').hidden) {
+          $('h1-plus').click();
+          return true;
+        }
+        if (!$('dir-picker').hidden) {
+          setDirPickerOpen(false);
+          return true;
+        }
+        if (!$('archived-view').hidden) {
+          setArchivedOpen(false);
+          return true;
+        }
+        if (!paneLayout() && !$('list-screen').hidden) {
+          if (watchedSessionId && !listOpenedViaBack) {
+            closeListToChat();
+            return true;
+          }
+          listOpenedViaBack = false;
+          return false;
+        }
+        while (warmHistory.length > 0) {
+          const prevId = warmHistory.pop();
+          if (prevId && prevId !== watchedSessionId && warmSessions.has(prevId)) {
+            const slot = warmSessions.get(prevId);
+            if (slot && !slot.needsResync) {
+              listOpenedViaBack = false;
+              activateWarmSession(prevId, {
+                cwd: slot.cwd,
+                title: slot.title,
+                hostTerminal: true,
+              });
+              return true;
+            }
+          }
+        }
+        if (!paneLayout() && $('list-screen').hidden) {
+          listOpenedViaBack = true;
+          setListOpen(true);
+          return true;
+        }
+        return false;
       };
 
       // Turn-end push deep link (#40): a push notification's URL is
@@ -34042,6 +37665,7 @@
             if (e.up) abandonUpload(id, e);
           }
           pendingAttachmentsBySession.delete(id);
+          evictWarmSession(id);
           // The session is gone: drop the watch (and any self-heal retry
           // the stream-end may have scheduled) instead of re-attaching to
           // a corpse. #172: only while it is still the one watched; after
@@ -34973,11 +38597,59 @@
       // #180: the request and the reading of its answer, shared by this panel
       // and the list's row menu so the two cannot drift. Answers the line to
       // print.
-      async function renameSession(id, title) {
-        const r = await rcCall(
+      function applyRenamedTitle(id, stored) {
+        if (!id || typeof stored !== 'string' || stored === '') return;
+        const w = warmSessions.get(id);
+        if (w) w.title = stored;
+        for (const c of pastConvos) {
+          if (c && c.sessionId === id) {
+            c.title = stored;
+            c.titleSource = 'manual';
+          }
+        }
+        if (typeof folderRows === 'object' && folderRows) {
+          for (const got of folderRows.values()) {
+            if (!got) continue;
+            if (Array.isArray(got.raw)) {
+              for (const r of got.raw) {
+                if (r && r.sessionId === id) {
+                  r.title = stored;
+                  r.titleSource = 'manual';
+                }
+              }
+            }
+            if (got.live && got.live.has && got.live.has(id)) {
+              const l = got.live.get(id);
+              if (l) l.title = stored;
+            }
+          }
+        }
+        if (id === watchedSessionId) {
+          watchedSessionTitle = stored;
+          showSessionTitle(stored);
+        } else {
+          renderList();
+        }
+        renderLiveStrip();
+      }
+
+      async function renameSession(id, title, cwd) {
+        let r = await rcCall(
           '/session/' + encodeURIComponent(id) + '/metadata',
           { method: 'PATCH', body: JSON.stringify({ displayName: title }) },
         );
+        if (!r.ok && r.status === 404 && cwd) {
+          const resumed = await rcCall(
+            '/session/' + encodeURIComponent(id) + '/resume',
+            { method: 'POST', body: JSON.stringify({ cwd }) },
+          );
+          if (resumed.ok) {
+            r = await rcCall(
+              '/session/' + encodeURIComponent(id) + '/metadata',
+              { method: 'PATCH', body: JSON.stringify({ displayName: title }) },
+            );
+          }
+        }
         if (!r.ok) {
           // display_name_too_long and invalid_metadata are both about the name
           // and both come back as 400, so the code is what tells the reader
@@ -34985,6 +38657,9 @@
           return 'rename failed: ' + rcDetail(r);
         }
         const stored = r.body && r.body.displayName;
+        if (typeof stored === 'string' && stored !== '') {
+          applyRenamedTitle(id, stored);
+        }
         return typeof stored === 'string' && stored !== ''
           ? 'title set: ' + stored
           : 'the daemon accepted the rename but returned no name';
