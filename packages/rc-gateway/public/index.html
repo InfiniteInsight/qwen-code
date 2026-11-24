@@ -15872,7 +15872,10 @@
         }
         const isRecordArtifact =
           tname === 'record_artifact' ||
-          /^(record_artifact|recordartifact|recording artifact)\b/i.test(label);
+          /^(record_artifact|recordartifact|recording artifact)\b/i.test(
+            label,
+          ) ||
+          !!(inp && typeof inp.workspacePath === 'string');
         const isImageGen =
           tname === 'image_gen' ||
           /^(image_gen|generateimage|generate an image)\b/i.test(label);
@@ -15909,7 +15912,26 @@
           return out;
         }
         let candidate = '';
-        if (inp) {
+        if (isRecordArtifact && Array.isArray(item.result)) {
+          for (const c of item.result) {
+            const text =
+              c && typeof c.text === 'string'
+                ? c.text
+                : c && c.content && typeof c.content.text === 'string'
+                  ? c.content.text
+                  : '';
+            if (!text) continue;
+            if (/^Recorded \d+ artifacts? from directory\b/m.test(text)) {
+              return out;
+            }
+            const m = text.match(/(?:^|\n)workspacePath:\s*([^\r\n]+)/);
+            if (m && m[1]) {
+              candidate = m[1].trim();
+              break;
+            }
+          }
+        }
+        if (!candidate && inp) {
           candidate =
             strOr(inp.workspacePath, '') ||
             strOr(inp.file_path, '') ||

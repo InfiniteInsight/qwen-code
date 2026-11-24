@@ -740,7 +740,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
 }
 
 export const WRITE_FILE_ARTIFACT_DESCRIPTION =
-  'Artifact-like files such as HTML, PDF, images, notebooks, office documents, CSV, Markdown, JSON, SQL, and Python files are automatically registered as session artifacts. Set record_as_artifact=false for intermediates, such as HTML written only to print a PDF: that does not create an artifact, but one the session already has for the path is still refreshed. Files under .qwen/tmp/ are not registered. Delete intermediates when done.';
+  'Artifact-like files such as HTML, PDF, images, notebooks, office documents, CSV, Markdown, JSON, SQL, and Python files are automatically registered as session artifacts with a Download button in the chat and Artifacts UI (for shell-generated files like PDF, DOCX, XLSX, PPTX, PNG, or ZIP, call record_artifact with workspacePath). Set record_as_artifact=false for intermediates, such as HTML written only to print a PDF: that does not create an artifact, but one the session already has for the path is still refreshed. Files under .qwen/tmp/ are not registered. Delete intermediates when done.';
 
 /**
  * Implementation of the WriteFile tool logic

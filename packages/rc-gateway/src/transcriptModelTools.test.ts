@@ -211,4 +211,34 @@ describe('a to-do list closes the thought before it (#171)', () => {
     expect(pageRows).toHaveLength(1);
     expect(pageRows[0].parts).toHaveLength(1);
   });
+
+  it('retains record_artifact rawInput workspacePath and result across completion updates (#285)', () => {
+    const m = api.createTranscriptModel();
+    m.upsertTool({
+      toolCallId: 'ra1',
+      title: 'Recording artifact summary.pdf',
+      kind: 'other',
+      status: 'in_progress',
+      rawInput: { title: 'Quarterly summary', workspacePath: 'reports/summary.pdf' },
+    });
+    m.upsertTool({
+      toolCallId: 'ra1',
+      status: 'completed',
+      content: [
+        {
+          type: 'content',
+          content: {
+            type: 'text',
+            text: 'Recorded artifact "summary.pdf".\nstatus: available\nworkspacePath: reports/summary.pdf\nresolvedPath: /repo/reports/summary.pdf',
+          },
+        },
+      ],
+    });
+    expect(m.items).toHaveLength(1);
+    expect(m.items[0].status).toBe('completed');
+    expect(m.items[0].input).toEqual({
+      title: 'Quarterly summary',
+      workspacePath: 'reports/summary.pdf',
+    });
+  });
 });
