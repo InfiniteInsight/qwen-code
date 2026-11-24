@@ -5,8 +5,8 @@ import org.junit.Test
 
 class QwenRcDeepLinkTest {
     @Test fun parsesSessionAndPermissionDeepLinks() {
-        val session = QwenRcDeepLink.parseSchemeUri("qwen-rc://session/abc_123?event=45")
-        assertEquals(QwenRcDeepLink.OpenSession("abc_123", "45"), session)
+        val session = QwenRcDeepLink.parseSchemeUri("qwen-rc://session/abc_123?event=45&cwd=%2Fhome%2Fevan%2Fproj")
+        assertEquals(QwenRcDeepLink.OpenSession("abc_123", "45", "/home/evan/proj"), session)
         val nav = (session as QwenRcDeepLink.OpenSession).toNavigation()
         assertEquals("https://gw.example/ui/?session=abc_123&event=45", nav.url("https://gw.example/"))
 

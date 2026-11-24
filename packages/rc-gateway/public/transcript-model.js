@@ -205,6 +205,89 @@
     };
   }
 
+  // Non-text content blocks sent by the assistant on an agent_message_chunk
+  // (resource_link, resource, attachment-backed image, audio, file). Inline
+  // base64 `type === 'image'` blocks without an attachmentId or uri stay on
+  // `addImage` so standalone assistant screenshots keep their `.bubble.image`
+  // contract (#100).
+  function asstBlockOf(content) {
+    if (!isRecord(content)) return null;
+    var type = typeof content.type === 'string' ? clean(content.type) : '';
+    if (!type || type === 'text' || typeof content.text === 'string') {
+      return null;
+    }
+    var mime = strOr(content.mimeType, '').toLowerCase();
+    var size =
+      typeof content.size === 'number' && Number.isFinite(content.size)
+        ? Math.max(0, content.size)
+        : 0;
+    var id = strOr(content.attachmentId, '');
+    var uri = strOr(content.uri, '');
+    if (type === 'image' && !id && !uri) {
+      return null;
+    }
+    if (type === 'image' || type === 'resource') {
+      if (id) {
+        return {
+          kind: type === 'image' && PART_IMAGE_TYPES[mime] ? 'image' : 'file',
+          name: strOr(content.name, id),
+          attachmentId: id,
+          mimeType: mime,
+          size: size,
+        };
+      }
+      var r = content.resource;
+      if (type === 'resource' && isRecord(r) && typeof r.uri === 'string') {
+        var rMime = strOr(r.mimeType, mime).toLowerCase();
+        var body =
+          typeof r.text === 'string'
+            ? r.text.length
+            : typeof r.blob === 'string'
+              ? b64Bytes(r.blob)
+              : size;
+        var hasBlob = typeof r.blob === 'string' && r.blob.length > 0;
+        return {
+          kind: PART_IMAGE_TYPES[rMime] && hasBlob ? 'image' : 'file',
+          name: strOr(content.name, clean(lastSegment(r.uri))),
+          uri: clean(r.uri),
+          mimeType: rMime,
+          size: body,
+          data: hasBlob ? r.blob : undefined,
+          textData: typeof r.text === 'string' ? r.text : undefined,
+        };
+      }
+      if (uri) {
+        return {
+          kind: PART_IMAGE_TYPES[mime] ? 'image' : 'file',
+          name: strOr(content.name, clean(lastSegment(uri))),
+          uri: uri,
+          mimeType: mime,
+          size: size,
+        };
+      }
+    }
+    if (type === 'resource_link' && uri) {
+      return {
+        kind: PART_IMAGE_TYPES[mime] ? 'image' : 'file',
+        name: strOr(content.name, clean(lastSegment(uri))),
+        uri: uri,
+        mimeType: mime,
+        size: size,
+      };
+    }
+    var inlineB64 =
+      typeof content.data === 'string' && content.data ? content.data : '';
+    return {
+      kind: 'file',
+      name: strOr(content.name, uri ? clean(lastSegment(uri)) : type + ' block'),
+      uri: uri || undefined,
+      attachmentId: id || undefined,
+      mimeType: mime,
+      size: size || (inlineB64 ? b64Bytes(inlineB64) : 0),
+      data: inlineB64 || undefined,
+    };
+  }
+
   // ---- A turn that failed (#199) ---------------------------------------------
   // The daemon publishes turn_error INSTEAD of turn_complete when a prompt
   // fails: a model request that dies mid-stream, a rate limit, a Stop hook that
@@ -247,6 +330,7 @@
     var forkItem = null;
     var planItem = null;
     var toolIndex = new Map(); // toolCallId -> tool item
+    var fileIndex = new Map(); // fileKey -> standalone assistant file item
     var unsettledSubs = new Set(); // parentToolCallId of tools in toolIndex with !sub.done (#136)
     var subagentTypes = new Map(); // parentToolCallId -> child type label
     var subToolIndex = new WeakMap(); // sub -> Map(child toolCallId -> entry)
@@ -451,6 +535,17 @@
       }
       curAsst.text += t;
       emitUpdate(curAsst);
+    }
+    function addAssistantPart(part, time) {
+      if (!part) return null;
+      finishThought();
+      if (curAsst) {
+        curAsst.parts = (curAsst.parts || []).concat([part]);
+        emitUpdate(curAsst);
+        return { item: curAsst, merged: true };
+      }
+      curAsst = push(newItem('asst', { text: '', time: time, parts: [part] }));
+      return { item: curAsst, merged: false };
     }
     function appendThought(text, time) {
       curAsst = null;
@@ -838,6 +933,7 @@
       var tool = id ? toolIndex.get(id) : null;
       var status = toolStatusOf(u, tool ? tool.status : '');
       var toolKind = strOr(u.kind, '');
+      var toolName = strOr(u._meta && u._meta.toolName, '');
       var locations =
         Array.isArray(u.locations) && u.locations.length > 0
           ? u.locations
@@ -852,6 +948,7 @@
         // the whole subagent run.
         if (status) tool.status = status;
         if (toolKind) tool.toolKind = toolKind;
+        if (toolName) tool.toolName = toolName;
         if (locations !== undefined) tool.locations = locations;
         if (input !== undefined) tool.input = input;
         if (result !== undefined) tool.result = result;
@@ -867,6 +964,7 @@
           label: toolLabel(u, id, ''),
           status: status,
           toolKind: toolKind,
+          toolName: toolName,
           time: stamp,
           sub: null,
           expanded: false,
@@ -888,6 +986,85 @@
       if (id && TERMINAL_TOOL_STATUSES[status]) settle(id, status);
       if (!itemSet.has(tool)) push(tool);
       else emitUpdate(tool);
+      return tool;
+    }
+
+    function upsertAssistantFile(spec, time) {
+      if (!isRecord(spec)) return null;
+      var key =
+        strOr(spec.key, '') ||
+        strOr(spec.artifactId, '') ||
+        strOr(spec.workspacePath, '') ||
+        strOr(spec.uri, '') ||
+        strOr(spec.name, '');
+      if (!key) return null;
+      var callId = strOr(spec.toolCallId, '');
+      if (callId && toolIndex.has(callId)) {
+        var owner = toolIndex.get(callId);
+        var list = owner.artifactFiles
+          ? owner.artifactFiles.slice()
+          : [];
+        var idx = -1;
+        for (var i = 0; i < list.length; i++) {
+          if (list[i].key === key) {
+            idx = i;
+            break;
+          }
+        }
+        var next = Object.assign({}, idx >= 0 ? list[idx] : {}, spec, {
+          key: key,
+        });
+        if (idx >= 0) list[idx] = next;
+        else list.push(next);
+        owner.artifactFiles = list;
+        emitUpdate(owner);
+        return owner;
+      }
+      var existing = fileIndex.get(key);
+      var stamp = validStamp(time);
+      if (existing && itemSet.has(existing)) {
+        existing.file = Object.assign({}, existing.file, spec, { key: key });
+        if (existing.time === undefined && stamp !== undefined) {
+          existing.time = stamp;
+        }
+        emitUpdate(existing);
+        return existing;
+      }
+      finishThought();
+      curAsst = null;
+      var row = newItem('file', {
+        fileKey: key,
+        file: Object.assign({}, spec, { key: key }),
+        time: stamp,
+      });
+      fileIndex.set(key, row);
+      return push(row);
+    }
+
+    function removeAssistantFile(key) {
+      var k = strOr(key, '');
+      if (!k) return false;
+      var removed = false;
+      var standalone = fileIndex.get(k);
+      if (standalone) {
+        fileIndex.delete(k);
+        if (detach(standalone)) {
+          removed = true;
+          emit({ type: 'reset' });
+        }
+      }
+      toolIndex.forEach(function (tool) {
+        if (!Array.isArray(tool.artifactFiles)) return;
+        var filtered = tool.artifactFiles.filter(function (f) {
+          return f && f.key !== k && f.artifactId !== k;
+        });
+        if (filtered.length !== tool.artifactFiles.length) {
+          tool.artifactFiles = filtered;
+          removed = true;
+          emitUpdate(tool);
+        }
+      });
+      return removed;
     }
 
     // ---- To-do list (plan frames) ------------------------------------------
@@ -971,6 +1148,7 @@
 
     function dropBookkeeping() {
       toolIndex.clear();
+      fileIndex.clear();
       unsettledSubs.clear();
       subagentTypes.clear();
       orphanSubs.clear();
@@ -1036,7 +1214,13 @@
         case 'user':
           return 'u|' + r.text + '|' + (r.parts ? r.parts.length : 0);
         case 'asst':
-          return 'a|' + r.text;
+          return (
+            'a|' +
+            r.text +
+            (r.parts && r.parts.length ? '|' + r.parts.length : '')
+          );
+        case 'file':
+          return 'f|' + (r.fileKey || (r.file && r.file.name) || '');
         case 'thought':
           return 't|' + r.text;
         case 'system':
@@ -1177,6 +1361,10 @@
     }
     function fillTool(into, from) {
       if (nameless(into) && !nameless(from)) into.label = from.label;
+      if (!into.toolKind && from.toolKind) into.toolKind = from.toolKind;
+      if (!into.toolName && from.toolName) into.toolName = from.toolName;
+      if (into.locations === undefined && from.locations !== undefined)
+        into.locations = from.locations;
       if (into.input === undefined && from.input !== undefined)
         into.input = from.input;
       if (into.result === undefined && from.result !== undefined)
@@ -1413,6 +1601,9 @@
       addUserPart: addUserPart,
       addUserChunk: addUserChunk,
       appendAssistant: appendAssistant,
+      addAssistantPart: addAssistantPart,
+      upsertAssistantFile: upsertAssistantFile,
+      removeAssistantFile: removeAssistantFile,
       appendThought: appendThought,
       finishThought: finishThought,
       addSystem: addSystem,
@@ -1511,6 +1702,20 @@
         break;
       case 'asst':
         if (item.text) out.push(['text', item.text]);
+        (item.parts || []).forEach(function (p) {
+          if (p && p.name) out.push(['part', String(p.name)]);
+        });
+        break;
+      case 'file':
+        if (item.file && item.file.name)
+          out.push(['file', String(item.file.name)]);
+        if (
+          item.file &&
+          item.file.workspacePath &&
+          item.file.workspacePath !== item.file.name
+        ) {
+          out.push(['path', String(item.file.workspacePath)]);
+        }
         break;
       case 'thought':
         if (item.expanded && item.text) out.push(['text', item.text]);
@@ -1698,8 +1903,16 @@
       return m.addUserChunk(text, sentAt, recordId);
     }
     if (su === 'agent_message_chunk') {
-      if (u.content && u.content.type === 'image')
+      if (
+        u.content &&
+        u.content.type === 'image' &&
+        !u.content.attachmentId &&
+        !u.content.uri
+      ) {
         return m.addImage(u.content.mimeType, u.content.data);
+      }
+      var apart = asstBlockOf(u.content);
+      if (apart) return m.addAssistantPart(apart, sentAt);
       if (text) m.appendAssistant(text, sentAt);
       return;
     }
@@ -1757,6 +1970,7 @@
     turnErrorText: turnErrorText,
     userPartOf: userPartOf,
     userBlockOf: userBlockOf,
+    asstBlockOf: asstBlockOf,
     searchItems: searchItems,
     searchFields: searchFields,
     searchNeedle: searchNeedle,

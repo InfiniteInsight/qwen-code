@@ -11,11 +11,14 @@ import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
@@ -24,6 +27,7 @@ internal data class SseAlert(
     val kind: String,
     val title: String,
     val body: String,
+    val stopReason: String? = null,
 )
 
 /**
@@ -95,7 +99,15 @@ internal class SseEventParser {
                     "turn_complete",
                     "Turn finished",
                     if (stop == "end_turn") "Agent finished replying." else "Stopped ($stop) - tap to continue.",
+                    stopReason = stop,
                 )
+            }
+            "turn_error" -> {
+                val detail = (dataObj?.get("message") as? String)
+                    ?: (dataObj?.get("code") as? String)
+                    ?: (dataObj?.get("error") as? String)
+                    ?: "turn_error"
+                SseAlert(frameId, "error", "Turn interrupted", detail)
             }
             "stream_error" -> {
                 val code = (dataObj?.get("code") as? String)
@@ -121,12 +133,37 @@ class BackgroundSseService : Service() {
     private val activeTarget = AtomicReference<Target?>(null)
     @Volatile private var activeConnection: HttpURLConnection? = null
     private var workerThread: Thread? = null
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         ensureChannels()
+    }
+
+    private fun acquireOrRefreshWakeLock() {
+        try {
+            val pm = getSystemService(PowerManager::class.java) ?: return
+            val wl = wakeLock ?: pm.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "QwenMobileShell:BgSse",
+            ).apply { setReferenceCounted(false) }.also { wakeLock = it }
+            wl.acquire(WAKE_LOCK_TIMEOUT_MS)
+        } catch (_: Exception) {
+            // Best-effort CPU wake lock during background session monitoring.
+        }
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            val wl = wakeLock
+            if (wl != null && wl.isHeld) {
+                wl.release()
+            }
+        } catch (_: Exception) {
+            // Ignore already-released wake lock.
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -145,6 +182,10 @@ class BackgroundSseService : Service() {
         val title = intent.getStringExtra(EXTRA_SESSION_TITLE)
         val cursor = intent.getStringExtra(EXTRA_LAST_EVENT_ID)
         val cwd = intent.getStringExtra(EXTRA_SESSION_CWD)
+        val outboxRaw = intent.getStringExtra(EXTRA_OUTBOX_JSON)
+        if (outboxRaw != null) {
+            syncOutbox(sessionId, SimpleJson.parseStringArray(outboxRaw))
+        }
         val next = Target(profileId, sessionId, title, cursor, cwd)
 
         val fg = buildForegroundNotification(title ?: sessionId)
@@ -153,6 +194,7 @@ class BackgroundSseService : Service() {
         } else {
             startForeground(FG_NOTIFICATION_ID, fg)
         }
+        acquireOrRefreshWakeLock()
 
         val prev = activeTarget.getAndSet(next)
         if (prev?.profileId != next.profileId || prev.sessionId != next.sessionId) {
@@ -174,6 +216,7 @@ class BackgroundSseService : Service() {
         activeConnection = null
         workerThread?.interrupt()
         workerThread = null
+        releaseWakeLock()
     }
 
     private fun ensureWorker() {
@@ -241,6 +284,7 @@ class BackgroundSseService : Service() {
                     } else if (code in 200..299) {
                         connectedOnce = true
                         backoffMs = 1_000L
+                        acquireOrRefreshWakeLock()
                         BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).use { reader ->
                             while (running.get() && activeTarget.get()?.sessionId == target.sessionId) {
                                 val line = reader.readLine() ?: break
@@ -249,7 +293,20 @@ class BackgroundSseService : Service() {
                                     cursor = parser.lastEventId
                                 }
                                 if (alert != null && !ForegroundVisibility.isForeground) {
-                                    postAlertNotification(target.sessionId, target.sessionTitle, alert)
+                                    if (alert.kind == "turn_complete" && alert.stopReason == "end_turn") {
+                                        val nextQueued = popNextOutboxPrompt(target.sessionId)
+                                        if (nextQueued != null) {
+                                            dispatchQueuedPromptInBackground(
+                                                profile.origin,
+                                                token,
+                                                target.sessionId,
+                                                target.cwd,
+                                                nextQueued,
+                                            )
+                                            continue
+                                        }
+                                    }
+                                    postAlertNotification(target.sessionId, target.sessionTitle, target.cwd, alert)
                                 }
                             }
                         }
@@ -350,14 +407,21 @@ class BackgroundSseService : Service() {
             .build()
     }
 
-    private fun postAlertNotification(sessionId: String, sessionTitle: String?, alert: SseAlert) {
+    private fun postAlertNotification(sessionId: String, sessionTitle: String?, cwd: String?, alert: SseAlert) {
         val mgr = getSystemService(NotificationManager::class.java) ?: return
+        val queryParts = mutableListOf<String>()
+        if (!alert.eventId.isNullOrBlank() && alert.eventId.all { it.isDigit() }) {
+            queryParts.add("event=${alert.eventId}")
+        }
+        if (!cwd.isNullOrBlank()) {
+            queryParts.add("cwd=${Uri.encode(cwd)}")
+        }
         val deepUri = buildString {
             append("qwen-rc://session/")
             append(Uri.encode(sessionId))
-            if (!alert.eventId.isNullOrBlank() && alert.eventId.all { it.isDigit() }) {
-                append("?event=")
-                append(alert.eventId)
+            if (queryParts.isNotEmpty()) {
+                append('?')
+                append(queryParts.joinToString("&"))
             }
         }
         val openIntent = Intent(Intent.ACTION_VIEW, Uri.parse(deepUri), this, MainActivity::class.java).apply {
@@ -381,6 +445,63 @@ class BackgroundSseService : Service() {
         mgr.notify(ALERT_NOTIFICATION_BASE + (sessionId.hashCode() and 0x7FFF), n)
     }
 
+    private fun dispatchQueuedPromptInBackground(
+        origin: String,
+        token: String,
+        sessionId: String,
+        cwd: String?,
+        promptText: String,
+    ) {
+        acquireOrRefreshWakeLock()
+        recordDispatchedOutbox(sessionId, promptText)
+        Thread({
+            var refused = false
+            try {
+                var code = postPromptOnce(origin, token, sessionId, promptText)
+                if (code == 409 && !cwd.isNullOrBlank() && tryResumeSession(origin, token, sessionId, cwd)) {
+                    code = postPromptOnce(origin, token, sessionId, promptText)
+                }
+                if (code in 400..599) {
+                    refused = true
+                }
+            } catch (_: SocketTimeoutException) {
+                // Gateway holds POST /session/:id/prompt open across the full turn (#38);
+                // a read timeout after enqueue means the daemon is still running the turn.
+            } catch (_: Exception) {
+                // Connection drop mid-turn leaves the daemon turn running (#38).
+            }
+            if (refused) {
+                rollbackDispatchedOutbox(sessionId, promptText)
+            }
+        }, "qwen-rc-bg-outbox").start()
+    }
+
+    private fun postPromptOnce(
+        origin: String,
+        token: String,
+        sessionId: String,
+        promptText: String,
+    ): Int {
+        val promptUrl = URL("${origin}session/${Uri.encode(sessionId)}/prompt")
+        val bodyBytes = """{"prompt":${QwenBridgeInjector.jsStringLiteral(promptText)}}""".toByteArray(Charsets.UTF_8)
+        val conn = (promptUrl.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 15_000
+            readTimeout = 180_000
+            useCaches = false
+            doOutput = true
+            setFixedLengthStreamingMode(bodyBytes.size)
+            setRequestProperty("Content-Type", "application/json")
+            setRequestProperty("Authorization", "Bearer $token")
+        }
+        return try {
+            conn.outputStream.use { it.write(bodyBytes) }
+            conn.responseCode
+        } finally {
+            conn.disconnect()
+        }
+    }
+
     companion object {
         const val ACTION_START = "com.qwen.mobileshell.BG_SSE_START"
         const val ACTION_STOP = "com.qwen.mobileshell.BG_SSE_STOP"
@@ -389,13 +510,89 @@ class BackgroundSseService : Service() {
         const val EXTRA_SESSION_TITLE = "session_title"
         const val EXTRA_LAST_EVENT_ID = "last_event_id"
         const val EXTRA_SESSION_CWD = "session_cwd"
+        const val EXTRA_OUTBOX_JSON = "session_outbox_json"
 
         private const val CHANNEL_STREAM = "qwen_rc_bg_stream"
         private const val CHANNEL_ALERTS = "qwen_rc_alerts"
         private const val FG_NOTIFICATION_ID = 4170
         private const val ALERT_NOTIFICATION_BASE = 5000
+        private const val WAKE_LOCK_TIMEOUT_MS = 4L * 60L * 60L * 1000L
+
+        private val outboxLock = Any()
+        private val pendingOutboxBySession = ConcurrentHashMap<String, MutableList<String>>()
+        private val dispatchedOutboxBySession = ConcurrentHashMap<String, MutableList<String>>()
+
+        internal fun syncOutbox(sessionId: String, items: List<String>) {
+            synchronized(outboxLock) {
+                val alreadyDispatched = dispatchedOutboxBySession[sessionId].orEmpty().toMutableList()
+                val filtered = ArrayList<String>(items.size)
+                for (item in items) {
+                    val idx = alreadyDispatched.indexOf(item)
+                    if (idx >= 0) {
+                        alreadyDispatched.removeAt(idx)
+                    } else if (item.isNotBlank()) {
+                        filtered.add(item)
+                    }
+                }
+                if (filtered.isEmpty()) {
+                    pendingOutboxBySession.remove(sessionId)
+                } else {
+                    pendingOutboxBySession[sessionId] = filtered
+                }
+            }
+        }
+
+        internal fun popNextOutboxPrompt(sessionId: String): String? {
+            synchronized(outboxLock) {
+                val list = pendingOutboxBySession[sessionId] ?: return null
+                if (list.isEmpty()) {
+                    pendingOutboxBySession.remove(sessionId)
+                    return null
+                }
+                val next = list.removeAt(0)
+                if (list.isEmpty()) {
+                    pendingOutboxBySession.remove(sessionId)
+                }
+                return next
+            }
+        }
+
+        private fun recordDispatchedOutbox(sessionId: String, promptText: String) {
+            synchronized(outboxLock) {
+                val list = dispatchedOutboxBySession.getOrPut(sessionId) { ArrayList() }
+                list.add(promptText)
+            }
+        }
+
+        private fun rollbackDispatchedOutbox(sessionId: String, promptText: String) {
+            synchronized(outboxLock) {
+                dispatchedOutboxBySession[sessionId]?.let { list ->
+                    val idx = list.lastIndexOf(promptText)
+                    if (idx >= 0) list.removeAt(idx)
+                    if (list.isEmpty()) dispatchedOutboxBySession.remove(sessionId)
+                }
+                val pending = pendingOutboxBySession.getOrPut(sessionId) { ArrayList() }
+                pending.add(0, promptText)
+            }
+        }
+
+        internal fun consumeDispatchedOutbox(sessionId: String?): List<String> {
+            if (sessionId.isNullOrBlank()) return emptyList()
+            synchronized(outboxLock) {
+                val list = dispatchedOutboxBySession.remove(sessionId) ?: return emptyList()
+                return list.toList()
+            }
+        }
+
+        internal fun clearOutboxStateForTests() {
+            synchronized(outboxLock) {
+                pendingOutboxBySession.clear()
+                dispatchedOutboxBySession.clear()
+            }
+        }
 
         internal fun startOrUpdate(context: Context, profileId: String, pointer: WatchedSessionPointer) {
+            syncOutbox(pointer.sessionId, pointer.outbox)
             val intent = Intent(context, BackgroundSseService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_PROFILE_ID, profileId)
@@ -403,6 +600,7 @@ class BackgroundSseService : Service() {
                 putExtra(EXTRA_SESSION_TITLE, pointer.title)
                 putExtra(EXTRA_LAST_EVENT_ID, pointer.lastEventId)
                 putExtra(EXTRA_SESSION_CWD, pointer.cwd)
+                putExtra(EXTRA_OUTBOX_JSON, SimpleJson.formatStringArray(pointer.outbox))
             }
             ContextCompatStart.startForeground(context, intent)
         }

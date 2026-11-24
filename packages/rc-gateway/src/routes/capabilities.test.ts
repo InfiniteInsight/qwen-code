@@ -553,6 +553,24 @@ describe('#165 the response is scoped by token', () => {
     expect(rc.writeScope).toBe(want);
   });
 
+  it.each([
+    ['owner', { id: 'o', scopes: ['owner'] }, true],
+    ['locked owner share', { id: 'os', scopes: ['owner', 'share'], sessionLockId: 'sess-1' }, false],
+    ['write', { id: 'w', scopes: ['write', 'session:read'] }, false],
+    ['read-only', { id: 'r', scopes: ['session:read'] }, false],
+  ])('says whether a %s token holds ownerScope and reports sessionDaemonRestart', async (_name, client, want) => {
+    const m = await mount({ ...DEPS, sessionDaemonRestart: true }, true, client);
+    try {
+      const rc = ((await (await fetch(`${m.base}/rc/capabilities`)).json()) as {
+        remoteControl: Record<string, unknown>;
+      }).remoteControl;
+      expect(rc.ownerScope).toBe(want);
+      expect(rc.sessionDaemonRestart).toBe(true);
+    } finally {
+      await m.close();
+    }
+  });
+
   it('fails closed for a client with no scopes array', async () => {
     const { text } = await capsAs({ id: 'x' });
     expect(text).not.toContain('/home/evan');

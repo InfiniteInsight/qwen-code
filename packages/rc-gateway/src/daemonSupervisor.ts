@@ -77,7 +77,7 @@ export interface StartDaemonOptions {
 
 export interface DaemonHandle {
   daemon: DaemonClient;
-  stop: () => Promise<void>;
+  stop: (opts?: { force?: boolean }) => Promise<void>;
   /** True when attached to an externally-managed daemon (`stop()` is a no-op). */
   attached: boolean;
   /**
@@ -368,11 +368,16 @@ export async function startDaemon(
   const stopGraceMs = opts.stopGraceMs ?? 3000;
   return {
     daemon,
-    stop: async () => {
-      kill('SIGTERM'); // no-op in attach mode
+    stop: async (stopOpts?: { force?: boolean }) => {
+      const force = stopOpts?.force === true;
+      kill(force ? 'SIGKILL' : 'SIGTERM'); // no-op in attach mode
       // Attach mode (or a spawner without exit tracking) has nothing to await
       // or escalate.
       if (attached || !exitSignal) return;
+      if (force) {
+        await settledWithin(exitSignal, 1000);
+        return;
+      }
       // A daemon mid-turn can ignore SIGTERM. If it hasn't exited within the
       // grace window, escalate to SIGKILL so we never leak the process (the
       // Phase-3 launcher reaps through this same path).

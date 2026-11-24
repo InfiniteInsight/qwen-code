@@ -24,6 +24,7 @@ import android.text.InputType
 import android.text.method.PasswordTransformationMethod
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.JsPromptResult
 import android.webkit.JsResult
 import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
@@ -87,9 +88,25 @@ class MainActivity : AppCompatActivity() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 val view = webView
-                if (view != null && view.parent != null && view.canGoBack()) view.goBack()
-                else if (activeProfile != null) showProfiles()
-                else {
+                val profile = activeProfile
+                if (view != null && view.parent != null && profile != null &&
+                    OriginPolicy.isSameOrigin(profile.origin, view.url.orEmpty())
+                ) {
+                    view.evaluateJavascript(
+                        "(typeof window.__qwenHandleBack === 'function' ? Boolean(window.__qwenHandleBack()) : false)",
+                    ) { raw ->
+                        if (raw == "true" || isFinishing || isDestroyed) return@evaluateJavascript
+                        if (view === webView && view.parent != null && view.canGoBack()) {
+                            view.goBack()
+                        } else if (activeProfile != null) {
+                            showProfiles()
+                        }
+                    }
+                } else if (view != null && view.parent != null && view.canGoBack()) {
+                    view.goBack()
+                } else if (activeProfile != null) {
+                    showProfiles()
+                } else {
                     isEnabled = false
                     onBackPressedDispatcher.onBackPressed()
                 }
@@ -112,6 +129,16 @@ class MainActivity : AppCompatActivity() {
         ForegroundVisibility.isForeground = true
         webView?.onResume()
         webView?.resumeTimers()
+        val view = webView
+        val profile = activeProfile
+        if (view != null && view.parent != null && profile != null &&
+            OriginPolicy.isSameOrigin(profile.origin, view.url.orEmpty())
+        ) {
+            view.evaluateJavascript(
+                "if (typeof window.__qwenNativeWake === 'function') { window.__qwenNativeWake(); }",
+                null,
+            )
+        }
     }
 
     private fun loadProfiles(snapshot: ConnectionRecovery? = null) {
@@ -407,6 +434,45 @@ class MainActivity : AppCompatActivity() {
                     .setOnCancelListener { cancelDialog() }.show()
                 return true
             }
+
+            override fun onJsPrompt(
+                view: WebView,
+                url: String,
+                message: String,
+                defaultValue: String?,
+                result: JsPromptResult,
+            ): Boolean {
+                if (view !== webView || !OriginPolicy.isSameOrigin(profile.origin, url)) {
+                    result.cancel()
+                    return true
+                }
+                cancelDialog()
+                activeJsResult = result
+                val pad = (16 * resources.displayMetrics.density).toInt()
+                val input = EditText(this@MainActivity).apply {
+                    inputType = InputType.TYPE_CLASS_TEXT
+                    setText(defaultValue.orEmpty())
+                    setSelection(text.length)
+                }
+                val box = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(pad, pad / 2, pad, 0)
+                    addView(input)
+                }
+                activeDialog = AlertDialog.Builder(this@MainActivity)
+                    .setMessage(message)
+                    .setView(box)
+                    .setPositiveButton(android.R.string.ok) { _, _ ->
+                        val promptRes = activeJsResult as? JsPromptResult
+                        if (view === webView) promptRes?.confirm(input.text?.toString().orEmpty())
+                        else promptRes?.cancel()
+                        activeJsResult = null
+                        activeDialog = null
+                    }
+                    .setNegativeButton(android.R.string.cancel) { _, _ -> cancelDialog() }
+                    .setOnCancelListener { cancelDialog() }.show()
+                return true
+            }
         }
         view.webViewClient = object : WebViewClient() {
             override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
@@ -650,6 +716,12 @@ class MainActivity : AppCompatActivity() {
                     }
                     replyProxy.postMessage(QwenBridgeInjector.formatSuccessReply(req.id, "null"))
                 }
+                "consumeDispatchedOutbox" -> {
+                    val drained = BackgroundSseService.consumeDispatchedOutbox(req.sessionId)
+                    replyProxy.postMessage(
+                        QwenBridgeInjector.formatSuccessReply(req.id, SimpleJson.formatStringArray(drained)),
+                    )
+                }
                 "showConnections" -> {
                     replyProxy.postMessage(QwenBridgeInjector.formatSuccessReply(req.id, "null"))
                     runOnUiThread { showProfiles() }
@@ -746,6 +818,53 @@ class MainActivity : AppCompatActivity() {
                         }
                     }, "qwen-rc-download").start()
                 }
+                "saveBase64File" -> {
+                    val b64 = req.dataBase64
+                    if (b64.isNullOrEmpty()) {
+                        replyProxy.postMessage(QwenBridgeInjector.formatErrorReply(req.id, "invalid_data"))
+                        return@addWebMessageListener
+                    }
+                    val rawName = req.filename ?: "download"
+                    val safeName = rawName.replace(Regex("[\\\\/:*?\"<>|\\x00-\\x1f]+"), "_").trim().ifEmpty { "download" }
+                    val ext = safeName.substringAfterLast('.', "").lowercase()
+                    val mime = req.mimeType?.takeIf { it.isNotBlank() }
+                        ?: MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+                        ?: "application/octet-stream"
+                    Thread({
+                        try {
+                            val bytes = Base64.decode(b64, Base64.DEFAULT)
+                            val values = ContentValues().apply {
+                                put(MediaStore.Downloads.DISPLAY_NAME, safeName)
+                                put(MediaStore.Downloads.MIME_TYPE, mime)
+                                put(MediaStore.Downloads.IS_PENDING, 1)
+                            }
+                            val resolver = applicationContext.contentResolver
+                            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                                ?: throw IllegalStateException("downloads_insert_failed")
+                            try {
+                                resolver.openOutputStream(uri)?.use { out ->
+                                    out.write(bytes)
+                                } ?: throw IllegalStateException("downloads_stream_failed")
+                                val doneValues = ContentValues().apply {
+                                    put(MediaStore.Downloads.IS_PENDING, 0)
+                                }
+                                resolver.update(uri, doneValues, null, null)
+                            } catch (e: Exception) {
+                                try { resolver.delete(uri, null, null) } catch (_: Exception) {}
+                                throw e
+                            }
+                            val resultJson = """{"ok":true,"filename":${QwenBridgeInjector.jsStringLiteral(safeName)},"sizeBytes":${bytes.size}}"""
+                            runOnUiThread {
+                                Toast.makeText(this@MainActivity, "Saved $safeName to Downloads", Toast.LENGTH_SHORT).show()
+                                replyProxy.postMessage(QwenBridgeInjector.formatSuccessReply(req.id, resultJson))
+                            }
+                        } catch (_: Exception) {
+                            runOnUiThread {
+                                replyProxy.postMessage(QwenBridgeInjector.formatErrorReply(req.id, "save_failed"))
+                            }
+                        }
+                    }, "qwen-rc-save-b64").start()
+                }
                 else -> {
                     replyProxy.postMessage(QwenBridgeInjector.formatErrorReply(req.id, "unsupported_method"))
                 }
@@ -778,8 +897,9 @@ class MainActivity : AppCompatActivity() {
                 val view = webView
                 if (view != null && view.parent != null && activeProfile?.id == targetProfile.id && OriginPolicy.isSameOrigin(targetProfile.origin, view.url.orEmpty())) {
                     val sidLit = QwenBridgeInjector.jsStringLiteral(parsed.sessionId)
+                    val cwdLit = QwenBridgeInjector.jsStringLiteral(parsed.cwd)
                     view.evaluateJavascript(
-                        "if (typeof window.__qwenOpenSession === 'function') { window.__qwenOpenSession($sidLit, null); }",
+                        "if (typeof window.__qwenOpenSession === 'function') { window.__qwenOpenSession($sidLit, null, $cwdLit); }",
                         null,
                     )
                     return

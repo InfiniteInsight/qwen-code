@@ -6,7 +6,11 @@ import java.security.MessageDigest
 import java.util.Locale
 
 internal sealed class QwenRcDeepLink {
-    data class OpenSession(val sessionId: String, val eventId: String? = null) : QwenRcDeepLink() {
+    data class OpenSession(
+        val sessionId: String,
+        val eventId: String? = null,
+        val cwd: String? = null,
+    ) : QwenRcDeepLink() {
         fun toNavigation(): ConnectionNavigation =
             ConnectionNavigation(session = sessionId, ui = true, event = eventId)
     }
@@ -45,12 +49,13 @@ internal sealed class QwenRcDeepLink {
             return when (host) {
                 "session" -> {
                     if ("url" in params) return Invalid("daemon override forbidden on session link")
-                    if (params.keys.any { it != "event" }) return Invalid("unsupported session parameter")
+                    if (params.keys.any { it != "event" && it != "cwd" }) return Invalid("unsupported session parameter")
                     val sid = path.removePrefix("/")
                     if (!identifier.matches(sid)) return Invalid("invalid link")
                     val event = params["event"]
                     if (event != null && !eventNumeric.matches(event)) return Invalid("invalid event id")
-                    OpenSession(sid, event)
+                    val cwd = params["cwd"]?.takeIf { it.isNotBlank() && it.length <= 1024 }
+                    OpenSession(sid, event, cwd)
                 }
                 "permission" -> {
                     if ("url" in params) return Invalid("daemon override forbidden on permission link")

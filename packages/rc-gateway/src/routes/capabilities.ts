@@ -9,7 +9,7 @@ import type { RequestHandler } from 'express';
 import type { DaemonCapabilities } from '@qwen-code/sdk';
 import { RC_PROTOCOL_VERSION } from '../mdns/advert.js';
 import type { NativeShellsCapability } from '../nativePush/nativeShells.js';
-import { WRITE, hasScope } from '../scopes.js';
+import { OWNER, WRITE, hasScope } from '../scopes.js';
 
 /**
  * Who is asking, as far as this route's answer is concerned (#165).
@@ -179,6 +179,8 @@ export function createCapabilityRoute(deps: {
   githubClone?: boolean;
   /** #242: true when the /rc/workspace-config-approvals routes are mounted. */
   workspaceConfigApprovals?: boolean;
+  /** True when POST /rc/sessions/:id/restart-daemon is backed by a DaemonPool. */
+  sessionDaemonRestart?: boolean;
   /**
    * The upload size limit the attachment route enforces (#196), so the page
    * can shrink an image to fit before sending it. Omitted when not wired; the
@@ -247,6 +249,15 @@ export function createCapabilityRoute(deps: {
           : [],
         WRITE,
       ),
+      ownerScope:
+        req.rcClient.sessionLockId === undefined &&
+        hasScope(
+          Array.isArray(req.rcClient.scopes)
+            ? (req.rcClient.scopes as string[])
+            : [],
+          OWNER,
+        ),
+      sessionDaemonRestart: deps.sessionDaemonRestart === true,
       // #194 slice D: a terminal on this host can start a conversation the
       // phone then sees (`qwen-rc attach`). The route itself is loopback-only
       // and never reachable from the phone; the flag is here so the page can

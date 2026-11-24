@@ -264,7 +264,8 @@ export type AuditAction =
   // #242: watched workspace policy/routing approval gate.
   | 'policy_workspace_held'
   | 'routing_workspace_held'
-  | 'workspace_config_approved';
+  | 'workspace_config_approved'
+  | 'session_daemon_restarted';
 
 const AUDIT_ACTIONS_LIST = [
   'pairing_redeemed',
@@ -446,6 +447,7 @@ const AUDIT_ACTIONS_LIST = [
   'policy_workspace_held',
   'routing_workspace_held',
   'workspace_config_approved',
+  'session_daemon_restarted',
 ] as const satisfies readonly AuditAction[];
 
 type MissingAuditActions = Exclude<

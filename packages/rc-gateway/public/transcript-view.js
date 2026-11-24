@@ -36,16 +36,18 @@
   var TEXT_ROLES = {
     user: 'you',
     asst: 'assistant',
+    file: 'assistant',
     'thought-live': 'thinking',
   };
 
   // Message, thought, and tool rows render the server frame timestamp when
   // present (#80, #268); rows without item.time omit .stamp rather than
   // reading this browser's clock.
-  var STAMPED = { user: true, asst: true, thought: true };
+  var STAMPED = { user: true, asst: true, file: true, thought: true };
   var STAMPED_SHAPES = {
     user: true,
     asst: true,
+    file: true,
     thought: true,
     'thought-live': true,
     tool: true,
@@ -208,14 +210,38 @@
   // whole value, rather than parsing the alignment back out of it, safe.
   var MD_CELL_TAGS = { th: 1, td: 1 };
 
+  function recordMdFile(mdCtx, wsFile) {
+    if (!mdCtx || !wsFile) return;
+    var k = wsFile.key || wsFile.workspacePath || wsFile.name;
+    if (!k || mdCtx.seen[k]) return;
+    mdCtx.seen[k] = 1;
+    mdCtx.files.push(wsFile);
+  }
+
   // An element for a nesting-1 token, or null to let its children attach to
   // the parent unstyled (an unknown tag, or a link target we will not make).
-  function mdElement(md, t) {
+  function mdElement(md, t, mdCtx) {
     if (!MD_TAGS[t.tag]) return null;
     if (t.type === 'link_open') {
       var href = mdAttrOf(t, 'href');
-      if (href === null || !MD_HREF.test(href) || !md.validateLink(href)) {
-        return null;
+      if (href === null) return null;
+      if (!MD_HREF.test(href) || !md.validateLink(href)) {
+        var wsFile =
+          mdCtx && typeof mdCtx.resolveWorkspaceFile === 'function'
+            ? mdCtx.resolveWorkspaceFile(href)
+            : null;
+        if (!wsFile) return null;
+        recordMdFile(mdCtx, wsFile);
+        var wa = document.createElement('a');
+        wa.setAttribute('href', '#');
+        wa.className = 'md-ws-link';
+        wa.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          if (mdCtx && typeof mdCtx.onDownloadFile === 'function') {
+            mdCtx.onDownloadFile(wsFile, mdCtx.ownerItem);
+          }
+        });
+        return wa;
       }
       var a = document.createElement('a');
       a.setAttribute('href', href);
@@ -232,7 +258,7 @@
     return node;
   }
 
-  function mdLeaf(t) {
+  function mdLeaf(t, mdCtx) {
     switch (t.type) {
       case 'code_inline':
         return el('code', '', t.content);
@@ -253,7 +279,14 @@
         // raw-text line count that estimate() uses.
         return el('br');
       case 'image':
-        // No img element: model-authored text must not fetch a URL it names.
+        // No img element in prose: model-authored text must not hotlink a URL
+        // it names. If the target resolves to a workspace file, record it so
+        // the assistant bubble's inline file strip renders its safe preview.
+        if (mdCtx && typeof mdCtx.resolveWorkspaceFile === 'function') {
+          var src = mdAttrOf(t, 'src');
+          var wsImg = src ? mdCtx.resolveWorkspaceFile(src, t.content) : null;
+          if (wsImg) recordMdFile(mdCtx, wsImg);
+        }
         return t.content ? document.createTextNode(t.content) : null;
       case 'html_block':
       case 'html_inline':
@@ -266,13 +299,13 @@
     }
   }
 
-  function mdWalk(md, tokens, parent) {
+  function mdWalk(md, tokens, parent, mdCtx) {
     var stack = [parent];
     for (var i = 0; i < tokens.length; i++) {
       var t = tokens[i];
       var at = stack[stack.length - 1];
       if (t.type === 'inline') {
-        if (t.children) mdWalk(md, t.children, at);
+        if (t.children) mdWalk(md, t.children, at, mdCtx);
         continue;
       }
       if (t.nesting === -1) {
@@ -285,7 +318,7 @@
         // A tight list's paragraph is hidden: markdown-it emits no element for
         // it but still emits the inline token between, so its children go to
         // the parent.
-        var node = t.hidden ? null : mdElement(md, t);
+        var node = t.hidden ? null : mdElement(md, t, mdCtx);
         if (node) {
           at.appendChild(node);
           stack.push(node);
@@ -294,14 +327,14 @@
         }
         continue;
       }
-      var leaf = mdLeaf(t);
+      var leaf = mdLeaf(t, mdCtx);
       if (leaf) at.appendChild(leaf);
     }
   }
 
   // Markdown text -> nodes, or null when the parser cannot read it (the caller
   // shows the text as typed instead).
-  function renderMarkdown(md, text) {
+  function renderMarkdown(md, text, mdCtx) {
     var tokens;
     try {
       tokens = md.parse(text, {});
@@ -309,7 +342,7 @@
       return null;
     }
     var frag = document.createDocumentFragment();
-    mdWalk(md, tokens, frag);
+    mdWalk(md, tokens, frag, mdCtx);
     return frag;
   }
 
@@ -422,9 +455,16 @@
       // while empty, so a part added later has somewhere to go.
       m.partsBox = null;
       m.partsN = 0;
+      m.filesBox = null;
+      m.fileCards = null;
+      m.mdFiles = null;
       if (item.kind === 'user') {
         m.partsBox = el('div', 'att-list');
         b.appendChild(m.partsBox);
+      } else if (item.kind === 'asst') {
+        m.filesBox = el('div', 'asst-files');
+        m.filesBox.hidden = true;
+        b.appendChild(m.filesBox);
       }
       // A user message the daemon never accepted keeps its echo but says so:
       // the row is already on screen when the POST is in flight, and removing
@@ -445,6 +485,7 @@
         b.appendChild(m.retry);
       }
       if (m.notSent) patchUser(m);
+      else if (item.kind === 'asst') syncAsstFiles(m);
       return b;
     }
     function patchUser(m) {
@@ -622,25 +663,375 @@
       if (m.acts) patchActs(m.acts, m.item);
     }
 
+    var RASTER_MIME_RE = /^image\/(png|jpe?g|gif|webp|avif|bmp)$/i;
+    var RASTER_EXT_RE = /\.(png|jpe?g|gif|webp|avif|bmp)$/i;
+    function isRasterSpec(spec) {
+      if (!spec) return false;
+      var mime = String(spec.mimeType || '').toLowerCase();
+      if (RASTER_MIME_RE.test(mime)) return true;
+      if (mime && mime.indexOf('image/') === 0) return false; // e.g. svg+xml
+      var target = String(spec.workspacePath || spec.name || '');
+      return RASTER_EXT_RE.test(target);
+    }
+    function fileBadgeText(spec) {
+      var target = String((spec && (spec.name || spec.workspacePath)) || '');
+      var dot = target.lastIndexOf('.');
+      if (dot > 0 && dot < target.length - 1) {
+        var ext = target
+          .slice(dot + 1)
+          .replace(/[^a-z0-9]/gi, '')
+          .toUpperCase();
+        if (ext && ext.length <= 6) return ext;
+      }
+      var k = String((spec && spec.kind) || '').toUpperCase();
+      return k && k !== 'OTHER' ? k.slice(0, 6) : 'FILE';
+    }
+    function partToFileSpec(part, index) {
+      var uri = typeof part.uri === 'string' ? part.uri : '';
+      var resolved =
+        uri && typeof opts.resolveWorkspaceFile === 'function'
+          ? opts.resolveWorkspaceFile(uri, part.name)
+          : null;
+      var wsPath = (resolved && resolved.workspacePath) || '';
+      var name =
+        part.name ||
+        (resolved && resolved.name) ||
+        (wsPath ? wsPath.split('/').pop() : 'file');
+      return {
+        key:
+          (wsPath ? 'ws:' + wsPath : '') ||
+          (part.attachmentId ? 'att:' + part.attachmentId : '') ||
+          (uri ? 'uri:' + uri : '') ||
+          'part:' + index + ':' + name,
+        name: name,
+        workspacePath: wsPath,
+        uri: uri,
+        attachmentId: part.attachmentId || '',
+        mimeType: part.mimeType || (resolved && resolved.mimeType) || '',
+        size: typeof part.size === 'number' ? part.size : 0,
+        kind: part.kind || 'file',
+        data: part.data,
+        textData: part.textData,
+        url: part.url,
+      };
+    }
+    function buildFileThumb(spec) {
+      var box = el('div', 'att-image asst-file-preview');
+      var a = el('a', 'att-link');
+      a.setAttribute('target', '_blank');
+      a.setAttribute('rel', 'noopener noreferrer');
+      var img = el('img', 'att-thumb');
+      img.setAttribute('alt', spec.name || 'file preview');
+      a.appendChild(img);
+      box.appendChild(a);
+      function show(url) {
+        img.setAttribute('src', url);
+        a.setAttribute('href', url);
+        box.classList.remove('att-loading');
+      }
+      function fail() {
+        box.hidden = true;
+        box.classList.remove('att-loading');
+      }
+      if (spec.data) {
+        var mime = RASTER_MIME_RE.test(spec.mimeType || '')
+          ? spec.mimeType
+          : 'image/png';
+        img.setAttribute('src', 'data:' + mime + ';base64,' + spec.data);
+        a.addEventListener('click', function () {
+          if (a.getAttribute('href')) return;
+          var u = fullSizeUrl({ data: spec.data, mime: mime });
+          if (u) a.setAttribute('href', u);
+        });
+        return box;
+      }
+      if (spec.url) {
+        show(spec.url);
+        return box;
+      }
+      var loader = null;
+      if (spec.attachmentId && typeof opts.loadAttachment === 'function') {
+        loader = function () {
+          return opts.loadAttachment(spec.attachmentId, spec);
+        };
+      } else if (
+        spec.workspacePath &&
+        typeof opts.loadWorkspaceThumb === 'function'
+      ) {
+        loader = function () {
+          return opts.loadWorkspaceThumb(spec.workspacePath, spec);
+        };
+      }
+      if (!loader) {
+        box.hidden = true;
+        return box;
+      }
+      box.classList.add('att-loading');
+      try {
+        Promise.resolve(loader()).then(function (r) {
+          if (r && r.url) {
+            spec.url = r.url;
+            show(r.url);
+          } else {
+            fail();
+          }
+        }, fail);
+      } catch {
+        fail();
+      }
+      return box;
+    }
+    function canDownloadFileSpec(spec) {
+      if (!spec) return false;
+      if (spec.workspacePath) {
+        return (
+          typeof opts.onDownloadFile === 'function' ||
+          typeof opts.onDownloadToolFile === 'function'
+        );
+      }
+      if (
+        spec.snapshotId ||
+        spec.attachmentId ||
+        spec.data ||
+        typeof spec.textData === 'string'
+      ) {
+        return typeof opts.onDownloadFile === 'function';
+      }
+      return !!(spec.uri && /^https?:\/\//i.test(spec.uri));
+    }
+    function buildFileCard(spec, ownerItem) {
+      var card = el('div', 'asst-file-card');
+      var preview = isRasterSpec(spec) ? buildFileThumb(spec) : null;
+      if (preview) card.appendChild(preview);
+      var row = el('div', 'asst-file-row');
+      var badge = el('span', 'asst-file-ext', fileBadgeText(spec));
+      var info = el('div', 'asst-file-info');
+      var nameEl = el('span', 'asst-file-name', '');
+      var metaEl = el('span', 'asst-file-meta', '');
+      info.appendChild(nameEl);
+      info.appendChild(metaEl);
+      row.appendChild(badge);
+      row.appendChild(info);
+      var extHref =
+        !spec.workspacePath &&
+        !spec.snapshotId &&
+        !spec.attachmentId &&
+        !spec.data &&
+        typeof spec.textData !== 'string' &&
+        spec.uri &&
+        /^https?:\/\//i.test(spec.uri)
+          ? spec.uri
+          : '';
+      var btn = null;
+      var extLink = null;
+      if (extHref) {
+        extLink = el('a', 'tool-dl', 'Open');
+        extLink.setAttribute('href', extHref);
+        extLink.setAttribute('target', '_blank');
+        extLink.setAttribute('rel', 'noopener noreferrer');
+        row.appendChild(extLink);
+      } else {
+        btn = el('button', 'tool-dl', 'Download');
+        btn.type = 'button';
+        btn.addEventListener('click', function (ev) {
+          ev.stopPropagation();
+          var cur = entry.spec;
+          if (typeof opts.onDownloadFile === 'function') {
+            opts.onDownloadFile(cur, ownerItem);
+          } else if (
+            cur.workspacePath &&
+            typeof opts.onDownloadToolFile === 'function'
+          ) {
+            opts.onDownloadToolFile(ownerItem, cur.workspacePath);
+          }
+        });
+        row.appendChild(btn);
+      }
+      card.appendChild(row);
+      var note = el('div', 'tool-dl-note');
+      note.hidden = true;
+      card.appendChild(note);
+      var entry = {
+        key: spec.key || spec.workspacePath || spec.name,
+        spec: spec,
+        card: card,
+        badge: badge,
+        nameEl: nameEl,
+        metaEl: metaEl,
+        btn: btn,
+        extLink: extLink,
+        note: note,
+      };
+      patchFileCard(entry, spec, ownerItem);
+      return entry;
+    }
+    function patchFileCard(entry, spec, ownerItem) {
+      entry.spec = spec;
+      var leaf =
+        spec.name ||
+        (spec.workspacePath
+          ? spec.workspacePath.replace(/\/+$/, '').split('/').pop()
+          : '') ||
+        'file';
+      setText(entry.badge, fileBadgeText(spec));
+      setText(entry.nameEl, leaf);
+      var metaBits = [];
+      if (spec.workspacePath && spec.workspacePath !== leaf) {
+        metaBits.push(spec.workspacePath);
+      } else if (spec.mimeType) {
+        metaBits.push(spec.mimeType);
+      }
+      var sz = partSizeLabel(spec.size || spec.sizeBytes || 0);
+      if (sz) metaBits.push(sz);
+      var metaStr = metaBits.join(' \u00b7 ');
+      setText(entry.metaEl, metaStr);
+      entry.metaEl.hidden = !metaStr;
+      if (entry.btn) {
+        var showBtn = canDownloadFileSpec(spec);
+        entry.btn.hidden = !showBtn;
+        var stateKey = spec.key || spec.workspacePath || leaf;
+        var itemDl =
+          ownerItem && ownerItem.fileDl && ownerItem.fileDl[stateKey];
+        var busy = !!(itemDl ? itemDl.busy : ownerItem && ownerItem.dlBusy);
+        var dlNote = itemDl
+          ? itemDl.note || ''
+          : (ownerItem && ownerItem.dlNote) || '';
+        var label = busy ? 'Downloading...' : 'Download ' + leaf;
+        if (entry.btn.textContent !== label) entry.btn.textContent = label;
+        entry.btn.setAttribute('aria-label', 'Download ' + leaf);
+        if (entry.btn.disabled !== busy) entry.btn.disabled = busy;
+        setText(entry.note, dlNote);
+        entry.note.hidden = !dlNote;
+      }
+    }
+    function syncCardList(box, holder, list, ownerItem) {
+      var prev = holder.cards || [];
+      var byKey = new Map();
+      for (var i = 0; i < prev.length; i++) {
+        byKey.set(prev[i].key, prev[i]);
+      }
+      var next = [];
+      var used = new Set();
+      for (var j = 0; j < list.length; j++) {
+        var spec = list[j];
+        var k = spec.key || spec.workspacePath || spec.name || String(j);
+        if (used.has(k)) continue;
+        used.add(k);
+        var existing = byKey.get(k);
+        if (existing) {
+          patchFileCard(existing, spec, ownerItem);
+          next.push(existing);
+        } else {
+          next.push(buildFileCard(spec, ownerItem));
+        }
+      }
+      prev.forEach(function (c) {
+        if (!used.has(c.key)) c.card.remove();
+      });
+      var cursor = box.firstChild;
+      for (var n = 0; n < next.length; n++) {
+        if (next[n].card === cursor) {
+          cursor = cursor.nextSibling;
+        } else {
+          box.insertBefore(next[n].card, cursor);
+        }
+      }
+      holder.cards = next;
+      var hide = next.length === 0;
+      if (box.hidden !== hide) box.hidden = hide;
+    }
+    function collectAsstFiles(m) {
+      var out = [];
+      var seen = {};
+      var parts = m.item.parts || [];
+      for (var i = 0; i < parts.length; i++) {
+        var ps = partToFileSpec(parts[i], i);
+        if (!seen[ps.key]) {
+          seen[ps.key] = 1;
+          out.push(ps);
+        }
+      }
+      var mdFiles = m.mdFiles || [];
+      for (var j = 0; j < mdFiles.length; j++) {
+        var mf = mdFiles[j];
+        var mk = mf.key || ('ws:' + mf.workspacePath);
+        if (!seen[mk]) {
+          seen[mk] = 1;
+          out.push(mf);
+        }
+      }
+      return out;
+    }
+    function syncAsstFiles(m) {
+      var list = collectAsstFiles(m);
+      var bodyEl = m.mdBody || m.bodyBox;
+      if (bodyEl) {
+        var hideBody = !m.item.text && list.length > 0;
+        if (bodyEl.hidden !== hideBody) bodyEl.hidden = hideBody;
+      }
+      if (!m.filesBox) return;
+      if (!m.fileCards) m.fileCards = { cards: [] };
+      syncCardList(m.filesBox, m.fileCards, list, m.item);
+      if (list.length > 0 && typeof opts.onDiscoverFiles === 'function') {
+        opts.onDiscoverFiles(list, m.item);
+      }
+    }
+
     function buildAsst(m) {
       var b = el('div', 'bubble asst');
       m.role = roleLine('asst', m.item, stampZone);
       b.appendChild(m.role);
       m.mdBody = el('div', 'md');
       m.mdText = null;
+      m.mdFiles = null;
       b.appendChild(m.mdBody);
+      m.filesBox = el('div', 'asst-files');
+      m.filesBox.hidden = true;
+      m.fileCards = { cards: [] };
+      b.appendChild(m.filesBox);
       patchAsst(m);
       return b;
     }
     function patchAsst(m) {
       var text = m.item.text;
-      if (m.mdText === text) return;
-      m.mdText = text;
-      var body = m.mdBody;
-      while (body.firstChild) body.removeChild(body.firstChild);
-      var frag = renderMarkdown(md, text);
-      // A text the parser cannot read is shown as typed, not dropped.
-      body.appendChild(frag || document.createTextNode(text));
+      if (m.mdText !== text) {
+        m.mdText = text;
+        var body = m.mdBody;
+        while (body.firstChild) body.removeChild(body.firstChild);
+        var mdCtx =
+          typeof opts.resolveWorkspaceFile === 'function'
+            ? {
+                resolveWorkspaceFile: opts.resolveWorkspaceFile,
+                onDownloadFile: opts.onDownloadFile,
+                ownerItem: m.item,
+                files: [],
+                seen: {},
+              }
+            : null;
+        var frag = text ? renderMarkdown(md, text, mdCtx) : null;
+        m.mdFiles = mdCtx ? mdCtx.files : null;
+        if (text) {
+          // A text the parser cannot read is shown as typed, not dropped.
+          body.appendChild(frag || document.createTextNode(text));
+        }
+      }
+      syncAsstFiles(m);
+    }
+
+    function buildFileRow(m) {
+      var b = el('div', 'bubble asst asst-file-bubble');
+      m.role = roleLine('file', m.item, stampZone);
+      b.appendChild(m.role);
+      m.filesBox = el('div', 'asst-files');
+      m.fileCards = { cards: [] };
+      b.appendChild(m.filesBox);
+      patchFileRow(m);
+      return b;
+    }
+    function patchFileRow(m) {
+      syncRoleStamp(m.role, m.item, stampZone);
+      var list = m.item.file ? [m.item.file] : [];
+      syncCardList(m.filesBox, m.fileCards, list, m.item);
     }
 
     function buildThought(m) {
@@ -836,38 +1227,28 @@
         if (!m.sub) m.sub = buildSub(m.bubble, m);
         patchSub(m.sub, item.sub, now);
       }
-      var dlPath =
-        typeof opts.toolDownloadPath === 'function'
-          ? opts.toolDownloadPath(item)
-          : '';
-      if (dlPath) {
+      var toolFiles = [];
+      if (typeof opts.resolveToolFiles === 'function') {
+        toolFiles = opts.resolveToolFiles(item) || [];
+      } else if (typeof opts.toolDownloadPath === 'function') {
+        var dlPath = opts.toolDownloadPath(item);
+        if (dlPath) {
+          toolFiles = [
+            {
+              key: 'ws:' + dlPath,
+              name: dlPath.replace(/\/+$/, '').split('/').pop() || dlPath,
+              workspacePath: dlPath,
+            },
+          ];
+        }
+      }
+      if (toolFiles.length > 0) {
         if (!m.fileActs) {
           var box = el('div', 'tool-file-acts');
-          var btn = el('button', 'tool-dl', '');
-          btn.type = 'button';
-          btn.addEventListener('click', function (ev) {
-            ev.stopPropagation();
-            if (typeof opts.onDownloadToolFile === 'function') {
-              opts.onDownloadToolFile(item, m.fileActs.path);
-            }
-          });
-          var note = el('span', 'tool-dl-note');
-          box.appendChild(btn);
-          box.appendChild(note);
           m.bubble.appendChild(box);
-          m.fileActs = { box: box, btn: btn, note: note, path: dlPath };
+          m.fileActs = { box: box, cards: [] };
         }
-        m.fileActs.path = dlPath;
-        var leaf = dlPath.replace(/\/+$/, '').split('/').pop() || dlPath;
-        var btnText = item.dlBusy ? 'Downloading...' : 'Download ' + leaf;
-        if (m.fileActs.btn.textContent !== btnText) {
-          m.fileActs.btn.textContent = btnText;
-        }
-        var busy = !!item.dlBusy;
-        if (m.fileActs.btn.disabled !== busy) m.fileActs.btn.disabled = busy;
-        var dlNote = item.dlNote || '';
-        setText(m.fileActs.note, dlNote);
-        m.fileActs.note.hidden = !dlNote;
+        syncCardList(m.fileActs.box, m.fileActs, toolFiles, item);
       } else if (m.fileActs) {
         m.fileActs.box.remove();
         m.fileActs = null;
@@ -1128,12 +1509,38 @@
         var url = fullSizeUrl(item);
         if (url) a.setAttribute('href', url);
       });
+      if (typeof opts.onDownloadFile === 'function') {
+        var imgExt = String(item.mime || 'image/png')
+          .split('/')[1]
+          .replace('jpeg', 'jpg');
+        var imgName = 'assistant-image.' + (imgExt || 'png');
+        var acts = el('div', 'image-file-acts');
+        var dlBtn = el('button', 'tool-dl', 'Download ' + imgName);
+        dlBtn.type = 'button';
+        dlBtn.setAttribute('aria-label', 'Download ' + imgName);
+        dlBtn.addEventListener('click', function (ev) {
+          ev.stopPropagation();
+          opts.onDownloadFile(
+            {
+              key: 'inline:' + item.id,
+              name: imgName,
+              mimeType: item.mime || 'image/png',
+              size: item.bytes || 0,
+              data: item.data,
+            },
+            item,
+          );
+        });
+        acts.appendChild(dlBtn);
+        b.appendChild(acts);
+      }
       return b;
     }
 
     var BUILD = {
       user: buildText,
       asst: md ? buildAsst : buildText,
+      file: buildFileRow,
       image: buildImage,
       'thought-live': buildText,
       thought: buildThought,
@@ -1166,8 +1573,13 @@
           // With no parser the row was built by buildText and holds a text
           // node, so it keeps the tail append.
           if (md) patchAsst(m);
-          else syncTextNode(m.body, m.item.text);
+          else {
+            syncTextNode(m.body, m.item.text);
+            syncAsstFiles(m);
+          }
           return syncAsstActs(m);
+        case 'file':
+          return patchFileRow(m);
         case 'image':
           // The frame carries the whole image in one go, so there is nothing
           // to write after the build. Falling to the default would run
@@ -1280,20 +1692,43 @@
           );
         case 'asst':
           // #233: inline .turn-acts grows the 16px role head to 36px (+20px).
+          var aparts = item.parts || [];
+          var apartsH = 0;
+          for (var ai = 0; ai < aparts.length; ai++) {
+            apartsH += isRasterSpec(aparts[ai]) ? 276 : 56;
+          }
           return (
             38 +
-            21 * lineCount(item, item.text, perLine) +
-            (item.turnEnd ? 20 : 0)
+            21 *
+              (item.text || !aparts.length
+                ? lineCount(item, item.text, perLine)
+                : 0) +
+            (item.turnEnd ? 20 : 0) +
+            apartsH
           );
+        case 'file':
+          return 38 + (isRasterSpec(item.file) ? 276 : 56);
         case 'image':
           // A thumbnail is capped by the page's CSS at 240px of picture plus
           // the bubble's padding; a row saying it cannot be drawn is one line.
-          return item.data ? 256 : 20;
+          return item.data
+            ? typeof opts.onDownloadFile === 'function'
+              ? 298
+              : 256
+            : 20;
         case 'thought':
           return item.durLabel != null && !item.expanded
             ? 37
             : 38 + 21 * lineCount(item, item.text, perLine);
         case 'tool':
+          var tfiles =
+            typeof opts.resolveToolFiles === 'function'
+              ? opts.resolveToolFiles(item) || []
+              : [];
+          var tfilesH = 0;
+          for (var ti = 0; ti < tfiles.length; ti++) {
+            tfilesH += isRasterSpec(tfiles[ti]) ? 276 : 56;
+          }
           return (
             (item.sub
               ? 70 +
@@ -1303,7 +1738,8 @@
               : 37) +
             (item.expanded && toolHasDetail(item)
               ? 21 * lineCount(item, toolDetailText(item), perLine)
-              : 0)
+              : 0) +
+            tfilesH
           );
         case 'system':
           return 20;
@@ -1935,10 +2371,13 @@
         if (pendingPlace && rendered()) goToPlace();
         if (written.length) measureRows(written, false);
         setSizerHeight();
+        if (pendingEnd && scroller.clientHeight > 0) toEnd();
         // Measuring newly mounted rows can move the others or change which
         // rows are wanted: repeat (bounded) within this frame.
-        for (var round = 0; round < 3; round++) {
-          if (!placeRows(now)) break;
+        for (var round = 0; round < 4; round++) {
+          var changed = placeRows(now);
+          if (pendingEnd && scroller.clientHeight > 0) toEnd();
+          if (!changed) break;
         }
         // Applies followOnAppend / end anchoring for this update.
         virtualizer._willUpdate();
@@ -2227,7 +2666,7 @@
 
     // Derive everything from the event and `items`: during an append the
     // model's own pointers (curAsst, forkItem, ...) may not be set yet.
-    var unsubscribe = model.subscribe(function (ev) {
+    function onModelEvent(ev) {
       if (ev.type === 'append') {
         structural = true;
         if (isLive(ev.item)) live.add(ev.item);
@@ -2245,7 +2684,8 @@
       if (nearBottom && !quiet) follow = true;
       syncTimer();
       schedule();
-    });
+    }
+    var unsubscribe = model.subscribe(onModelEvent);
 
     for (var i = 0; i < items.length; i++) {
       if (isLive(items[i])) live.add(items[i]);
@@ -2352,6 +2792,94 @@
         stampZone = next;
         restamp = true;
         schedule();
+      },
+      // Instant zero-reload swap onto another session's TranscriptModel.
+      // Unmounts the outgoing viewport rows, binds `model` and `items` to the
+      // incoming model, and restores `place` (or pins to the end) in one pass.
+      setModel: function (nextModel, place) {
+        if (destroyed || !nextModel) return;
+        if (nextModel === model) {
+          if (
+            place &&
+            !place.end &&
+            place.item &&
+            items.indexOf(place.item) >= 0
+          ) {
+            pendingPlace = {
+              item: place.item,
+              top:
+                typeof place.top === 'number' && isFinite(place.top)
+                  ? place.top
+                  : 0,
+            };
+          } else {
+            pendingEnd = true;
+            follow = true;
+          }
+          schedule();
+          return;
+        }
+        unsubscribe();
+        var oldIds = [];
+        mounted.forEach(function (_, id) {
+          oldIds.push(id);
+        });
+        for (var oi = 0; oi < oldIds.length; oi++) unmount(oldIds[oi]);
+        if (virtualizer) virtualizer.measureElement(null);
+        dirty.clear();
+        live.clear();
+        lineCache = new WeakMap();
+        model = nextModel;
+        items = model.items;
+        unsubscribe = model.subscribe(onModelEvent);
+        for (var mi = 0; mi < items.length; mi++) {
+          if (isLive(items[mi])) live.add(items[mi]);
+        }
+        syncTimer();
+        find = null;
+        pendingFocus = null;
+        findStale = true;
+        hold = null;
+        relayoutFrom = null;
+        edgeCarry = 0;
+        edgeAnchorNode = null;
+        structural = true;
+        if (
+          place &&
+          !place.end &&
+          place.item &&
+          items.indexOf(place.item) >= 0
+        ) {
+          pendingPlace = {
+            item: place.item,
+            top:
+              typeof place.top === 'number' && isFinite(place.top)
+                ? place.top
+                : 0,
+          };
+          pendingEnd = false;
+          follow = false;
+        } else {
+          pendingPlace = null;
+          pendingEnd = true;
+          follow = true;
+          nearBottom = true;
+        }
+        if (virtualizer) {
+          virtualizer.measure();
+          vopts.count = items.length;
+          virtualizer.setOptions(vopts);
+          if (pendingEnd && scroller.clientHeight > 0) toEnd();
+        }
+        if (scroller.clientHeight > 0) {
+          if (rafId) {
+            cancelAnimationFrame(rafId);
+            rafId = 0;
+          }
+          pass();
+        } else {
+          schedule();
+        }
       },
       destroy: function () {
         if (destroyed) return;
