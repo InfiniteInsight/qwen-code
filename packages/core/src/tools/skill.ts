@@ -23,6 +23,7 @@ import {
 import path from 'path';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { recordAutoSkillUsage } from '../skills/skill-curator.js';
+import { getCurrentToolCallSource } from '../code-mode/tool-call-runtime.js';
 
 const debugLogger = createDebugLogger('SKILL');
 
@@ -376,11 +377,30 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       (name: string, content?: string, skill?: SkillConfig) => {
         this.loadedSkillNames.add(name);
         if (content !== undefined) {
+          const previousName = this.loadedSkillContents.get(content);
           this.loadedSkillContents.set(content, name);
-          this.loadedSkillContentByName.set(name, {
+          const load = {
             content,
             restrictionNames: skillRestrictionNames(skill ?? { name }),
-          });
+          };
+          this.loadedSkillContentByName.set(name, load);
+          // Only undo the body registered by this cancelled nested call.
+          getCurrentToolCallSource()?.signal?.addEventListener(
+            'abort',
+            () => {
+              if (this.loadedSkillContentByName.get(name) !== load) return;
+              this.loadedSkillNames.delete(name);
+              this.loadedSkillContentByName.delete(name);
+              if (this.loadedSkillContents.get(content) === name) {
+                if (previousName === undefined) {
+                  this.loadedSkillContents.delete(content);
+                } else {
+                  this.loadedSkillContents.set(content, previousName);
+                }
+              }
+            },
+            { once: true },
+          );
         }
       },
       null,
@@ -779,6 +799,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     _updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
     const commandExecutor = this.getCommandExecutor();
+    const nestedSignal = getCurrentToolCallSource() ? signal : undefined;
     if (this.isSkillHidden(this.params.skill)) {
       let hiddenCommandFallbackAttempted = false;
       if (commandExecutor) {
@@ -845,6 +866,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       const skill = await this.skillManager.loadSkillForRuntime(
         this.params.skill,
       );
+      nestedSignal?.throwIfAborted();
       if (skill && !this.config.isSkillEnabled(skill)) {
         return this.executeDisabledSkill(signal);
       }
@@ -945,6 +967,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         }
         activationWarning = ` Warning: review workflow activation failed (${error.message}); workflow dispatch may be unavailable.`;
       }
+      nestedSignal?.throwIfAborted();
 
       // Prevent re-invoking an already-loaded skill from appending
       // duplicate instructions to context. The first invocation
@@ -978,6 +1001,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         modelOverride: skill.model,
       };
     } catch (error) {
+      nestedSignal?.throwIfAborted();
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       debugLogger.error(`[SkillsTool] Error using skill: ${errorMessage}`);

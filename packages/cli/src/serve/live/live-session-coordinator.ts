@@ -411,7 +411,7 @@ function workerIdFromEvent(event: BridgeEvent): string | undefined {
   const rawOutput = update['rawOutput'];
   if (typeof rawOutput !== 'string') return undefined;
   const match =
-    /^\[🧵 ([A-Za-z0-9._:-]{1,8})\]\(qwen-session:\/\/([A-Za-z0-9._:-]{1,128})\) (?:started|completed(?: \(stopReason: [A-Za-z0-9._:-]{1,64}\))?)$/.exec(
+    /^\[([A-Za-z0-9._:-]{1,8})\]\(qwen-session:\/\/([A-Za-z0-9._:-]{1,128})\) (?:started|completed(?: \(stopReason: [A-Za-z0-9._:-]{1,64}\))?)$/.exec(
       rawOutput,
     );
   if (!match?.[1] || !match[2] || match[1] !== match[2].slice(0, 8)) {
@@ -770,8 +770,8 @@ export class LiveSessionCoordinator {
     runtime: WorkspaceRuntime,
   ): Promise<SessionListItem | undefined> {
     const service = new SessionService(runtime.workspaceCwd);
-    let cursor: number | undefined;
-    const seenCursors = new Set<number>();
+    let cursor: number | string | undefined;
+    const seenCursors = new Set<number | string>();
     while (true) {
       const page = await service.listSessions({
         size: SESSION_SCAN_SIZE,
@@ -1380,19 +1380,13 @@ export class LiveSessionCoordinator {
         error: 'Live Voice could not persist the final transcript.',
       };
     }
-    if (!this.isActive(context)) {
-      if (context.stopDrainTimer) clearTimeout(context.stopDrainTimer);
-      context.stopDrainTimer = undefined;
-      const finish = context.finishStop;
-      context.finishStop = undefined;
-      finish?.(outcome);
-      return;
+    if (this.isActive(context)) {
+      if (discardPendingInput) {
+        this.invalidateRealtime(context);
+        realtime?.close({ discardPendingInput: true });
+      }
+      await this.closeContext(context);
     }
-    if (discardPendingInput) {
-      this.invalidateRealtime(context);
-      realtime?.close({ discardPendingInput: true });
-    }
-    await this.closeContext(context);
     if (!this.isActive(context) && !context.finishStop) return;
     if (context.stopDrainTimer) clearTimeout(context.stopDrainTimer);
     context.stopDrainTimer = undefined;
@@ -1406,21 +1400,26 @@ export class LiveSessionCoordinator {
     error: string,
     discardPendingInput: boolean,
   ): void {
-    if (!this.isActive(context) || !context.finishStop) return;
-    context.stopDrainTimer = undefined;
-    if (discardPendingInput) {
-      const realtime = context.realtime;
-      this.invalidateRealtime(context);
-      realtime?.close({ discardPendingInput: true });
-    }
-    if (context.runtime && context.coordinator) {
-      void context.runtime.bridge
-        .setSessionLiveConversationActive(context.coordinator.sessionId, false)
-        .catch(() => undefined);
-    }
+    if (!context.finishStop) return;
     const finish = context.finishStop;
     context.finishStop = undefined;
-    this.closeContextNow(context);
+    context.stopDrainTimer = undefined;
+    if (this.isActive(context)) {
+      if (discardPendingInput) {
+        const realtime = context.realtime;
+        this.invalidateRealtime(context);
+        realtime?.close({ discardPendingInput: true });
+      }
+      if (context.runtime && context.coordinator) {
+        void context.runtime.bridge
+          .setSessionLiveConversationActive(
+            context.coordinator.sessionId,
+            false,
+          )
+          .catch(() => undefined);
+      }
+      this.closeContextNow(context);
+    }
     finish({ error });
   }
 

@@ -5,6 +5,7 @@
  */
 
 import { useCallback } from 'react';
+import type { WorkflowModeSnapshot } from '@qwen-code/qwen-code-core/core/workflow-mode.js';
 import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import { randomUUID } from 'node:crypto';
 import {
@@ -19,6 +20,7 @@ import {
   buildResumedHistoryItems,
   applyCollapsePolicyAndSummary,
   computeResumedPromptCountSeed,
+  computeResumedUserTurnCount,
 } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -72,7 +74,7 @@ export interface UseBranchCommandOptions {
     'clearItems' | 'loadHistory' | 'addItem'
   >;
   startNewSession: (sessionId: string) => void;
-  seedPromptCount: (count: number) => void;
+  seedPromptCount: (count: number, userPromptCountSeed?: number) => void;
   clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
@@ -136,8 +138,10 @@ export function useBranchCommand(
       // before the latch could name a session a concurrent swap's rollback
       // is about to change (#9844).
       let oldSessionId = config.getSessionId();
+      let oldWorkflowMode: WorkflowModeSnapshot | undefined;
       let coreSwapped = false;
       let uiSwapped = false;
+      let toolsInvalidated = false;
       let forkCreated = false;
       // Whether THIS attempt opened the swap transaction: the catch block
       // may only settle a transaction it opened itself. A latch-rejected
@@ -172,6 +176,7 @@ export function useBranchCommand(
         // session the user is on, and forking/rolling back against that
         // stale id would land on a session the UI never shows (#9844).
         oldSessionId = config.getSessionId();
+        oldWorkflowMode = await config.captureWorkflowModeState?.();
 
         // 1. Flush outgoing recorder. A degraded source must not fork because
         //    the visible, unpersisted tail would be silently missing.
@@ -258,6 +263,9 @@ export function useBranchCommand(
         if (switchDaemonSession) {
           await switchDaemonSession(newSessionId);
         }
+        const modSession = getInteractiveModSession(config);
+        modSession?.invalidateTools();
+        toolsInvalidated = modSession !== undefined;
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
         await waitForGoalRuntime(config);
@@ -289,13 +297,14 @@ export function useBranchCommand(
             resumed.conversation.messages,
             newSessionId,
           ),
+          computeResumedUserTurnCount(resumed.conversation.messages),
         );
         uiSwapped = true;
         config.getLlmClient()?.commitTelemetrySwap?.();
         await getInteractiveModSession(config)?.syncSession('resume');
         clearPendingState?.();
         historyManager.clearItems();
-        historyManager.loadHistory(uiHistoryItems);
+        historyManager.loadHistory(uiHistoryItems, newSessionId);
         resetBackgroundStateForSessionSwitch(config);
 
         // 9. Apply the already-persisted title to the prompt bar.
@@ -342,7 +351,10 @@ export function useBranchCommand(
           // failures (hook, remount, announce) are non-fatal and
           // surfaced as an error item without unwinding the swap.
           try {
+            getInteractiveModSession(config)?.invalidateTools();
             config.startNewSession(oldSessionId, prevSessionData);
+            if (oldWorkflowMode)
+              config.restoreWorkflowModeState(oldWorkflowMode);
             // Re-hydrate chat history against the restored session. Best-
             // effort: if this throws too, sessionId + recorder are still
             // back on the parent, which is the load-bearing invariant.
@@ -360,6 +372,9 @@ export function useBranchCommand(
           // replays the parent's history on top of the fork's already-
           // committed replay, and restore overwrites rather than subtracts,
           // so the final state is exactly pre-swap (#9833).
+          if (toolsInvalidated && config.getSessionId() === oldSessionId) {
+            await getInteractiveModSession(config)?.restoreTools();
+          }
           config.getLlmClient()?.abortTelemetrySwap?.();
         } else if (swapOpened) {
           // Either the core swap never happened (nothing was replayed — the
@@ -370,6 +385,13 @@ export function useBranchCommand(
           // `swapOpened = true`, so it owns no transaction here, and the
           // shared slot may hold a different in-flight swap (#9844). See
           // beginTelemetrySwap's JSDoc in core client.ts.
+          if (
+            toolsInvalidated &&
+            !uiSwapped &&
+            config.getSessionId() === oldSessionId
+          ) {
+            await getInteractiveModSession(config)?.restoreTools();
+          }
           config.getLlmClient()?.commitTelemetrySwap?.();
         }
         if (forkCreated && !uiSwapped) {

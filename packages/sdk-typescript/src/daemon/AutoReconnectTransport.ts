@@ -75,12 +75,12 @@ export class AutoReconnectTransport implements DaemonTransport {
       new RestSseTransport(this.baseUrl, this.token, this.fetchFn);
   }
 
-  get supportsReplay(): boolean {
-    return this.inner.supportsReplay;
-  }
-
   get type(): DaemonTransportType {
     return this.inner.type;
+  }
+
+  get supportsReplay(): boolean {
+    return this.inner.supportsReplay;
   }
 
   get connected(): boolean {

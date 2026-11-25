@@ -208,6 +208,7 @@ export const renameCommand: SlashCommand = {
           config,
           signal,
           titleDisplayTexts,
+          config.getChatRecordingService()?.getModPromptKeysForTitle?.(),
         );
         if (
           !outcome.ok &&

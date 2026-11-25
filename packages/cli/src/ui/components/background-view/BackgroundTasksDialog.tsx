@@ -1626,7 +1626,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   availableTerminalHeight,
   terminalWidth,
 }) => {
-  const { entries, selectedIndex, dialogOpen, dialogMode } =
+  const { entries, selectedIndex, dialogOpen, dialogMode, autoOpened } =
     useBackgroundTaskViewState();
   const isDetailMode =
     dialogMode === 'detail' || dialogMode === 'detail-from-panel';
@@ -1636,6 +1636,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     closeDialog,
     enterDetail,
     exitDetail,
+    acknowledgeAutoOpen,
     cancelSelected,
     resumeSelected,
     sendMessageToSelected,
@@ -1935,11 +1936,9 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     }
     const seen = initialDetailStatusRef.current;
     if (seen && seen.entryId !== selectedEntryId) {
-      // Selection is index-based while the roster re-sorts on every
-      // status change, so a *different* entry can move into the pinned
-      // index while the viewed entry is still alive in the list.
-      // Re-anchor the selection to its new position; only exit when the
-      // entry is genuinely gone.
+      // The provider preserves selection by identity across roster updates.
+      // Defensively restore the viewed entry if another action changed the
+      // selection while detail was open; only exit when the entry is gone.
       const driftedIndex = entries.findIndex(
         (candidate) => entryId(candidate) === seen.entryId,
       );
@@ -2128,6 +2127,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         key.sequence === 'm' &&
         !key.ctrl &&
         !key.meta &&
+        !(autoOpened && dialogMode === 'list') &&
         isMessageableAgent(selectedEntry) &&
         activeEntryKey
       ) {
@@ -2138,6 +2138,15 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       }
 
       if (dialogMode === 'list') {
+        // Only keys prose cannot produce acknowledge the auto-open. The
+        // selection matchers also carry bare `k`/`j` and Ctrl+P/Ctrl+N, and
+        // ordinary typed letters satisfy them — acknowledging on those let
+        // the next letter of the same sentence cancel or pause the run
+        // (#16432 R2-1). Bare k/j still move the selection; the disarm
+        // simply stays armed until a real arrow key arrives.
+        if (key.name === 'up' || key.name === 'down') {
+          acknowledgeAutoOpen();
+        }
         if (keyMatchers[Command.SELECTION_UP](key)) {
           moveSelectionUp();
           setPendingCancelEntryId(null);
@@ -2146,6 +2155,22 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
         if (keyMatchers[Command.SELECTION_DOWN](key)) {
           moveSelectionDown();
           setPendingCancelEntryId(null);
+          return;
+        }
+        // An auto-open lands mid-keystroke and keypress dispatch is a
+        // broadcast, so a letter still aimed at the unmounted composer
+        // would cancel or pause the run, and Enter would arm the approval.
+        // Disarm those keys until a navigation key (above) acknowledges
+        // the open; user-initiated opens never carry the tag (#16432).
+        if (
+          autoOpened &&
+          (key.name === 'return' ||
+            ((key.sequence === 'x' ||
+              key.sequence === 'p' ||
+              key.sequence === 'r') &&
+              !key.ctrl &&
+              !key.meta))
+        ) {
           return;
         }
         if (key.name === 'return') {
@@ -2278,17 +2303,27 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       'Esc cancel',
     );
   } else if (dialogMode === 'list') {
-    hints.push('\u2191/\u2193 select', 'Enter view');
-    if (selectedAllowsMessage) hints.push('m message');
-    if (selectedEntry && isStoppableEntry(selectedEntry)) {
-      hints.push('x stop');
+    if (autoOpened) {
+      // Every destructive list key is swallowed until a navigation key
+      // acknowledges the auto-open, so advertising `Enter view` / `x stop`
+      // here would document keys that do nothing (#16432 R3-3).
+      hints.push('\u2191/\u2193 activate');
+    } else {
+      hints.push('\u2191/\u2193 select', 'Enter view');
+      if (selectedAllowsMessage) hints.push('m message');
+      if (selectedEntry && isStoppableEntry(selectedEntry)) {
+        hints.push('x stop');
+      }
+      if (selectedWorkflowPauseHint) hints.push(selectedWorkflowPauseHint);
+      if (selectedEntryAllowsResume) hints.push('r resume');
+      if (
+        selectedEntry?.kind === 'agent' &&
+        selectedEntry.status === 'paused'
+      ) {
+        hints.push('x abandon');
+      }
+      hints.push('\u2190/Esc close');
     }
-    if (selectedWorkflowPauseHint) hints.push(selectedWorkflowPauseHint);
-    if (selectedEntryAllowsResume) hints.push('r resume');
-    if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {
-      hints.push('x abandon');
-    }
-    hints.push('\u2190/Esc close');
   } else {
     hints.push('\u2190 back', 'Esc close');
     if (selectedAllowsMessage) hints.push('m message');

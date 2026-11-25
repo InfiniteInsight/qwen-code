@@ -43,6 +43,7 @@ import type {
   SlashCommandProcessorResult,
   HistoryItem,
   ConfirmationRequest,
+  ShellConfirmationRequest,
 } from '../types.js';
 import { MessageType } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -53,6 +54,7 @@ import {
 } from '../commands/types.js';
 import type { RecentSlashCommand } from './useSlashCompletion.js';
 import { CommandService } from '../../services/CommandService.js';
+import { rewindCommand } from '../commands/rewindCommand.js';
 import {
   getInteractiveModSession,
   isModRecoveryCommand,
@@ -88,9 +90,9 @@ import {
   sanitizeTerminalText,
   stripUnsafeCharacters,
 } from '../utils/textUtils.js';
-import { useKeypress } from './useKeypress.js';
 import { isPickerOnlyModelInvocation } from '../commands/modelCommand.js';
 import { quitCommand } from '../commands/quitCommand.js';
+import { useSubscriptionCommandVisibility } from './use-subscription-command-visibility.js';
 import {
   type ExtensionUpdateAction,
   type ExtensionUpdateStatus,
@@ -217,7 +219,7 @@ export interface SlashCommandProcessorActions {
   openMcpDialog: () => void;
   openHooksDialog: () => void;
   openStatsDialog: () => void;
-  openRewindSelector: () => void;
+  openRewindSelector: (origin?: 'slash-command') => void;
   openDiffDialog: () => void;
   openHelpDialog: () => void;
   clearPendingState: () => void;
@@ -235,7 +237,6 @@ export const useSlashCommandProcessor = (
   loadHistory: UseHistoryManagerReturn['loadHistory'],
   refreshStatic: () => void,
   toggleVimEnabled: () => Promise<boolean>,
-  isProcessing: boolean,
   setIsProcessing: (isProcessing: boolean) => void,
   isIdleRef: MutableRefObject<boolean>,
   setMemoryFileCount: (count: number) => void,
@@ -272,6 +273,7 @@ export const useSlashCommandProcessor = (
 
   const { stats: sessionStats, startNewSession } = useSessionStats();
   const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
+  const availableCommands = useSubscriptionCommandVisibility(commands, config);
   const [recentCommands, setRecentCommands] = useState<
     ReadonlyMap<string, RecentSlashCommand>
   >(new Map());
@@ -434,14 +436,26 @@ export const useSlashCommandProcessor = (
   const activeCommandRef = useRef<{
     controller: AbortController;
     canCancel: boolean;
+    committing: boolean;
   } | null>(null);
+  const [commandCancellationBlocked, setCommandCancellationBlocked] =
+    useState(false);
+
+  const isCommandCancellationBlocked = useCallback(
+    () => activeCommandRef.current?.canCancel === false,
+    [],
+  );
+  const isCommandCommitting = useCallback(
+    () => activeCommandRef.current?.committing === true,
+    [],
+  );
 
   const cancelSlashCommand = useCallback(() => {
-    cancelBtw();
-    if (!activeCommandRef.current?.canCancel) {
-      return;
+    const active = activeCommandRef.current;
+    if (!active?.canCancel || active.controller.signal.aborted) {
+      return false;
     }
-    activeCommandRef.current.controller.abort();
+    active.controller.abort();
     addItem(
       {
         type: MessageType.INFO,
@@ -449,18 +463,9 @@ export const useSlashCommandProcessor = (
       },
       Date.now(),
     );
-    setPendingItem(null);
     setIsProcessing(false);
-  }, [addItem, setIsProcessing, cancelBtw]);
-
-  useKeypress(
-    (key) => {
-      if (key.name === 'escape') {
-        cancelSlashCommand();
-      }
-    },
-    { isActive: isProcessing },
-  );
+    return true;
+  }, [addItem, setIsProcessing]);
 
   const pendingHistoryItems = useMemo(() => {
     const items: HistoryItemWithoutId[] = [];
@@ -546,16 +551,16 @@ export const useSlashCommandProcessor = (
           return historyRef.current;
         },
         addItem,
-        clear: () => {
+        clear: (sessionId) => {
           cancelBtw();
           actions.clearPendingState();
-          clearItems();
+          clearItems(sessionId);
           clearScreen();
           refreshStatic();
           setSessionName?.(null);
         },
         clearPendingState: actions.clearPendingState,
-        loadHistory,
+        loadHistory: (history) => loadHistory(history),
         refreshStatic,
         setDebugMessage: actions.setDebugMessage,
         pendingItem,
@@ -909,6 +914,8 @@ export const useSlashCommandProcessor = (
       existingInvocationItemId?: number,
       // Identity shared by the invocation item and submitted prompt.
       invocationPromptId?: string,
+      isCurrentSubmission?: () => boolean,
+      submissionSignal?: AbortSignal,
     ): Promise<SlashCommandProcessorResult | false> => {
       if (typeof rawQuery !== 'string') {
         return false;
@@ -922,11 +929,15 @@ export const useSlashCommandProcessor = (
         return false;
       }
 
+      if (isCommandCommitting() || submissionSignal?.aborted) {
+        return { type: 'handled' };
+      }
+
       let {
         commandToExecute,
         args,
         canonicalPath: resolvedCommandPath,
-      } = parseSlashCommand(trimmed, commands);
+      } = parseSlashCommand(trimmed, availableCommands);
 
       if (!commandToExecute) {
         const fallback = parseSlashCommand(trimmed, [quitCommand]);
@@ -942,6 +953,17 @@ export const useSlashCommandProcessor = (
         }
       }
 
+      // A built-in quit can exit a non-cancellable action without taking
+      // ownership away from it while exit cleanup is in progress.
+      const cancellationBlocked = isCommandCancellationBlocked();
+      if (
+        cancellationBlocked &&
+        (commandToExecute?.kind !== CommandKind.BUILT_IN ||
+          commandToExecute.name !== quitCommand.name)
+      ) {
+        return { type: 'handled' };
+      }
+
       const recordedItems: HistoryItemWithoutId[] = [];
       const recordItem = (item: HistoryItemWithoutId) => {
         recordedItems.push(item);
@@ -954,12 +976,33 @@ export const useSlashCommandProcessor = (
         return addItem(item, timestamp);
       };
 
-      setIsProcessing(true);
-
       // Create a new AbortController for this command execution
       const abortController = new AbortController();
-      const activeCommand = { controller: abortController, canCancel: true };
-      activeCommandRef.current = activeCommand;
+      const activeCommand = {
+        controller: abortController,
+        canCancel: true,
+        committing: false,
+      };
+      if (!cancellationBlocked) {
+        activeCommandRef.current = activeCommand;
+        setIsProcessing(true);
+      }
+      const blockCancellation = () => {
+        activeCommand.canCancel = false;
+        if (activeCommandRef.current === activeCommand) {
+          setCommandCancellationBlocked(true);
+        }
+      };
+      // A shortcut can replace the active command while a typed command is
+      // running. Its submission still needs to abort the original action.
+      const cancelFromSubmission = () => {
+        if (!activeCommand.canCancel) return;
+        abortController.abort(submissionSignal?.reason);
+        if (activeCommandRef.current === activeCommand) {
+          setIsProcessing(false);
+        }
+      };
+      let commandPendingItem: HistoryItemWithoutId | null = null;
 
       const userMessageTimestamp = Date.now();
       let invocationItemId = existingInvocationItemId;
@@ -1019,13 +1062,20 @@ export const useSlashCommandProcessor = (
       };
 
       try {
+        submissionSignal?.addEventListener('abort', cancelFromSubmission, {
+          once: true,
+        });
         // Some built-ins invoke models directly, before normal prompt dispatch.
         const mods = getInteractiveModSession(config);
         if (mods && !isModRecoveryCommand(commandToExecute)) {
           await mods.ready;
         }
+        if (abortController.signal.aborted) return { type: 'handled' };
         // Handle stacked skill invocations (e.g. /feat-dev /e2e-testing implement X)
-        const stackedResult = parseStackedSlashCommands(trimmed, commands);
+        const stackedResult = parseStackedSlashCommands(
+          trimmed,
+          availableCommands,
+        );
         if (stackedResult.skills.length >= 2) {
           const combinedContent: PartListUnion[] = [];
           let firstModelOverride: string | undefined;
@@ -1201,15 +1251,53 @@ export const useSlashCommandProcessor = (
               ...commandContext,
               ui: {
                 ...commandContext.ui,
+                get history() {
+                  return commandContext.ui.history;
+                },
                 addItem: addItemWithRecording,
+                setPendingItem(item) {
+                  if (abortController.signal.aborted) return;
+                  commandPendingItem = item;
+                  setPendingItem(item);
+                },
+                // A typed command's own submission marks the session busy
+                // before its action runs, so the app-wide ref would refuse
+                // idle-only commands (/branch, /cd, /fork, ...) every time.
+                // A built-in dispatched by a submission that started idle
+                // reads idle while that submission stays current.
+                isIdleRef:
+                  commandToExecute.kind === CommandKind.BUILT_IN &&
+                  isCurrentSubmission
+                    ? {
+                        get current() {
+                          return (
+                            activeCommandRef.current === activeCommand &&
+                            isCurrentSubmission()
+                          );
+                        },
+                      }
+                    : commandContext.ui.isIdleRef,
               },
               invocation: {
                 raw: trimmed,
                 name: commandToExecute.name,
                 args,
+                historyItemId: invocationItemId,
               },
               overwriteConfirmed,
               abortSignal: abortController.signal,
+              beginCommit() {
+                if (
+                  activeCommandRef.current !== activeCommand ||
+                  abortController.signal.aborted ||
+                  !fullCommandContext.ui.isIdleRef.current
+                ) {
+                  return false;
+                }
+                activeCommand.committing = true;
+                blockCancellation();
+                return true;
+              },
             };
 
             // If a one-time list is provided for a "Proceed" action, temporarily
@@ -1235,7 +1323,7 @@ export const useSlashCommandProcessor = (
                 { once: true },
               );
             });
-            activeCommand.canCancel = commandToExecute.canCancel !== false;
+            if (commandToExecute.canCancel === false) blockCancellation();
             const result = abortController.signal.aborted
               ? undefined
               : await Promise.race([
@@ -1255,6 +1343,11 @@ export const useSlashCommandProcessor = (
                     type: 'schedule_tool',
                     toolName: result.toolName,
                     toolArgs: result.toolArgs,
+                    ...(result.restoreResponseBinding
+                      ? {
+                          restoreResponseBinding: result.restoreResponseBinding,
+                        }
+                      : {}),
                   };
                 case 'message':
                   // Picker-shaped commands can still reject their arguments
@@ -1413,12 +1506,17 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'resume':
                       if (result.sessionId) {
-                        await actions.handleResume(result.sessionId);
+                        if (fullCommandContext.beginCommit?.() !== false) {
+                          await actions.handleResume(result.sessionId);
+                        }
                       } else {
                         actions.openResumeDialog(result.matchedSessions);
                       }
                       return { type: 'handled' };
                     case 'branch':
+                      if (fullCommandContext.beginCommit?.() === false) {
+                        return { type: 'handled' };
+                      }
                       // Must be awaited: `/branch` swaps core + UI session
                       // state asynchronously, and a non-awaited call lets
                       // this dispatcher return `handled` while the swap is
@@ -1434,7 +1532,12 @@ export const useSlashCommandProcessor = (
                       actions.openExtensionsManagerDialog();
                       return { type: 'handled' };
                     case 'rewind':
-                      actions.openRewindSelector();
+                      actions.openRewindSelector(
+                        commandToExecute.kind === CommandKind.BUILT_IN &&
+                          commandToExecute.action === rewindCommand.action
+                          ? 'slash-command'
+                          : undefined,
+                      );
                       return { type: 'handled' };
                     case 'diff':
                       actions.openDiffDialog();
@@ -1531,37 +1634,25 @@ export const useSlashCommandProcessor = (
                     outcome: ToolConfirmationOutcome;
                     approvedCommands?: string[];
                   }>((resolve) => {
-                    const onAbort = () => {
-                      setShellConfirmationRequest(null);
-                      resolve({
-                        outcome: ToolConfirmationOutcome.Cancel,
-                        approvedCommands: [],
-                      });
-                    };
-                    if (abortController.signal.aborted) {
-                      onAbort();
-                      return;
-                    }
-                    abortController.signal.addEventListener('abort', onAbort, {
-                      once: true,
-                    });
-                    setShellConfirmationRequest({
+                    const request: ShellConfirmationRequest = {
                       commands: result.commandsToConfirm,
                       onConfirm: (
                         resolvedOutcome,
                         resolvedApprovedCommands,
                       ) => {
-                        abortController.signal.removeEventListener(
-                          'abort',
-                          onAbort,
+                        setShellConfirmationRequest((current) =>
+                          current === request ? null : current,
                         );
-                        setShellConfirmationRequest(null); // Close the dialog
                         resolve({
                           outcome: resolvedOutcome,
                           approvedCommands: resolvedApprovedCommands,
                         });
                       },
-                    });
+                    };
+                    setShellConfirmationRequest(request);
+                    void abortPromise.then(() =>
+                      request.onConfirm(ToolConfirmationOutcome.Cancel),
+                    );
                   });
 
                   if (
@@ -1587,40 +1678,30 @@ export const useSlashCommandProcessor = (
                     undefined,
                     invocationItemId,
                     invocationPromptId,
+                    isCurrentSubmission,
+                    submissionSignal,
                   );
                 }
                 case 'confirm_action': {
                   const { confirmed } = await new Promise<{
                     confirmed: boolean;
                   }>((resolve) => {
-                    const onAbort = () => {
-                      setConfirmationRequest(null);
-                      resolve({ confirmed: false });
-                    };
-                    if (abortController.signal.aborted) {
-                      onAbort();
-                      return;
-                    }
-                    abortController.signal.addEventListener('abort', onAbort, {
-                      once: true,
-                    });
-                    setConfirmationRequest({
+                    const request: ConfirmationRequest = {
                       prompt: result.prompt,
                       onConfirm: (resolvedConfirmed) => {
-                        abortController.signal.removeEventListener(
-                          'abort',
-                          onAbort,
+                        setConfirmationRequest((current) =>
+                          current === request ? null : current,
                         );
-                        setConfirmationRequest(null);
                         resolve({ confirmed: resolvedConfirmed });
                       },
-                    });
+                    };
+                    setConfirmationRequest(request);
+                    void abortPromise.then(() => request.onConfirm(false));
                   });
 
                   if (abortController.signal.aborted) {
                     return { type: 'handled' };
                   }
-
                   if (!confirmed) {
                     addItemWithRecording(
                       {
@@ -1639,6 +1720,8 @@ export const useSlashCommandProcessor = (
                     true,
                     invocationItemId,
                     invocationPromptId,
+                    isCurrentSubmission,
+                    submissionSignal,
                   );
                 }
                 case 'stream_messages': {
@@ -1679,7 +1762,6 @@ export const useSlashCommandProcessor = (
 
         return { type: 'handled' };
       } catch (e: unknown) {
-        // If cancelled via ESC, the cancelSlashCommand callback already handled cleanup
         if (abortController.signal.aborted) {
           return { type: 'handled' };
         }
@@ -1704,6 +1786,10 @@ export const useSlashCommandProcessor = (
         );
         return { type: 'handled' };
       } finally {
+        submissionSignal?.removeEventListener('abort', cancelFromSubmission);
+        if (abortController.signal.aborted && commandPendingItem) {
+          setPendingItem((item) => (item === commandPendingItem ? null : item));
+        }
         if (config?.getChatRecordingService) {
           const chatRecorder = config.getChatRecordingService();
           const primaryCommand =
@@ -1759,6 +1845,7 @@ export const useSlashCommandProcessor = (
         }
         if (activeCommandRef.current === activeCommand) {
           activeCommandRef.current = null;
+          setCommandCancellationBlocked(false);
           setIsProcessing(false);
         }
       }
@@ -1768,7 +1855,7 @@ export const useSlashCommandProcessor = (
       settings,
       addItem,
       actions,
-      commands,
+      availableCommands,
       commandContext,
       addMessage,
       setShellConfirmationRequest,
@@ -1776,18 +1863,23 @@ export const useSlashCommandProcessor = (
       setIsProcessing,
       setConfirmationRequest,
       updateItem,
+      isCommandCancellationBlocked,
+      isCommandCommitting,
     ],
   );
 
   return {
     handleSlashCommand,
-    slashCommands: commands,
+    slashCommands: availableCommands,
     recentSlashCommands: recentCommands,
     pendingHistoryItems,
     btwItem,
     setBtwItem,
     cancelBtw,
     cancelSlashCommand,
+    isCommandCancellationBlocked,
+    isCommandCommitting,
+    commandCancellationBlocked,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,

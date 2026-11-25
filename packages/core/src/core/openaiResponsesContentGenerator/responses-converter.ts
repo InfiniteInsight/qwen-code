@@ -30,11 +30,14 @@ import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 import { createOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 import { ToolNames } from '../../tools/tool-names.js';
+import { REATTACH_BOUNDARY_METADATA } from '../../services/image-payload-references.js';
+import type { ResponsesCacheBoundary } from './prompt-caching.js';
 import {
   getResponsesMessage,
   type ResponsesMessageMetadata,
   type ResponsesTextPart,
 } from '../../utils/responses-message.js';
+import { followingCallGroup } from './responses-reasoning-rejection.js';
 
 const debugLogger = createDebugLogger('RESPONSES_CONVERTER');
 
@@ -367,11 +370,10 @@ export function convertResponsesEventToGemini(
         if (!encryptedContent) return null;
         // NOTE: a single turn can contain multiple reasoning output items
         // (e.g. one per parallel function call), each emitted here as its own
-        // signature-only chunk. geminiChat.ts's history consolidation only
-        // keeps the *first* thoughtSignature it sees per turn when merging
-        // thought chunks, so only the first item's encrypted_content survives
-        // into history — a pre-existing limitation of that shared
-        // consolidation logic, not specific to this generator.
+        // signature-only chunk. llm-chat.ts's thought-episode consolidation
+        // concatenates thoughtSignature chunks until one parses as a complete
+        // Responses signature, so the items' encrypted_content folds into the
+        // surviving episode in emission order.
         return makeChunkResponse(model, state, [
           {
             thought: true,
@@ -532,8 +534,13 @@ function mapFinishReason(reason: string): FinishReason {
 export function convertGeminiContentsToResponsesInput(
   request: GenerateContentParameters,
   freeformExec = false,
-): { instructions: string | undefined; input: ResponsesApiInputItem[] } {
+): {
+  instructions: string | undefined;
+  input: ResponsesApiInputItem[];
+  cacheBoundary?: ResponsesCacheBoundary;
+} {
   let instructions: string | undefined;
+  let cacheBoundary: ResponsesCacheBoundary | undefined;
   const items: ResponsesApiInputItem[] = [];
   let callIdCounter = 0;
   const customCallIds = new Set<string>();
@@ -619,6 +626,19 @@ export function convertGeminiContentsToResponsesInput(
         if (pendingMessage) flushPendingMessage();
         pendingContentParts.push({ type: 'input_text', text: part });
         continue;
+      }
+
+      if (
+        role === 'user' &&
+        part.partMetadata?.[REATTACH_BOUNDARY_METADATA] === true &&
+        !cacheBoundary
+      ) {
+        cacheBoundary = pendingContentParts.length
+          ? {
+              itemIndex: items.length,
+              contentIndex: pendingContentParts.length - 1,
+            }
+          : { itemIndex: items.length - 1 };
       }
 
       if ('thought' in part && part.thought) {
@@ -718,8 +738,7 @@ export function convertGeminiContentsToResponsesInput(
           output = JSON.stringify(fr.response ?? {});
         }
         // A tool can return media (e.g. read_file on an image) in
-        // functionResponse.parts alongside its textual output. The
-        // function_call_output.output field is string-only, so surface the
+        // functionResponse.parts alongside its textual output. Surface the
         // media the way the sibling Chat converter does
         // (createToolMessage/splitToolMedia) instead of dropping it: append
         // any text entries (e.g. compaction-slimmer placeholders) to the
@@ -840,7 +859,7 @@ export function convertGeminiContentsToResponsesInput(
     }
   }
 
-  return { instructions, input: items };
+  return { instructions, input: items, cacheBoundary };
 }
 
 const responsesSplitMediaContributors = new WeakMap<
@@ -862,6 +881,15 @@ const responsesSplitMediaContributors = new WeakMap<
  * the call while dropping the output, or vice versa. This safety net ensures
  * the wire request is always structurally valid regardless of upstream
  * trimming bugs.
+ *
+ * A reasoning item heads the call group (`function_call` or
+ * `custom_tool_call`) that follows it, so the
+ * reasoning and that group are one unit (#11665): the reasoning stays iff at
+ * least one call in its group survives the pair cleanup, and goes with the
+ * group when none do. Dropping every orphaned call while keeping the group's
+ * reasoning would send reasoning without its required following item;
+ * keeping the reasoning while only some of its calls survive is what the
+ * surviving calls still need.
  */
 export function cleanOrphanedFunctionCalls(
   items: ResponsesApiInputItem[],
@@ -918,6 +946,37 @@ export function cleanOrphanedFunctionCalls(
       if (keptIndices.has(i)) {
         cleaned.push(item);
       }
+      continue;
+    }
+    if (item.type === 'reasoning') {
+      const unitCalls = followingCallGroup(items, i);
+      if (
+        unitCalls.length > 0 &&
+        !unitCalls.some(
+          (call, offset) =>
+            keptIndices.has(i + 1 + offset) &&
+            pairedCalls.has(`${call.type}:${call.callId}`),
+        )
+      ) {
+        // The group is gone, so its whole head goes: the maximal run of
+        // consecutive reasoning items immediately preceding the call run.
+        // Each was pushed with an empty run of its own, because the scan
+        // breaks on the next reasoning item.
+        while (cleaned.length > 0) {
+          const tail = cleaned[cleaned.length - 1];
+          if (
+            typeof tail !== 'object' ||
+            tail === null ||
+            !('type' in tail) ||
+            tail.type !== 'reasoning'
+          ) {
+            break;
+          }
+          cleaned.pop();
+        }
+        continue;
+      }
+      cleaned.push(item);
       continue;
     }
     const contributors = responsesSplitMediaContributors.get(item);

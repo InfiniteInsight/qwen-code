@@ -106,8 +106,30 @@ export const DaemonAppContainer = (props: DaemonAppContainerProps) => {
         // transcript on `replaySnapshot` (the live stream resumes after it);
         // `useDaemonStream` commits it to history before subscribing. Without
         // an id, omit workspaceCwd and get the daemon's bound workspace session.
+        const isTranscriptPageTooLarge = (err: unknown): boolean => {
+          if (!err || typeof err !== 'object') return false;
+          const rec = err as {
+            status?: unknown;
+            code?: unknown;
+            message?: unknown;
+          };
+          return (
+            rec.status === 413 ||
+            rec.code === 'transcript_page_too_large' ||
+            (typeof rec.message === 'string' &&
+              /transcript_page_too_large|transcript page is too large/i.test(
+                rec.message,
+              ))
+          );
+        };
         const session = sessionId
-          ? await DaemonSessionClient.load(client, sessionId)
+          ? await DaemonSessionClient.load(client, sessionId).catch((err) =>
+              isTranscriptPageTooLarge(err)
+                ? DaemonSessionClient.load(client, sessionId, {
+                    historyPageSize: 500,
+                  })
+                : Promise.reject(err),
+            )
           : await DaemonSessionClient.createOrAttach(client, {});
         if (cancelled) return;
         const attachedSessionId = session.session?.sessionId;
@@ -182,7 +204,10 @@ export const DaemonAppContainer = (props: DaemonAppContainerProps) => {
         }).catch(() => {});
       }
       setDriver((prev) => {
-        if (prev && prev.session?.sessionId !== nextSession.session?.sessionId) {
+        if (
+          prev &&
+          prev.session?.sessionId !== nextSession.session?.sessionId
+        ) {
           void prev.detach?.().catch(() => {});
         }
         return nextSession;

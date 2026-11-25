@@ -1,3 +1,7 @@
+import { randomUUID } from '../../utils/random-uuid.js';
+import { useWorkspaceFileChanges } from './useWorkspaceFileChanges';
+import { useDaemonAvailabilityController } from '../../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../../daemon/availability.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DaemonSessionProvider,
@@ -11,6 +15,7 @@ import { WEB_SHELL_MAX_TRANSCRIPT_BLOCKS } from '../../constants/sessions';
 import { useAnimationFrameTranscriptSnapshot } from '../../hooks/useAnimationFrameTranscriptBlocks';
 import { useMessagesFromBlocks } from '../../hooks/useMessages';
 import { useSessionArtifacts } from '../../hooks/useSessionArtifacts';
+import { ReportedArtifactRegistration } from '../ReportedArtifactRegistration';
 import { useI18n } from '../../i18n';
 import {
   SubagentDetailsProvider,
@@ -24,6 +29,7 @@ import {
   getArtifactsByTurn,
   getFileChangesByTurn,
 } from './turnOutputSelectors';
+import { fileChangeOwnerSessionId } from './workspace-file-changes';
 import styles from './SubagentDetail.module.css';
 
 interface SubagentResolution {
@@ -120,11 +126,7 @@ function getSubagentMetrics(
 }
 
 function createDetailClientId(): string {
-  const suffix =
-    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-      ? crypto.randomUUID()
-      : Math.random().toString(36).slice(2);
-  return `subagent-detail:${suffix}`;
+  return `subagent-detail:${randomUUID()}`;
 }
 
 export function findSubagentRootTool(
@@ -191,20 +193,22 @@ function SubagentDetailContent({
   const actions = useActions();
   const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot();
   const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
-  const { artifacts } = useSessionArtifacts();
+  const { artifacts, hydrated, refresh } = useSessionArtifacts();
   const artifactsByTurn = useMemo(
     () =>
       getArtifactsByTurn(messages, artifacts, connection.workspaceCwd || ''),
     [artifacts, connection.workspaceCwd, messages],
   );
-  const fileChangesByTurn = useMemo(
-    () =>
-      getFileChangesByTurn(
-        messages,
-        artifactsByTurn,
-        connection.workspaceCwd || '',
-      ),
-    [artifactsByTurn, connection.workspaceCwd, messages],
+  const fileChangesByTurn = useWorkspaceFileChanges(
+    messages,
+    artifactsByTurn,
+    connection.workspaceCwd ||
+      connection.standaloneSession?.projectlessOutputDirectory ||
+      '',
+    connection.sessionId
+      ? fileChangeOwnerSessionId(connection.sessionId)
+      : undefined,
+    connection.workspaceCwd ? undefined : null,
   );
   const description = getAgentDescription(rootTool);
   const metrics = useMemo(
@@ -237,14 +241,34 @@ function SubagentDetailContent({
     };
   }, [artifacts, connection.sessionId, onArtifactsChange]);
 
+  const reviewSourceRef = useRef({ messages, artifactsByTurn });
+  reviewSourceRef.current = { messages, artifactsByTurn };
   const handleRightPanelOpen = useCallback(
     (request: TurnOutputOpenRequest) => {
+      const source = reviewSourceRef.current;
       onRightPanelOpen?.({
         ...request,
+        ...(request.kind === 'review'
+          ? {
+              unfilteredChanges:
+                getFileChangesByTurn(
+                  source.messages,
+                  source.artifactsByTurn,
+                  connection.workspaceCwd ||
+                    connection.standaloneSession?.projectlessOutputDirectory ||
+                    '',
+                ).get(request.turnId) ?? request.changes,
+            }
+          : {}),
         sourceSessionId: connection.sessionId,
       });
     },
-    [connection.sessionId, onRightPanelOpen],
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      connection.standaloneSession?.projectlessOutputDirectory,
+      onRightPanelOpen,
+    ],
   );
 
   useEffect(() => {
@@ -328,6 +352,14 @@ function SubagentDetailContent({
 
   return (
     <div className={styles.detail}>
+      {/* The detail view runs under its own DaemonSessionProvider for the
+          subagent session; App's registration mount only covers the main
+          session, so register this session's reported artifacts here. */}
+      <ReportedArtifactRegistration
+        registered={artifacts}
+        hydrated={hydrated}
+        refresh={refresh}
+      />
       <div className={styles.overview}>
         <div className={styles.descriptionRow}>
           {description && (
@@ -452,7 +484,7 @@ export function SubagentDetail({
   const subagentClient = useMemo(() => {
     if (!workspace?.client) return null;
     if (workspaceCwd && typeof workspace.client.workspaceByCwd === 'function') {
-      return workspace.client.workspaceByCwd(workspaceCwd);
+      return workspace.client.workspaceByCwd(workspaceCwd) ?? workspace.client;
     }
     return workspace.client;
   }, [workspace?.client, workspaceCwd]);
@@ -472,6 +504,7 @@ export function SubagentDetail({
     key: 0,
     clientId: createDetailClientId(),
   }));
+  const availability = useDaemonAvailabilityController();
   const [resolution, setResolution] = useState<SubagentResolution>();
   const [loadError, setLoadError] = useState(false);
   const [pollTrigger, setPollTrigger] = useState(0);
@@ -483,6 +516,8 @@ export function SubagentDetail({
     let hasResolved = false;
     let retryCount = 0;
     let lastResolvedRunning = false;
+    let inFlight = false;
+    let refreshOnRecovery = false;
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
     setResolution(undefined);
     setLoadError(false);
@@ -501,9 +536,21 @@ export function SubagentDetail({
     };
     const refresh = async () => {
       clearRefreshTimer();
-      if (!subagentClient) return;
+      if (
+        !subagentClient ||
+        inFlight ||
+        (availability && availability.getSnapshot() !== 'available')
+      ) {
+        return;
+      }
+      inFlight = true;
       try {
-        const resolved = await subagentClient.resolveSubagentSession(
+        const resolveClient =
+          typeof subagentClient.resolveSubagentSession === 'function'
+            ? subagentClient
+            : workspace?.client;
+        if (!resolveClient) return;
+        const resolved = await resolveClient.resolveSubagentSession(
           sessionId,
           rootToolCallId,
         );
@@ -512,11 +559,20 @@ export function SubagentDetail({
         retryCount = 0;
         lastResolvedRunning = resolved.status === 'running';
         setResolution(resolved);
-        if (resolved.status === 'running') {
+        setLoadError(false);
+        if (
+          resolved.status === 'running' &&
+          (!availability || availability.getSnapshot() === 'available')
+        ) {
           scheduleRefresh(3_000);
         }
-      } catch {
-        if (cancelled) return;
+      } catch (error) {
+        if (
+          cancelled ||
+          isDaemonUnavailableError(error) ||
+          (availability && availability.getSnapshot() !== 'available')
+        )
+          return;
         if (retryCount < 3) {
           retryCount += 1;
           scheduleRefresh(3_000);
@@ -525,6 +581,17 @@ export function SubagentDetail({
         } else if (lastResolvedRunning) {
           scheduleRefresh(30_000);
         }
+      } finally {
+        inFlight = false;
+        if (
+          refreshOnRecovery &&
+          !cancelled &&
+          (!availability || availability.getSnapshot() === 'available')
+        ) {
+          refreshOnRecovery = false;
+          clearRefreshTimer();
+          void refresh();
+        }
       }
     };
     refreshRef.current = refresh;
@@ -532,13 +599,28 @@ export function SubagentDetail({
       if (cancelled) return;
       lastResolvedRunning = true;
       retryCount = 0;
-      if (refreshTimer === undefined) {
+      if (
+        refreshTimer === undefined &&
+        (!availability || availability.getSnapshot() === 'available')
+      ) {
         scheduleRefresh(3_000);
       }
     };
+    let wasAvailable = availability?.getSnapshot() === 'available';
+    const unsubscribeAvailability = availability?.subscribe(() => {
+      const available = availability.getSnapshot() === 'available';
+      if (available === wasAvailable) return;
+      wasAvailable = available;
+      clearRefreshTimer();
+      if (available && (!hasResolved || lastResolvedRunning)) {
+        if (inFlight) refreshOnRecovery = true;
+        else void refresh();
+      }
+    });
     void refresh();
     return () => {
       cancelled = true;
+      unsubscribeAvailability?.();
       clearRefreshTimer();
       if (refreshRef.current === refresh) {
         refreshRef.current = undefined;
@@ -547,7 +629,7 @@ export function SubagentDetail({
         ensurePollingRef.current = undefined;
       }
     };
-  }, [instance.key, rootToolCallId, sessionId, subagentClient]);
+  }, [availability, instance.key, rootToolCallId, sessionId, subagentClient]);
 
   useEffect(() => {
     if (resolution?.status === 'running') {

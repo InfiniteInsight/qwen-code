@@ -25,6 +25,7 @@ import type {
   ToolCallResultParams,
   ResolvedToolMetadata,
   SubagentMeta,
+  AgentIdentity,
 } from '../types.js';
 import { hasFullSessionContext } from '../types.js';
 import type {
@@ -318,7 +319,7 @@ export class ToolCallEmitter extends BaseEmitter {
     toolName: string,
     error: Error,
     subagentMeta?: SubagentMeta,
-    timing?: { startedAt: number; durationMs: number; cancelled?: boolean },
+    timing?: { startedAt?: number; durationMs?: number; cancelled?: boolean },
   ): Promise<void> {
     this.preparedCallIds.delete(callId);
     this.preparedLifecycles.delete(callId);
@@ -358,6 +359,7 @@ export class ToolCallEmitter extends BaseEmitter {
     subagentType: string,
     message: string,
     toolName?: string,
+    agent?: AgentIdentity,
   ): Promise<void> {
     if (toolName && this.isTodoWriteTool(toolName)) return;
 
@@ -378,6 +380,7 @@ export class ToolCallEmitter extends BaseEmitter {
         subagentType,
         provenance: 'subagent',
         subagentProgress: true,
+        ...(agent ? { agent } : {}),
       },
     });
   }

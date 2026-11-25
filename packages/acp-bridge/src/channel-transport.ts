@@ -5,8 +5,33 @@
  */
 
 import type { AcpChannel } from './channel.js';
+import { raceLongLived } from './race-long-lived.js';
 import { BridgeChannelClosedError } from './status.js';
 import { withTimeout } from './with-timeout.js';
+
+const CHANNEL_UNAVAILABLE: unique symbol = Symbol('channel unavailable');
+
+const unavailableSignals = new WeakMap<
+  AcpChannel,
+  Promise<typeof CHANNEL_UNAVAILABLE>
+>();
+
+// Built once per channel: every reaction on `channel.exited` stays queued
+// until the channel exits, so deriving a fresh promise from it per call would
+// keep each call's race alive for the channel's lifetime.
+function channelUnavailable(
+  channel: AcpChannel,
+): Promise<typeof CHANNEL_UNAVAILABLE> {
+  const existing = unavailableSignals.get(channel);
+  if (existing) return existing;
+  const unavailable = channel.transportFailed
+    ? Promise.race([channel.exited, channel.transportFailed])
+    : channel.exited;
+  const mark = (): typeof CHANNEL_UNAVAILABLE => CHANNEL_UNAVAILABLE;
+  const signal = unavailable.then(mark, mark);
+  unavailableSignals.set(channel, signal);
+  return signal;
+}
 
 export async function terminateChannel(
   channel: AcpChannel,
@@ -38,7 +63,9 @@ export function channelUnavailableReject(
   const reject = () => {
     throw new BridgeChannelClosedError(context);
   };
-  return unavailable.then(reject, reject);
+  const rejected = unavailable.then(reject, reject);
+  void rejected.catch(() => {});
+  return rejected;
 }
 
 /**
@@ -76,67 +103,78 @@ export function armClosedFanout(closed: Promise<never>): ClosedFanout {
  */
 export function raceClosedFanout<T>(
   fanout: ClosedFanout,
-  work: Promise<T>,
-): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
+  work: PromiseLike<T>,
+): Promise<T>;
+export function raceClosedFanout<W extends readonly unknown[]>(
+  fanout: ClosedFanout,
+  works: W,
+): Promise<Awaited<W[number]>>;
+export function raceClosedFanout(
+  fanout: ClosedFanout,
+  work: PromiseLike<unknown> | readonly unknown[],
+): Promise<unknown> {
+  const works: readonly unknown[] = Array.isArray(work) ? work : [work];
+  return new Promise<unknown>((resolve, reject) => {
     if (fanout.closed) {
       reject(fanout.closed.error);
     } else {
       fanout.waiters.add(reject);
     }
-    // Always observe `work`, so a rejection after the close is handled here
-    // rather than reported as unhandled.
-    work.then(
-      (value) => {
-        fanout.waiters.delete(reject);
-        resolve(value);
-      },
-      (error: unknown) => {
-        fanout.waiters.delete(reject);
-        reject(error);
-      },
-    );
+    const release = () => fanout.waiters.delete(reject);
+    // Always observe each `work`, so a rejection after the close is handled
+    // here rather than reported as unhandled.
+    for (const each of works) {
+      Promise.resolve(each).then(
+        (value) => {
+          release();
+          resolve(value);
+        },
+        (error: unknown) => {
+          release();
+          reject(error);
+        },
+      );
+    }
   });
 }
 
-const channelUnavailableFanouts = new WeakMap<
-  AcpChannel,
-  Map<string, ClosedFanout>
->();
+const channelUnavailableWaiterCounts = new WeakMap<AcpChannel, number>();
 
 /**
- * Settle with `work`, or reject with `BridgeChannelClosedError(context)` if
- * the channel becomes unavailable first. Each channel and context share one
- * `channelUnavailableReject`, so a settled call leaves nothing on
- * `channel.exited`. `context` must come from a small fixed set of literals:
- * a context carrying an id would arm a new `channelUnavailableReject` on
- * `channel.exited` per value and bring the per-call leak back.
+ * Settles like `work` unless the channel exits or its transport fails first,
+ * in which case it rejects with `BridgeChannelClosedError(context)`. For
+ * per-operation races: unlike racing `channelUnavailableReject(...)`, it
+ * leaves nothing on the channel once the operation settles.
  */
-export function raceChannelUnavailable<T>(
+export async function raceChannelUnavailable<T>(
   channel: AcpChannel,
+  work: PromiseLike<T>,
   context: string,
-  work: Promise<T>,
 ): Promise<T> {
-  let byContext = channelUnavailableFanouts.get(channel);
-  if (!byContext) {
-    byContext = new Map();
-    channelUnavailableFanouts.set(channel, byContext);
+  const signal = channelUnavailable(channel);
+  channelUnavailableWaiterCounts.set(
+    channel,
+    (channelUnavailableWaiterCounts.get(channel) ?? 0) + 1,
+  );
+  try {
+    const result = await raceLongLived(work, signal);
+    if (result === CHANNEL_UNAVAILABLE) {
+      throw new BridgeChannelClosedError(context);
+    }
+    return result as T;
+  } finally {
+    const remaining = (channelUnavailableWaiterCounts.get(channel) ?? 1) - 1;
+    if (remaining <= 0) {
+      channelUnavailableWaiterCounts.delete(channel);
+    } else {
+      channelUnavailableWaiterCounts.set(channel, remaining);
+    }
   }
-  let fanout = byContext.get(context);
-  if (!fanout) {
-    fanout = armClosedFanout(channelUnavailableReject(channel, context));
-    byContext.set(context, fanout);
-  }
-  return raceClosedFanout(fanout, work);
 }
 
-/** Test seam: calls still waiting on `channel`'s unavailable fan-outs. */
+/** Test seam: calls still waiting on `channel`'s unavailable signal. */
 export function _channelUnavailableWaiterCountForTest(
   channel: AcpChannel,
 ): number {
-  let count = 0;
-  for (const fanout of channelUnavailableFanouts.get(channel)?.values() ?? []) {
-    count += fanout.waiters.size;
-  }
-  return count;
+  return channelUnavailableWaiterCounts.get(channel) ?? 0;
 }

@@ -12,7 +12,7 @@ import type { DaemonTransport } from './DaemonTransport.js';
 
 /** Options for {@link negotiateTransport}. */
 export interface NegotiateTransportOptions {
-  /** Timeout for the capabilities probe and WS handshake. Default 5000ms. */
+  /** Timeout for the complete capabilities body and WS handshake. Default 5000ms. */
   probeTimeoutMs?: number;
   /**
    * `fetch` implementation used for the capabilities probe and threaded

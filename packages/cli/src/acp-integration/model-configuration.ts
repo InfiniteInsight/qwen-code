@@ -19,14 +19,18 @@ import {
 import {
   resolveReasoningForModel,
   getEffectiveReasoning,
+  hasOpenRouterReasoningEffortOverride,
   type ReasoningProfile,
   type ResolvedReasoning,
 } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
+import { getBuiltinKimiK3Reasoning } from '@qwen-code/qwen-code-core/core/kimi-reasoning.js';
 import {
   getBuiltinDeepSeekReasoning,
   getDeepSeekReasoningState,
 } from '@qwen-code/qwen-code-core/core/deepseek-reasoning.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
+import { isTieredEffortQwenPrefix } from '@qwen-code/qwen-code-core/core/modalityDefaults.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import type { SessionConfigOption } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../config/settings.js';
 import { ACP_ROUTE_ID_PREFIX } from '../utils/acpModelUtils.js';
@@ -87,6 +91,20 @@ const MODEL_CONFIGURATIONS: Readonly<
       defaultEffort: 'xhigh',
     },
   },
+  'qwen3.8-flash': {
+    reasoning: {
+      thinking: true,
+      efforts: ['low', 'medium', 'xhigh'],
+      defaultEffort: 'xhigh',
+    },
+  },
+  'qwen4-max': {
+    reasoning: {
+      thinking: true,
+      efforts: ['low', 'high', 'xhigh'],
+      defaultEffort: 'high',
+    },
+  },
 };
 
 export const REASONING_EFFORT_DEFAULT = 'default';
@@ -143,6 +161,7 @@ export function getDefaultReasoningConfig(
 export function getGptReasoningOverrideState(
   generation: ContentGeneratorConfig,
   configuredReasoning?: ModelReasoningConfiguration,
+  config?: Pick<Config, 'getResolvedModelConfig'>,
 ):
   | {
       enabled: boolean;
@@ -199,11 +218,14 @@ export function getGptReasoningOverrideState(
   }
   if (nested === undefined) {
     const suppressedConfiguredTier = openRouter
-      ? !parseModelReasoningCapabilities(configuredReasoning) &&
-        !isReasoningEffortPlaceholder(
-          generation.samplingParams?.['reasoning_effort'],
-        ) &&
-        !isReasoningEffortPlaceholder(flat)
+      ? getBuiltinKimiK3Reasoning({ ...generation, model })
+        ? !removedFlatNone &&
+          hasOpenRouterReasoningEffortOverride(config, generation, model)
+        : !parseModelReasoningCapabilities(configuredReasoning) &&
+          !isReasoningEffortPlaceholder(
+            generation.samplingParams?.['reasoning_effort'],
+          ) &&
+          !isReasoningEffortPlaceholder(flat)
       : removedFlatNone;
     const effort = removedFlatNone
       ? undefined
@@ -317,8 +339,41 @@ export function getModelConfiguration(
           },
         }
       : modelId
-        ? MODEL_CONFIGURATIONS[modelId]
+        ? (MODEL_CONFIGURATIONS[modelId] ??
+          (isTieredEffortQwenPrefix(modelId)
+            ? tieredQwenManifest(modelId)
+            : undefined))
         : undefined;
+}
+
+/**
+ * Prefix fallback for tiered Qwen ids without an exact manifest row (dated
+ * snapshots, `-latest` aliases). Only qwen4-max takes the qwen4-max ladder
+ * (low/high/xhigh, default high); other qwen4* routes and the invitation-only
+ * latest-series previews keep the stable qwen3.8-max ladder, so existing models
+ * retain their shipped effort controls.
+ */
+function tieredQwenManifest(
+  modelId: string,
+): { readonly reasoning?: ModelReasoningConfiguration } | undefined {
+  return modelId.toLowerCase().startsWith('qwen4-max')
+    ? MODEL_CONFIGURATIONS['qwen4-max']
+    : MODEL_CONFIGURATIONS['qwen3.8-max'];
+}
+
+/**
+ * Routed (opaque) selectors keep their effort controls when the manifest
+ * carries a tiered contract for the model: the new Qwen prefixes and the
+ * stable tiered family they inherit their ladder from. Toggle-only manifest
+ * entries stay on the generic route guard.
+ */
+export function hasTieredManifestReasoning(
+  modelId: string | undefined,
+): boolean {
+  if (!modelId) return false;
+  if (isTieredEffortQwenPrefix(modelId)) return true;
+  const entry = MODEL_CONFIGURATIONS[modelId]?.reasoning;
+  return !!entry && !entry.toggleOnly;
 }
 
 export function getConfiguredModelReasoning(
@@ -355,10 +410,12 @@ export function getReasoningEffortsForConfig(
   config: Config,
 ): readonly ReasoningEffort[] {
   const modelId = config.getModel?.();
-  // One tier rule for `/effort` and a workflow agent's per-call effort: this
-  // site keeps its own capability lookup and delegates only the rule.
+  // One tier rule for `/effort` and a workflow agent's per-call effort, but the
+  // lookup must include the built-in tables like the model dialog's controls
+  // do: skipping them offered the whole ladder for models whose tiers are
+  // already known, and persisted a tier the wire then re-tiered (#17411).
   return reasoningEffortsForCapability(
-    getConfiguredModelReasoning(config, modelId, false),
+    getConfiguredModelReasoning(config, modelId),
   );
 }
 
@@ -408,16 +465,18 @@ export function isReasoningSelectionSupported(
 
 export function clearReasoningRequestOverrides(
   generation: ContentGeneratorConfig,
+  config?: Pick<Config, 'getResolvedModelConfig'>,
 ): void {
   const deepSeek = getDeepSeekReasoningState(
     generation,
-    resolveReasoningForModel(undefined, generation),
+    resolveReasoningForModel(config, generation),
   );
   if (
     getGptReasoningCapabilities(getRequestModel(generation)) ||
     getGptReasoningOverrideState(
       generation,
-      resolveReasoningForModel(undefined, generation),
+      resolveReasoningForModel(config, generation),
+      config,
     )?.blocksTierChange
   )
     return;
@@ -676,10 +735,19 @@ export function buildModelReasoningRoutePreview(
   const model = getRequestModel(generation);
   const thinkingMandatory =
     model === generation.model && generation.thinkingMandatory === true;
+  const qwenManifest =
+    reasoning === undefined && hasTieredManifestReasoning(model)
+      ? (getModelConfiguration(model)?.reasoning as
+          | ResolvedReasoning
+          | undefined)
+      : undefined;
+  const routeReasoning = reasoning ?? qwenManifest;
   if (
     opaqueRoute &&
-    !reasoning?.profile &&
-    !getDeepSeekReasoningState(generation, reasoning)
+    generation.authType !== AuthType.QWEN_SUBSCRIPTION &&
+    !routeReasoning?.profile &&
+    !qwenManifest &&
+    !getDeepSeekReasoningState(generation, routeReasoning)
   )
     return undefined;
   const parsedSelection = parseReasoningSelection(selection);
@@ -690,7 +758,7 @@ export function buildModelReasoningRoutePreview(
       model,
       parsedSelection,
       thinkingMandatory,
-      reasoning,
+      routeReasoning,
     );
   const deepSeekState = usesConfiguredState
     ? getDeepSeekReasoningState(
@@ -705,7 +773,7 @@ export function buildModelReasoningRoutePreview(
               }
             : {}),
         },
-        reasoning,
+        routeReasoning,
       )
     : undefined;
   return buildModelReasoningConfigPreview(
@@ -717,11 +785,11 @@ export function buildModelReasoningRoutePreview(
         model,
         selection,
         thinkingMandatory,
-        reasoning,
+        routeReasoning,
       ),
       ...deepSeekState,
     },
-    reasoning,
+    routeReasoning,
     generation,
   );
 }
@@ -734,7 +802,7 @@ export function getReasoningForDisplay(
   if (!resolved) return generation.reasoning;
   const deepSeek = getDeepSeekReasoningState(generation, resolved);
   if (deepSeek) return deepSeek.enabled ? { effort: deepSeek.effort } : false;
-  const override = getGptReasoningOverrideState(generation, resolved);
+  const override = getGptReasoningOverrideState(generation, resolved, config);
   if (override) return override.enabled ? { effort: override.effort } : false;
   if (config.getReasoningEffortOverride?.()) return generation.reasoning;
   return getEffectiveReasoning(generation, resolved);

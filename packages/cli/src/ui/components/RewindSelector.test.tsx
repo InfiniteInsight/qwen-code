@@ -54,11 +54,13 @@ const userTurn = (
   id: number,
   text: string,
   promptId?: string,
+  rewindId?: string,
 ): HistoryItem => ({
   id,
   type: 'user',
   text,
   promptId,
+  rewindId,
 });
 
 describe('RewindSelector', () => {
@@ -78,7 +80,10 @@ describe('RewindSelector', () => {
   it('navigates the pick list with Ctrl+P/N readline aliases', () => {
     const { lastFrame } = render(
       <RewindSelector
-        history={[userTurn(1, 'first prompt'), userTurn(2, 'second prompt')]}
+        history={[
+          userTurn(1, 'first prompt', 'prompt-1'),
+          userTurn(2, 'second prompt', 'prompt-2'),
+        ]}
         onRewind={vi.fn()}
         onCancel={vi.fn()}
         fileCheckpointingEnabled={false}
@@ -100,7 +105,10 @@ describe('RewindSelector', () => {
 
     const { lastFrame } = render(
       <RewindSelector
-        history={[userTurn(1, 'first prompt'), userTurn(2, 'second prompt')]}
+        history={[
+          userTurn(1, 'first prompt', 'prompt-1'),
+          userTurn(2, 'second prompt', 'prompt-2'),
+        ]}
         onRewind={vi.fn()}
         onCancel={onCancel}
         fileCheckpointingEnabled={false}
@@ -219,7 +227,10 @@ describe('RewindSelector', () => {
 
     const { lastFrame } = render(
       <RewindSelector
-        history={[userTurn(1, 'first prompt'), userTurn(2, 'second prompt')]}
+        history={[
+          userTurn(1, 'first prompt', undefined, 'legacy-record:first'),
+          userTurn(2, 'second prompt', undefined, 'legacy-record:second'),
+        ]}
         onRewind={vi.fn()}
         onCancel={vi.fn()}
         fileCheckpointingEnabled={true}
@@ -243,7 +254,10 @@ describe('RewindSelector', () => {
 
     const { lastFrame } = render(
       <RewindSelector
-        history={[userTurn(1, 'first prompt'), userTurn(2, 'second prompt')]}
+        history={[
+          userTurn(1, 'first prompt', 'prompt-1'),
+          userTurn(2, 'second prompt', 'prompt-2'),
+        ]}
         onRewind={onRewind}
         onCancel={vi.fn()}
         fileCheckpointingEnabled={false}
@@ -275,7 +289,10 @@ describe('RewindSelector', () => {
 
       const { lastFrame } = render(
         <RewindSelector
-          history={[userTurn(1, 'first prompt'), userTurn(2, 'second prompt')]}
+          history={[
+            userTurn(1, 'first prompt', 'prompt-1'),
+            userTurn(2, 'second prompt', 'prompt-2'),
+          ]}
           onRewind={onRewind}
           onCancel={vi.fn()}
           fileCheckpointingEnabled={false}
@@ -377,7 +394,12 @@ describe('RewindSelector', () => {
     const { lastFrame } = render(
       <RewindSelector
         history={[
-          userTurn(1, 'first prompt without local promptId'),
+          userTurn(
+            1,
+            'first prompt without local promptId',
+            undefined,
+            'rewind-1',
+          ),
           userTurn(2, 'second prompt with promptId', 'prompt-2'),
         ]}
         onRewind={vi.fn()}
@@ -405,5 +427,23 @@ describe('RewindSelector', () => {
     expect(getRewindSnapshots).toHaveBeenCalledTimes(2);
     expect(lastFrame()).toContain('Restore code and conversation');
     expect(lastFrame()).toContain('(+12 -4 in 3 files)');
+  });
+
+  it('omits turns that carry no rewind identity', () => {
+    const { lastFrame } = render(
+      <RewindSelector
+        history={[
+          userTurn(1, 'unassociated turn'),
+          userTurn(2, 'identified turn', 'prompt-2'),
+        ]}
+        onRewind={vi.fn()}
+        onCancel={vi.fn()}
+        fileCheckpointingEnabled={false}
+        fileHistoryService={fileHistoryService}
+      />,
+    );
+
+    expect(lastFrame()).not.toContain('unassociated turn');
+    expect(lastFrame()).toContain('› #1 identified turn');
   });
 });

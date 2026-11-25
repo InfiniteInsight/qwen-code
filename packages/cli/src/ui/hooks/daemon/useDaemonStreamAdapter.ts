@@ -230,6 +230,7 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
         : undefined) || driver.session?.sessionId,
   );
   const streamingStateRef = useRef(ds.streamingState);
+  const turnCancelledRef = useRef(false);
   streamingStateRef.current = ds.streamingState;
   const getCurrentStreamingState = () =>
     ds.getStreamingState?.() ?? streamingStateRef.current;
@@ -377,7 +378,10 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
     pendingHistoryItems: ds.pendingHistoryItems,
     clearPendingState: ds.clearPendingState,
     thought: ds.thought,
-    cancelOngoingRequest: ds.cancelOngoingRequest,
+    cancelOngoingRequest: () => {
+      ds.cancelOngoingRequest();
+      return true;
+    },
     // Goal-turn preemption is an in-process admission concern; the daemon
     // session's goal turns are not admitted through this adapter.
     preemptGoalTurn: () => {},
@@ -391,6 +395,8 @@ export const useDaemonStreamAdapter: DaemonAwareStreamHook = (
     loopDetectionConfirmationRequest: ds.loopDetectionConfirmationRequest,
     streamingResponseLengthRef: ds.streamingResponseLengthRef,
     isReceivingContent: ds.isReceivingContent,
+    workflowKeywordActive: false,
+    turnCancelledRef,
     daemonModelId: ds.daemonModelId,
     daemonApprovalMode: ds.daemonApprovalMode,
     daemonSessionTitle: ds.daemonSessionTitle,
