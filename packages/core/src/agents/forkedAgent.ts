@@ -64,10 +64,12 @@ import {
   resolveModelId,
   type ResolvedModelId,
 } from '../utils/modelId.js';
+import { AuthType } from '../utils/auth-type.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { getFunctionResponseParts } from '../services/compactionInputSlimming.js';
 import { runWithChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
 import { createChildAbortController } from '../utils/abortController.js';
+import type { RetryInfo } from '../utils/rateLimit.js';
 
 const debugLogger = createDebugLogger('FORKED_AGENT');
 
@@ -220,10 +222,11 @@ const NO_TOOLS = Object.freeze({ tools: [] as const }) as Pick<
 export function createForkedChat(
   config: Config,
   params: CacheSafeParams,
+  options: { fullHistory?: boolean } = {},
 ): LlmChat {
   const maxHistoryEntries = 40;
   const history =
-    params.history.length > maxHistoryEntries
+    !options.fullHistory && params.history.length > maxHistoryEntries
       ? params.history.slice(-maxHistoryEntries)
       : params.history;
 
@@ -247,6 +250,7 @@ export function createForkedChat(
 
 interface ForkedModelRuntime {
   model: string;
+  authType?: AuthType;
   runtimeView?: RuntimeContentGeneratorView;
 }
 
@@ -277,7 +281,12 @@ async function buildForkedModelRuntime(
     registryBaseUrl,
   );
 
-  return { model, runtimeView };
+  return {
+    model,
+    authType:
+      resolvedModel?.authType ?? base.getContentGeneratorConfig?.()?.authType,
+    runtimeView,
+  };
 }
 
 async function buildForkedRuntimeContentGeneratorView(
@@ -358,6 +367,8 @@ export interface ForkedQueryResult {
   };
   /** Resolved model id used for the query (after selector/alias resolution). */
   model: string;
+  /** Name of the first non-schema function call the model emitted, if any. */
+  toolCallName?: string;
 }
 
 function extractQueryUsage(
@@ -405,6 +416,23 @@ export interface CachePathParams {
   abortSignal?: AbortSignal;
   /** Do not route the query through configured model fallbacks. */
   disableModelFallbacks?: boolean;
+  /** Receives answer text as it arrives, excluding thoughts and tool calls. */
+  onText?: (text: string) => void | Promise<void>;
+  /**
+   * Called when the stream retries. `restart` is true when the retry re-sends
+   * the request from scratch, so text already passed to `onText` is void.
+   */
+  onRetry?: (event: {
+    restart: boolean;
+    retryInfo?: RetryInfo;
+  }) => void | Promise<void>;
+  /** Keep the whole parent history instead of the default 40-entry tail. */
+  fullHistory?: boolean;
+  /**
+   * With preserveTools, keep the tool declarations but ask the provider not
+   * to call them. Ignored when jsonSchema is set.
+   */
+  disableFunctionCalls?: boolean;
   /**
    * When true, keep the parent's tools in the per-request config so the
    * Anthropic prompt-cache key (system + tools) matches the main agent's.
@@ -471,6 +499,8 @@ export interface ForkedAgentResult {
   terminateReason?: string;
   /** File paths observed in path-like tool call arguments during execution. */
   filesTouched: string[];
+  /** File paths from successful non-mutating tool results. */
+  filesRead?: string[];
   /** File paths from successful mutating tool results. */
   filesWritten?: string[];
   /** Aggregate model usage for this isolated agent run. */
@@ -552,6 +582,8 @@ export async function runForkedAgent(
       abortSignal,
       preserveTools,
       disableModelFallbacks,
+      fullHistory,
+      disableFunctionCalls,
     } = params;
     const modelSelector = params.model ?? cacheSafeParams.model;
     const modelRuntime = await buildForkedModelRuntime(
@@ -561,9 +593,18 @@ export async function runForkedAgent(
     );
 
     return runWithForkedModelRuntime(modelRuntime, async (model) => {
-      const chat = createForkedChat(config, cacheSafeParams);
+      const chat = createForkedChat(config, cacheSafeParams, { fullHistory });
 
-      const requestConfig: GenerateContentConfig = preserveTools
+      // Anthropic has no `tool_choice: none`, so preserving its tools cannot
+      // disable calls; strip them instead of leaving tool choice on `auto`.
+      const preserveParentTools =
+        preserveTools &&
+        !(
+          disableFunctionCalls &&
+          !jsonSchema &&
+          modelRuntime.authType === AuthType.USE_ANTHROPIC
+        );
+      const requestConfig: GenerateContentConfig = preserveParentTools
         ? {}
         : { ...NO_TOOLS };
       if (abortSignal) requestConfig.abortSignal = abortSignal;
@@ -588,6 +629,10 @@ export async function runForkedAgent(
             allowedFunctionNames: ['respond_in_schema'],
           },
         };
+      } else if (preserveParentTools && disableFunctionCalls) {
+        requestConfig.toolConfig = {
+          functionCallingConfig: { mode: FunctionCallingConfigMode.NONE },
+        };
       }
 
       const sendParams = {
@@ -611,8 +656,17 @@ export async function runForkedAgent(
         cacheHitTokens: 0,
       };
       let jsonResult: Record<string, unknown> | undefined;
+      let toolCallName: string | undefined;
 
       for await (const event of stream) {
+        if (event.type === StreamEventType.RETRY) {
+          const restart = !event.isContinuation;
+          if (restart) fullText = '';
+          if (params.onRetry) {
+            await params.onRetry({ restart, retryInfo: event.retryInfo });
+          }
+          continue;
+        }
         if (event.type !== StreamEventType.CHUNK) continue;
         const response = event.value;
         const parts = response.candidates?.[0]?.content?.parts ?? [];
@@ -626,14 +680,12 @@ export async function runForkedAgent(
 
         // Defensive: when preserveTools is true the model could produce an
         // unexpected parent function call instead of text. Log and discard it.
-        if (
-          preserveTools &&
-          parts.some(
-            (part) =>
-              part.functionCall &&
-              part.functionCall.name !== 'respond_in_schema',
-          )
-        ) {
+        const strayCall = parts.find(
+          (part) =>
+            part.functionCall && part.functionCall.name !== 'respond_in_schema',
+        )?.functionCall;
+        if (preserveTools && strayCall) {
+          toolCallName ??= strayCall.name;
           debugLogger.warn(
             'Cache-path forked query received functionCall with preserveTools; discarding.',
           );
@@ -644,7 +696,10 @@ export async function runForkedAgent(
           .filter((p) => !(p as Record<string, unknown>)['functionCall'])
           .map((p) => p.text ?? '')
           .join('');
-        if (text) fullText += text;
+        if (text) {
+          fullText += text;
+          if (params.onText) await params.onText(text);
+        }
         if (response.usageMetadata)
           usage = extractQueryUsage(response.usageMetadata);
       }
@@ -658,7 +713,13 @@ export async function runForkedAgent(
         }
       }
 
-      return { text: trimmed, jsonResult, usage, model };
+      return {
+        text: trimmed,
+        jsonResult,
+        usage,
+        model,
+        ...(toolCallName ? { toolCallName } : {}),
+      };
     });
   }
 
@@ -685,8 +746,12 @@ export async function runForkedAgent(
   const executionController = createChildAbortController(params.abortSignal);
   try {
     const filesTouched = new Set<string>();
-    const pendingMutatingPaths = new Map<string, string[]>();
+    const pendingFileCalls = new Map<
+      string,
+      { paths: string[]; mutating: boolean }
+    >();
     const filesWritten = new Set<string>();
+    const filesRead = new Set<string>();
     let usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
 
     const initialMessages =
@@ -719,7 +784,7 @@ export async function runForkedAgent(
     let completedAfterWrite = false;
     // Identity marker for the run's own early-completion abort, so the
     // execute catch below can tell it apart from an external cancel
-    // that races it -- an external cancel must still reject the run.
+    // that races it — an external cancel must still reject the run.
     const selfAbortReason = new DOMException(
       'Early completion after successful write',
       'AbortError',
@@ -731,17 +796,21 @@ export async function runForkedAgent(
       for (const filePath of filePaths) {
         filesTouched.add(filePath);
       }
-      if (isMutatingFileTool(event.name)) {
-        pendingMutatingPaths.set(event.callId, filePaths);
-      }
+      pendingFileCalls.set(event.callId, {
+        paths: filePaths,
+        mutating: isMutatingFileTool(event.name),
+      });
     });
     emitter.on(AgentEventType.TOOL_RESULT, (event) => {
+      const pending = pendingFileCalls.get(event.callId);
+      pendingFileCalls.delete(event.callId);
       if (!event.success) {
-        pendingMutatingPaths.delete(event.callId);
         return;
       }
-      const filePaths = pendingMutatingPaths.get(event.callId) ?? [];
-      pendingMutatingPaths.delete(event.callId);
+      if (pending && !pending.mutating) {
+        for (const filePath of pending.paths) filesRead.add(filePath);
+      }
+      const filePaths = pending?.mutating ? pending.paths : [];
       for (const filePath of filePaths) {
         filesWritten.add(filePath);
       }
@@ -757,7 +826,7 @@ export async function runForkedAgent(
         // parallel batch's TOOL_RESULT events one by one, and aborting
         // synchronously re-enters its onAbort mid-emission, which replaces
         // the still-unemitted real successes of the same batch with
-        // synthetic cancellation failures -- truncating filesWritten below
+        // synthetic cancellation failures — truncating filesWritten below
         // the writes that actually landed on disk.
         setImmediate(() => executionController.abort(selfAbortReason));
       }
@@ -839,6 +908,7 @@ export async function runForkedAgent(
         finalText,
         filesTouched: touched,
         filesWritten: written,
+        filesRead: [...filesRead],
         usage,
       };
     }
@@ -849,6 +919,7 @@ export async function runForkedAgent(
         finalText,
         filesTouched: touched,
         filesWritten: written,
+        filesRead: [...filesRead],
         usage,
       };
     }
@@ -859,6 +930,7 @@ export async function runForkedAgent(
         finalText,
         filesTouched: touched,
         filesWritten: written,
+        filesRead: [...filesRead],
         usage,
       };
     }
@@ -868,6 +940,7 @@ export async function runForkedAgent(
       finalText,
       filesTouched: touched,
       filesWritten: written,
+      filesRead: [...filesRead],
       usage,
     };
   } finally {

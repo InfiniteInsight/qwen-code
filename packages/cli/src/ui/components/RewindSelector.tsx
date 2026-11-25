@@ -12,7 +12,10 @@ import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import { truncateText } from '../utils/sessionPickerUtils.js';
-import { isRealUserTurn } from '../utils/historyMapping.js';
+import {
+  isRealUserTurn,
+  isRewindableUserTurn,
+} from '../utils/historyMapping.js';
 import { t } from '../../i18n/index.js';
 import type { FileHistoryService, DiffStats } from '@qwen-code/qwen-code-core';
 
@@ -41,8 +44,11 @@ export interface RewindSelectorProps {
 
 const MAX_VISIBLE_ITEMS = 7;
 
-function getUserTurns(history: HistoryItem[]): HistoryItem[] {
-  return history.filter(isRealUserTurn);
+function getUserTurns(
+  history: HistoryItem[],
+  hasDaemon: boolean,
+): HistoryItem[] {
+  return history.filter(hasDaemon ? isRealUserTurn : isRewindableUserTurn);
 }
 
 interface TurnItemViewProps {
@@ -174,7 +180,10 @@ export function RewindSelector({
   daemon,
 }: RewindSelectorProps) {
   const { columns: width, rows: height } = useTerminalSize();
-  const userTurns = useMemo(() => getUserTurns(history), [history]);
+  const userTurns = useMemo(
+    () => getUserTurns(history, Boolean(daemon)),
+    [history, daemon],
+  );
 
   const [selectedIndex, setSelectedIndex] = useState(userTurns.length - 1);
   // Legacy confirm (when file checkpointing is off)

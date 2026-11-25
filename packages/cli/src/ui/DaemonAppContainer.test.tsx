@@ -147,6 +147,27 @@ describe('DaemonAppContainer initial attach failure', () => {
     expect(sdk.load).toHaveBeenCalledWith(expect.anything(), 's1');
   });
 
+  it('falls back to historyPageSize: 500 when unpaged attach hits 413 transcript_page_too_large', async () => {
+    const pagedDriver = { clientId: 'c-paged', session: { sessionId: 's1' } };
+    sdk.load
+      .mockRejectedValueOnce(
+        Object.assign(new Error('Transcript page is too large'), {
+          name: 'DaemonHttpError',
+          status: 413,
+          code: 'transcript_page_too_large',
+        }),
+      )
+      .mockResolvedValueOnce(pagedDriver);
+
+    mount(vi.fn());
+    await vi.waitFor(() => expect(latestDriver).toBe(pagedDriver));
+    expect(sdk.load).toHaveBeenCalledTimes(2);
+    expect(sdk.load).toHaveBeenNthCalledWith(1, expect.anything(), 's1');
+    expect(sdk.load).toHaveBeenNthCalledWith(2, expect.anything(), 's1', {
+      historyPageSize: 500,
+    });
+  });
+
   it('aligns config.startNewSession with the attached daemon sessionId on initial attach', async () => {
     const sessionData = { conversation: { messages: [] } };
     const loadSession = vi.fn().mockResolvedValue(sessionData);

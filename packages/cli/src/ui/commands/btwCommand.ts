@@ -4,69 +4,96 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { Config } from '@qwen-code/qwen-code-core';
 import type {
   CommandContext,
   SlashCommand,
   SlashCommandActionReturn,
 } from './types.js';
 import { CommandKind } from './types.js';
-import { MessageType } from '../types.js';
-import type { HistoryItemBtw } from '../types.js';
 import { t } from '../../i18n/index.js';
+import { BTW_MAX_INPUT_LENGTH } from '@qwen-code/qwen-code-core/utils/btwUtils.js';
 import {
-  BTW_MAX_INPUT_LENGTH,
-  buildBtwCacheSafeParams,
-  buildBtwPrompt,
-  runForkedAgent,
-} from '@qwen-code/qwen-code-core';
+  BtwSession,
+  getBtwSession,
+  type BtwOutcome,
+} from '@qwen-code/qwen-code-core/agents/btw-session.js';
+import { formatBtwToolCallNotice, showBtwRequest } from '../utils/btw-view.js';
+import { recordBtwUse } from '../../services/tips/index.js';
+import type { DaemonSessionControl } from '../hooks/daemon/daemon-session-state.js';
 
-function formatBtwError(error: unknown): string {
-  return t('Failed to answer btw question: {{error}}', {
-    error:
-      error instanceof Error ? error.message : String(error || 'Unknown error'),
+const daemonBtwSessions = new WeakMap<
+  DaemonSessionControl,
+  { sessionId: string; session: BtwSession }
+>();
+
+function resolveCommandBtwSession(
+  config: Config,
+  daemon?: DaemonSessionControl | null,
+): BtwSession {
+  if (!daemon?.btw) {
+    return getBtwSession(config);
+  }
+  const sessionId = config.getSessionId();
+  const existing = daemonBtwSessions.get(daemon);
+  if (existing?.sessionId === sessionId) {
+    return existing.session;
+  }
+  existing?.session.dispose();
+  const session = new BtwSession(config, async (params) => {
+    const res = await daemon.btw!(params.question, { signal: params.signal });
+    return { text: res.answer };
   });
+  daemonBtwSessions.set(daemon, { sessionId, session });
+  return session;
 }
 
-function getBtwCacheSafeParams(context: CommandContext) {
-  const { config } = context.services;
-  if (config) {
-    return buildBtwCacheSafeParams(config);
-  }
-  return null;
+function formatBtwError(error: string): string {
+  return t('Failed to answer btw question: {{error}}', { error });
 }
 
-/**
- * Run a side question using runForkedAgent (cache path).
- *
- * runForkedAgent with cacheSafeParams shares the main conversation's
- * CacheSafeParams (systemInstruction + history) so the fork sees the full
- * conversation context and benefits from prompt-cache hits. Tools are denied
- * at the per-request level (NO_TOOLS) — single-turn, text-only.
- */
-async function askBtw(
-  context: CommandContext,
-  question: string,
-  abortSignal: AbortSignal,
-): Promise<string> {
-  const { config, daemon } = context.services;
-  if (daemon?.btw) {
-    const res = await daemon.btw(question, { signal: abortSignal });
-    return res.answer || t('No response received.');
+function outcomeToMessage(outcome: BtwOutcome): SlashCommandActionReturn {
+  switch (outcome.kind) {
+    case 'answered':
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: outcome.response,
+      };
+    case 'tool-call':
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: formatBtwToolCallNotice(outcome.toolName),
+      };
+    case 'empty':
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t('No response received.'),
+      };
+    case 'unavailable':
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: formatBtwError(
+          t('No conversation context available for /btw'),
+        ),
+      };
+    case 'failed':
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: formatBtwError(outcome.error),
+      };
+    case 'cancelled':
+    default:
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: formatBtwError(t('Cancelled')),
+      };
   }
-  if (!config) throw new Error('Config not loaded');
-
-  const cacheSafeParams = getBtwCacheSafeParams(context);
-  if (!cacheSafeParams)
-    throw new Error(t('No conversation context available for /btw'));
-
-  const result = await runForkedAgent({
-    config,
-    userMessage: buildBtwPrompt(question),
-    cacheSafeParams,
-    abortSignal,
-  });
-
-  return result.text || t('No response received.');
 }
 
 export const btwCommand: SlashCommand = {
@@ -83,8 +110,18 @@ export const btwCommand: SlashCommand = {
     args: string,
   ): Promise<void | SlashCommandActionReturn> => {
     const question = args.trim();
+    const { config, daemon } = context.services;
+    const interactive =
+      (context.executionMode ?? 'interactive') === 'interactive';
 
     if (!question) {
+      const session =
+        config && interactive ? resolveCommandBtwSession(config, daemon) : null;
+      const reopenId = session?.getReopenTargetId();
+      if (session && reopenId) {
+        showBtwRequest(context.ui, session, reopenId);
+        return;
+      }
       return {
         type: 'message',
         messageType: 'error',
@@ -102,9 +139,6 @@ export const btwCommand: SlashCommand = {
       };
     }
 
-    const { config } = context.services;
-    const { ui } = context;
-
     if (!config) {
       return {
         type: 'message',
@@ -113,8 +147,7 @@ export const btwCommand: SlashCommand = {
       };
     }
 
-    const model = config.getModel();
-    if (!model && !context.services.daemon?.btw) {
+    if (!config.getModel() && !daemon?.btw) {
       return {
         type: 'message',
         messageType: 'error',
@@ -122,72 +155,16 @@ export const btwCommand: SlashCommand = {
       };
     }
 
-    const executionMode = context.executionMode ?? 'interactive';
-    if (executionMode !== 'interactive') {
-      try {
-        const answer = await askBtw(
-          context,
-          question,
-          context.abortSignal ?? new AbortController().signal,
-        );
-        return { type: 'message', messageType: 'info', content: answer };
-      } catch (error) {
-        return {
-          type: 'message',
-          messageType: 'error',
-          content: formatBtwError(error),
-        };
-      }
+    const session = resolveCommandBtwSession(config, daemon);
+    if (!interactive) {
+      const { done } = session.ask(question, { signal: context.abortSignal });
+      return outcomeToMessage(await done);
     }
 
-    // Interactive mode: use dedicated btwItem state for the fixed bottom area.
-    // This does NOT occupy pendingItem, so the main conversation is never blocked.
-    // Cancel any previous in-flight btw before starting a new one.
-    ui.cancelBtw();
-
-    const btwAbortController = new AbortController();
-    const btwSignal = btwAbortController.signal;
-    ui.btwAbortControllerRef.current = btwAbortController;
-
-    const pendingItem: HistoryItemBtw = {
-      type: MessageType.BTW,
-      btw: {
-        question,
-        answer: '',
-        isPending: true,
-      },
-    };
-    ui.setBtwItem(pendingItem);
-
-    // Fire-and-forget: runForkedAgent runs in the background so the main
-    // conversation is not blocked while waiting for the btw answer.
-    void askBtw(context, question, btwSignal)
-      .then((answer) => {
-        if (btwSignal.aborted) return;
-
-        ui.btwAbortControllerRef.current = null;
-        const completedItem: HistoryItemBtw = {
-          type: MessageType.BTW,
-          btw: {
-            question,
-            answer,
-            isPending: false,
-          },
-        };
-        ui.setBtwItem(completedItem);
-      })
-      .catch((error) => {
-        if (btwSignal.aborted) return;
-
-        ui.btwAbortControllerRef.current = null;
-        ui.setBtwItem(null);
-        ui.addItem(
-          {
-            type: MessageType.ERROR,
-            text: formatBtwError(error),
-          },
-          Date.now(),
-        );
-      });
+    // The request runs in the session store, so the main conversation is not
+    // blocked and a newer /btw does not cancel this one.
+    recordBtwUse();
+    const { id } = session.ask(question);
+    showBtwRequest(context.ui, session, id);
   },
 };

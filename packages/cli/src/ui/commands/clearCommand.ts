@@ -98,8 +98,11 @@ export const clearCommand: SlashCommand = {
         }
       }
 
+      const interactiveMods = getInteractiveModSession(config);
+      interactiveMods?.invalidateTools();
       const newSessionId = config.startNewSession();
-      await getInteractiveModSession(config)?.syncSession('clear');
+      // In ACP, notify the session of the switch before yielding to old work.
+      if (interactiveMods) await interactiveMods.syncSession('clear');
 
       // Reset UI telemetry metrics for the new session
       uiTelemetryService.reset();
@@ -118,7 +121,7 @@ export const clearCommand: SlashCommand = {
       }
 
       // Clear UI first for immediate responsiveness
-      context.ui.clear();
+      context.ui.clear(newSessionId);
 
       const llmClient = config.getLlmClient();
       if (llmClient) {

@@ -653,6 +653,8 @@ export class BackgroundAgentResumeService {
           )
         ) {
           retainedStateBlockedReason = TRANSCRIPT_IDENTITY_BLOCKED_REASON;
+        } else if (meta.resumeBlockedReason) {
+          retainedStateBlockedReason = meta.resumeBlockedReason;
         } else if (
           meta.isolation === 'container' ||
           meta.executionBackend !== undefined
@@ -1011,6 +1013,10 @@ export class BackgroundAgentResumeService {
       );
       return undefined;
     }
+    if (meta.resumeBlockedReason) {
+      entry.resumeBlockedReason = meta.resumeBlockedReason;
+      return undefined;
+    }
     if (meta.isolation === 'container' || meta.executionBackend !== undefined) {
       entry.resumeBlockedReason = CONTAINER_EXECUTION_BLOCKED_REASON;
       return undefined;
@@ -1356,6 +1362,8 @@ export class BackgroundAgentResumeService {
       registry.register({
         ...existing,
         status: 'running',
+        // The replacement runtime uses the session's current workspace.
+        workspacePinned: false,
         abortController: bgAbortController,
         endTime: undefined,
         result: undefined,
@@ -1654,6 +1662,7 @@ export class BackgroundAgentResumeService {
         subagentType: target.agentName,
         isBackgrounded: true,
         status: 'running',
+        workspacePinned: false,
         abortController: bgAbortController,
         endTime: undefined,
         result: undefined,
@@ -2588,10 +2597,7 @@ export class BackgroundAgentResumeService {
         );
 
         const typedStopOutput = stopHookOutput as StopHookOutput | undefined;
-        if (
-          !typedStopOutput?.isBlockingDecision() &&
-          !typedStopOutput?.shouldStopExecution()
-        ) {
+        if (!typedStopOutput?.isBlockingDecision()) {
           return undefined;
         }
 

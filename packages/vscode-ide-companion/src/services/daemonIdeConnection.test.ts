@@ -81,7 +81,8 @@ class EventQueue implements AsyncGenerator<DaemonIdeEvent> {
   }
 }
 
-interface FakeSession extends DaemonIdeSessionClient {
+interface FakeSession extends Omit<DaemonIdeSessionClient, 'lastEventId'> {
+  lastEventId: number | undefined;
   prompt: ReturnType<typeof vi.fn>;
   cancel: ReturnType<typeof vi.fn>;
   setModel: ReturnType<typeof vi.fn>;
@@ -261,6 +262,17 @@ describe('DaemonIdeConnection', () => {
     await connection.sendPrompt(blocks);
     expect(session.prompt).toHaveBeenLastCalledWith(
       { prompt: blocks },
+      expect.any(AbortSignal),
+    );
+
+    await connection.sendPrompt(blocks, {
+      submittedPrompt: 'inspect the original input',
+    });
+    expect(session.prompt).toHaveBeenLastCalledWith(
+      {
+        prompt: blocks,
+        _meta: { 'qwen.submittedPrompt': 'inspect the original input' },
+      },
       expect.any(AbortSignal),
     );
 

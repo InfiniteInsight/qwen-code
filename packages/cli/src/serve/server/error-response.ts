@@ -23,6 +23,11 @@ import {
 import type { Response } from 'express';
 import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
+import { GeneratedUiStateError } from '@qwen-code/qwen-code-core/services/generated-ui-state.js';
+import {
+  SessionArtifactLibraryError,
+  SessionStorageEntryError,
+} from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   AcpChildCapacityExceededError,
@@ -64,6 +69,7 @@ import {
   WorkspaceMismatchError,
   WorkspaceDrainingError,
   TotalSessionLimitExceededError,
+  SystemOverloadedError,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
 import { workflowRequestErrorStatus } from '../workflow-errors.js';
@@ -293,6 +299,18 @@ export function sendBridgeError(
     });
     return;
   }
+  if (err instanceof GeneratedUiStateError) {
+    const status =
+      err.code === 'state_unavailable'
+        ? 503
+        : err.code === 'state_card_limit'
+          ? 409
+          : 400;
+    if (status >= 500) reportBridgeError(err, ctx, daemonLog);
+    else recordExpectedBridgeError(err, ctx, daemonLog);
+    res.status(status).json({ error: err.message, code: err.code });
+    return;
+  }
   const sourceErrorKind =
     err instanceof SessionSourceError
       ? err.code
@@ -508,6 +526,20 @@ export function sendBridgeError(
       .json({ error: err.message, code: err.code });
     return;
   }
+  if (err instanceof SessionArtifactLibraryError) {
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    res.status(409).json({ error: err.message, code: err.code });
+    return;
+  }
+  if (err instanceof SessionStorageEntryError) {
+    const foreign = err.reason === 'foreign_project';
+    res.status(foreign ? 404 : 409).json({
+      error: foreign ? 'Session not found.' : err.message,
+      code: foreign ? 'session_not_found' : 'session_storage_conflict',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
   if (err instanceof SessionWriterError) {
     res.status(err.httpStatus).json({
       error: err.message,
@@ -575,6 +607,11 @@ export function sendBridgeError(
       sessionId: err.sessionId,
       snapshotSize: err.snapshotSize,
       maxBytes: err.maxBytes,
+      ...(err.dimension !== 'snapshot' ? { dimension: err.dimension } : {}),
+      ...(err.measuredBytes !== undefined
+        ? { measuredBytes: err.measuredBytes }
+        : {}),
+      ...(err.retryable !== undefined ? { retryable: err.retryable } : {}),
     });
     return;
   }
@@ -967,6 +1004,40 @@ export function sendBridgeError(
     });
     return;
   }
+  if (err instanceof SystemOverloadedError) {
+    const loadError = err as SystemOverloadedError & {
+      operation?: string;
+      workspaceCwd?: string;
+      sessionId?: string;
+      sourceSessionId?: string;
+    };
+    const loggedSessionId = ctx?.sessionId ?? loadError.sessionId;
+    daemonLog?.warn('load admission rejected', {
+      ...(ctx?.route ? { route: ctx.route } : {}),
+      ...(loggedSessionId ? { sessionId: loggedSessionId } : {}),
+      reason: err.reason,
+      loadRatio: err.loadRatio,
+      eventLoopLagP99Ms: err.eventLoopLagP99Ms,
+      ...(loadError.operation ? { operation: loadError.operation } : {}),
+      ...(loadError.workspaceCwd
+        ? { workspaceCwd: loadError.workspaceCwd }
+        : {}),
+      ...(loadError.sourceSessionId
+        ? { sourceSessionId: loadError.sourceSessionId }
+        : {}),
+    });
+    // Host load drains more slowly than a session slot frees, so the hint
+    // is longer than the count gates' 5s.
+    res.set('Retry-After', '15');
+    res.status(503).json({
+      error: err.message,
+      code: 'system_overloaded',
+      reason: err.reason,
+      loadRatio: err.loadRatio,
+      eventLoopLagP99Ms: err.eventLoopLagP99Ms,
+    });
+    return;
+  }
   if (err instanceof PromptQueueFullError) {
     res.set('Retry-After', '5');
     res.status(503).json({
@@ -1021,12 +1092,54 @@ export function sendBridgeError(
     const data = (err as { data?: unknown }).data;
     if (data && typeof data === 'object') {
       const kind = (data as { errorKind?: unknown }).errorKind;
+      if (kind === 'invalid_mod_row') {
+        res.status(400).json({ error: errorMessage(err), code: kind });
+        return;
+      }
+      if (kind === 'auth_type_enforced') {
+        res.status(403).json({ error: errorMessage(err), code: kind });
+        return;
+      }
       const workflowStatus = workflowRequestErrorStatus(kind);
       if (workflowStatus !== undefined) {
         res.status(workflowStatus).json({
           error: errorMessage(err),
           code: kind,
         });
+        return;
+      }
+      if (kind === 'session_history_context_unavailable') {
+        res.status(503).json({ error: errorMessage(err), code: kind });
+        return;
+      }
+      if (kind === 'message_deletion_context_unavailable') {
+        res.status(503).json({
+          error: errorMessage(err),
+          code: kind,
+          persisted: true,
+          deletedGroupIds: (data as { deletedGroupIds?: unknown })
+            .deletedGroupIds,
+          deletedPromptIds: (data as { deletedPromptIds?: unknown })
+            .deletedPromptIds,
+        });
+        return;
+      }
+      if (
+        kind === 'message_groups_conflict' ||
+        kind === 'message_history_invalid' ||
+        kind === 'invalid_message_groups' ||
+        kind === 'session_message_deletion_unsupported'
+      ) {
+        res
+          .status(
+            kind === 'message_groups_conflict' ||
+              kind === 'message_history_invalid'
+              ? 409
+              : kind === 'invalid_message_groups'
+                ? 400
+                : 422,
+          )
+          .json({ error: errorMessage(err), code: kind });
         return;
       }
       if (kind === 'session_busy') {
@@ -1196,11 +1309,15 @@ export function sendBridgeError(
         });
         return;
       }
-      if (kind === 'directory_not_found') {
+      if (
+        kind === 'directory_not_found' ||
+        (kind === 'containment_violation' &&
+          ctx?.route === 'POST /session/:id/cd')
+      ) {
         const d = data as { path?: string };
         res.status(400).json({
           error: errorMessage(err),
-          code: 'directory_not_found',
+          code: kind,
           path: d.path,
         });
         return;
@@ -1258,6 +1375,9 @@ export function sendBridgeError(
           sessionId?: string;
           snapshotSize?: number;
           maxBytes?: number;
+          dimension?: string;
+          measuredBytes?: number;
+          retryable?: boolean;
         };
         res.status(413).json({
           error: errorMessage(err),
@@ -1267,6 +1387,15 @@ export function sendBridgeError(
             ? { snapshotSize: d.snapshotSize }
             : {}),
           ...(typeof d.maxBytes === 'number' ? { maxBytes: d.maxBytes } : {}),
+          ...(typeof d.dimension === 'string' && d.dimension !== 'snapshot'
+            ? { dimension: d.dimension }
+            : {}),
+          ...(typeof d.measuredBytes === 'number'
+            ? { measuredBytes: d.measuredBytes }
+            : {}),
+          ...(typeof d.retryable === 'boolean'
+            ? { retryable: d.retryable }
+            : {}),
         });
         return;
       }
